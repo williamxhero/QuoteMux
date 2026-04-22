@@ -1,0 +1,105 @@
+﻿from __future__ import annotations
+
+from collections import defaultdict
+from datetime import date, datetime
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from quotemux.infra.config import DATALAKE_ROOT
+
+
+AUDIT_ROOT = DATALAKE_ROOT / "type=cache" / "service=fallback"
+
+
+def _serialize_value(value: object) -> object:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _serialize_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_serialize_value(item) for item in value]
+    return value
+
+
+def record_provider_event(contract_name: str, provider: str, status: str, detail: dict[str, object]) -> None:
+    day_text = datetime.now().strftime("%Y%m%d")
+    path = AUDIT_ROOT / "audit" / f"date={day_text}" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "logged_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "contract_name": contract_name,
+        "provider": provider,
+        "status": status,
+        "detail": _serialize_value(detail),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def write_stage_frame(stage_name: str, contract_name: str, identity: dict[str, str], df: pd.DataFrame) -> Path:
+    path = AUDIT_ROOT / stage_name / f"contract={contract_name}"
+    for key, value in identity.items():
+        path = path / f"{key}={value}"
+    path.mkdir(parents=True, exist_ok=True)
+    file_path = path / "data.parquet"
+    df.to_parquet(file_path, index=False)
+    return file_path
+
+
+def read_fallback_summary(day_text: str = "") -> dict[str, object]:
+    actual_day = day_text or datetime.now().strftime("%Y%m%d")
+    path = AUDIT_ROOT / "audit" / f"date={actual_day}" / "events.jsonl"
+    summary: dict[str, object] = {
+        "date": actual_day,
+        "event_count": 0,
+        "status_counts": {},
+        "provider_counts": {},
+        "contract_counts": {},
+        "conflict_count": 0,
+        "quarantine_count": 0,
+    }
+    if not path.exists():
+        return summary
+
+    status_counts: dict[str, int] = defaultdict(int)
+    provider_counts: dict[str, dict[str, int]] = {}
+    contract_counts: dict[str, dict[str, int]] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        if raw_line == "":
+            continue
+        payload = json.loads(raw_line)
+        status = str(payload.get("status", ""))
+        provider = str(payload.get("provider", ""))
+        contract_name = str(payload.get("contract_name", ""))
+        detail = payload.get("detail")
+        detail_dict = detail if isinstance(detail, dict) else {}
+        status_counts[status] += 1
+        provider_entry = provider_counts.setdefault(provider, defaultdict(int))
+        provider_entry["event_count"] += 1
+        provider_entry[status] += 1
+        if bool(detail_dict.get("provider_hit", False)):
+            provider_entry["provider_hit_count"] += 1
+        contract_entry = contract_counts.setdefault(contract_name, defaultdict(int))
+        contract_entry["event_count"] += 1
+        contract_entry[status] += 1
+        if bool(detail_dict.get("provider_hit", False)):
+            contract_entry["provider_hit_count"] += 1
+
+    summary["event_count"] = int(sum(status_counts.values()))
+    summary["status_counts"] = dict(status_counts)
+    summary["provider_counts"] = {
+        key: dict(value)
+        for key, value in sorted(provider_counts.items())
+    }
+    summary["contract_counts"] = {
+        key: dict(value)
+        for key, value in sorted(contract_counts.items())
+    }
+    summary["conflict_count"] = int(status_counts.get("conflict", 0))
+    summary["quarantine_count"] = int(status_counts.get("quarantine", 0))
+    return summary
+

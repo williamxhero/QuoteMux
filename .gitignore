@@ -1,0 +1,8 @@
+__pycache__
+/src/quotemux/sources/datalake_news
+/src/quotemux/sources/datalake
+/.pytest_cache
+/build
+/dist
+/tests
+/src/quotemux.egg-info

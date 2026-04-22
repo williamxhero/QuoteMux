@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quotemux"
+version = "0.1.0"
+description = "QuoteMux 市场数据 source runtime"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "psycopg[binary]>=3.3.3",
+    "pyarrow",
+    "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+akshare = ["akshare"]
+efinance = ["efinance"]
+mootdx = ["mootdx"]
+opentdx = ["opentdx"]
+tushare = ["tushare"]
+all = [
+    "akshare",
+    "efinance",
+    "mootdx",
+    "opentdx",
+    "tushare",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+quotemux = ["py.typed"]
