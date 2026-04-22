@@ -4,7 +4,8 @@ from datetime import timedelta
 
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem
 from quotemux.infra.common import format_date_value, parse_date_text
-from quotemux.common import ensure_limit, merge_model_lists
+from quotemux.common import ensure_limit
+from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
 
@@ -95,7 +96,8 @@ class QuoteMuxBoards:
         count: int | None,
         limit: int,
     ) -> list[BoardQuoteItem]:
-        if not self._settings.is_source_enabled("datalake"):
+        instances = self._settings.get_contract_source_instances("boards.quotes", ("datalake",))
+        if not any(item.package_id == "datalake" for item in instances):
             return []
         items = datalake.get_board_quotes(board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count)
         items = sorted(items, key=lambda item: (item.board_code, item.trade_time))
@@ -130,12 +132,18 @@ class QuoteMuxBoards:
         return datalake_reference.get_board_member_history(board_code, start_date, end_date)
 
     def get_money_flow(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
-        datalake_items = datalake.get_board_money_flow(board_code, trade_date, start_date, end_date, scope) if self._settings.is_source_enabled("datalake") else []
-        merged_items = datalake_items
-        if self._settings.is_source_enabled("tushare"):
-            for missing_start, missing_end in self._build_money_flow_requests(datalake_items, trade_date, start_date, end_date):
-                ts_items = tushare_provider.get_board_money_flow(board_code, "", missing_start, missing_end, scope)
-                merged_items = merge_model_lists(merged_items, ts_items, ("board_code", "trade_date", "scope"))
+        handlers = {
+            "datalake": ("get_board_money_flow", lambda instance: lambda missing_start, missing_end: datalake.get_board_money_flow(board_code, "", missing_start, missing_end, scope)),
+            "tushare": ("get_board_money_flow", lambda instance: lambda missing_start, missing_end: tushare_provider.get_board_money_flow(board_code, "", missing_start, missing_end, scope)),
+        }
+        merged_items, _ = run_fallback_chain_with_report(
+            "boards.money_flow",
+            [],
+            ("board_code", "trade_date", "scope"),
+            lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
+            SourceInstanceExecutor(self._settings).build_steps("boards.money_flow", handlers, ("datalake", "tushare")),
+            self._settings.get_contract_source_order("boards.money_flow", ("datalake", "tushare")),
+        )
         return sorted(merged_items, key=lambda item: (item.board_code, item.trade_date))
 
     def get_market_money_flow(self, trade_date: str, scope: str, limit: int, offset: int) -> list[BoardMoneyFlowItem]:

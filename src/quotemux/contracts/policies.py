@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from quotemux.config_runtime.models import ContractPolicyOverride
+
 
 FALLBACK_MODE_AUTO = "auto"
 FALLBACK_MODE_DEGRADED = "degraded"
@@ -20,25 +22,31 @@ CONTRACT_POLICIES = {
     "stocks.quotes.intraday": ContractPolicy(
         name="stocks.quotes.intraday",
         mode=FALLBACK_MODE_AUTO,
-        source_order=("opentdx", "efinance", "mootdx", "akshare"),
+        source_order=("datalake", "opentdx", "efinance", "mootdx", "akshare"),
         stage_namespace=("stocks", "quotes", "intraday"),
     ),
     "stocks.quotes.daily": ContractPolicy(
         name="stocks.quotes.daily",
         mode=FALLBACK_MODE_AUTO,
-        source_order=("tushare", "efinance", "mootdx", "akshare"),
+        source_order=("datalake", "tushare", "efinance", "mootdx", "akshare"),
         stage_namespace=("stocks", "quotes", "daily"),
     ),
     "stocks.daily_snapshot": ContractPolicy(
         name="stocks.daily_snapshot",
         mode=FALLBACK_MODE_AUTO,
-        source_order=("tushare", "efinance", "mootdx", "akshare"),
+        source_order=("datalake", "tushare", "efinance", "mootdx", "akshare"),
         stage_namespace=("stocks", "daily-snapshot"),
+    ),
+    "stocks.money_flow": ContractPolicy(
+        name="stocks.money_flow",
+        mode=FALLBACK_MODE_AUTO,
+        source_order=("datalake", "tushare"),
+        stage_namespace=("stocks", "money-flow"),
     ),
     "indexes.quotes.daily": ContractPolicy(
         name="indexes.quotes.daily",
         mode=FALLBACK_MODE_AUTO,
-        source_order=("tushare", "opentdx", "efinance", "mootdx", "akshare"),
+        source_order=("datalake", "tushare", "opentdx", "efinance", "mootdx", "akshare"),
         stage_namespace=("indexes", "quotes", "daily"),
     ),
     "indexes.members": ContractPolicy(
@@ -50,8 +58,14 @@ CONTRACT_POLICIES = {
     "markets.trading_calendar": ContractPolicy(
         name="markets.trading_calendar",
         mode=FALLBACK_MODE_DEGRADED,
-        source_order=("tushare", "akshare"),
+        source_order=("datalake_reference", "tushare", "akshare"),
         stage_namespace=("markets", "trading-calendar"),
+    ),
+    "boards.money_flow": ContractPolicy(
+        name="boards.money_flow",
+        mode=FALLBACK_MODE_AUTO,
+        source_order=("datalake", "tushare"),
+        stage_namespace=("boards", "money-flow"),
     ),
     "updater.stock_bar_1m": ContractPolicy(
         name="updater.stock_bar_1m",
@@ -114,6 +128,21 @@ def get_contract_policy(contract_name: str) -> ContractPolicy:
     if policy is None:
         raise KeyError(f"未知 contract: {contract_name}")
     return policy
+
+
+def list_contract_policies() -> tuple[ContractPolicy, ...]:
+    return tuple(CONTRACT_POLICIES.values())
+
+
+def list_default_contract_policies() -> tuple[ContractPolicyOverride, ...]:
+    return tuple(
+        ContractPolicyOverride(
+            contract_name=policy.name,
+            mode=policy.mode,
+            source_order=policy.source_order,
+        )
+        for policy in CONTRACT_POLICIES.values()
+    )
 
 
 def is_auto_fallback_contract(contract_name: str) -> bool:

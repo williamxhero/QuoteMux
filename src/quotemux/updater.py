@@ -8,7 +8,7 @@ import pandas as pd
 
 from platform_models import IndexQuoteItem, StockQuoteItem
 from quotemux.infra.common import index_code_to_ts, normalize_index_code, normalize_stock_code, stock_code_to_ts
-from quotemux.runtime_core.executor import ProviderStep, run_fallback_chain_with_report
+from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.runtime_core.quality import summarize_minute_completeness, validate_quote_frame
 from quotemux.markets import QuoteMuxMarkets
 from quotemux.reports import ContractReport
@@ -630,19 +630,18 @@ class QuoteMuxUpdater:
             completeness = summarize_minute_completeness(frame[frame["trade_date"] == latest_trade_date], latest_trade_date)
             return completeness["missing_bar_count"] > 0
 
-        steps: list[ProviderStep[StockQuoteItem]] = []
-        if self._settings.is_source_enabled("efinance"):
-            steps.append(ProviderStep("efinance", lambda codes, start_text, end_text: efinance_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")))
-        if self._settings.is_source_enabled("mootdx"):
-            steps.append(ProviderStep("mootdx", lambda codes, start_text, end_text: mootdx_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda codes, start_text, end_text: akshare_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")))
+        handlers = {
+            "efinance": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: efinance_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
+            "mootdx": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: mootdx_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
+            "akshare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: akshare_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
+        }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "updater.stock_bar_1m",
             base_items,
             ("code", "trade_time", "freq"),
             lambda items: [([str(request.code).zfill(6)], _trade_date_text(request.start_date), _trade_date_text(request.end_date))] if _needs_more(items) else [],
-            tuple(steps),
+            SourceInstanceExecutor(self._settings).build_steps("updater.stock_bar_1m", handlers, ("opentdx", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("updater.stock_bar_1m", ("opentdx", "efinance", "mootdx", "akshare")),
         )
         out = _stock_items_to_frame(merged_items)
         out = out[["bar_time", "open", "high", "low", "close", "volume", "amount"]]
@@ -651,8 +650,11 @@ class QuoteMuxUpdater:
         report = ContractReport.from_fallback_report("updater.stock_bar_1m", fallback_report, "seed", base_items != [])
         return out, ContractReport(
             contract_name=report.contract_name,
+            profile_id=report.profile_id,
+            profile_version=report.profile_version,
             source_hit_counts=report.source_hit_counts,
             source_request_counts=report.source_request_counts,
+            source_instance_reports=report.source_instance_reports,
             source_error_count=report.source_error_count,
             source_skipped_count=report.source_skipped_count,
             conflict_count=report.conflict_count + int(quality["duplicate_key_count"]),
@@ -671,27 +673,29 @@ class QuoteMuxUpdater:
             actual_dates = set(frame["trade_date"].dropna().tolist())
             return not expected_dates.issubset(actual_dates)
 
-        steps: list[ProviderStep[IndexQuoteItem]] = []
-        if self._settings.is_source_enabled("efinance"):
-            steps.append(ProviderStep("efinance", lambda index_codes, start_text, end_text: efinance_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)))
-        if self._settings.is_source_enabled("mootdx"):
-            steps.append(ProviderStep("mootdx", lambda index_codes, start_text, end_text: mootdx_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda index_codes, start_text, end_text: akshare_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)))
+        handlers = {
+            "efinance": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: efinance_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
+            "mootdx": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: mootdx_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
+            "akshare": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: akshare_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
+        }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "updater.index_bar_1d",
             base_items,
             ("index_code", "trade_time", "freq"),
             lambda items: [([request.index_code], _trade_date_text(request.start_date), _trade_date_text(request.end_date))] if _needs_more(items) else [],
-            tuple(steps),
+            SourceInstanceExecutor(self._settings).build_steps("updater.index_bar_1d", handlers, ("opentdx", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("updater.index_bar_1d", ("opentdx", "efinance", "mootdx", "akshare")),
         )
         out = _index_items_to_frame(merged_items)
         quality = validate_quote_frame(out.rename(columns={"trade_date": "trade_time"}), ["index_code", "trade_time"], "trade_time")
         report = ContractReport.from_fallback_report("updater.index_bar_1d", fallback_report, "seed", base_items != [])
         return out, ContractReport(
             contract_name=report.contract_name,
+            profile_id=report.profile_id,
+            profile_version=report.profile_version,
             source_hit_counts=report.source_hit_counts,
             source_request_counts=report.source_request_counts,
+            source_instance_reports=report.source_instance_reports,
             source_error_count=report.source_error_count,
             source_skipped_count=report.source_skipped_count,
             conflict_count=report.conflict_count + int(quality["duplicate_key_count"]),
@@ -740,21 +744,19 @@ class QuoteMuxUpdater:
             ready_codes = set(available.loc[available[quote_columns].notna().all(axis=1), "code"].tolist())
             return [code for code in missing_codes if code not in ready_codes]
 
-        steps: list[ProviderStep[StockQuoteItem]] = []
-        if self._settings.is_source_enabled("tushare"):
-            steps.append(ProviderStep("tushare", lambda codes, start_text, end_text: tushare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")))
-        if self._settings.is_source_enabled("efinance"):
-            steps.append(ProviderStep("efinance", lambda codes, start_text, end_text: efinance_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")))
-        if self._settings.is_source_enabled("mootdx"):
-            steps.append(ProviderStep("mootdx", lambda codes, start_text, end_text: mootdx_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda codes, start_text, end_text: akshare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")))
+        handlers = {
+            "tushare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: tushare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "efinance": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: efinance_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "mootdx": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: mootdx_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "akshare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: akshare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+        }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "updater.stock_daily_1d.ohlcva",
             base_items,
             ("code", "trade_time", "freq"),
             lambda items: [(_remaining_missing_codes(items), _trade_date_text(request.trade_date), _trade_date_text(request.trade_date))] if _remaining_missing_codes(items) else [],
-            tuple(steps),
+            SourceInstanceExecutor(self._settings).build_steps("updater.stock_daily_1d.ohlcva", handlers, ("tushare", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("updater.stock_daily_1d.ohlcva", ("tushare", "efinance", "mootdx", "akshare")),
         )
         filled_frame = _stock_items_to_frame(merged_items)
         if not filled_frame.empty:

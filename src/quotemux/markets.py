@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 
 from platform_models import AuctionItem, BlockTradeItem, ConnectActiveTop10Item, ConnectCapitalFlowItem, ConnectQuotaItem, DragonTigerInstitutionItem, DragonTigerItem, HotMoneyDetailItem, HotMoneyProfileItem, MarketCapitalFlowItem, TradingCalendarItem, TradingSessionItem
 from quotemux.infra.common import parse_date_text
-from quotemux.runtime_core.executor import ProviderStep, run_fallback_chain_with_report
+from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.common import ensure_limit
 from quotemux.reports import ContractReport
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
@@ -62,23 +62,23 @@ class QuoteMuxMarkets:
 
     def get_trading_calendar_with_report(self, request: TradingCalendarRequest) -> tuple[list[TradingCalendarItem], ContractReport]:
         actual_start, actual_end = _resolve_calendar_range(request.start_date, request.end_date)
-        datalake_items = datalake_reference.get_trading_calendar(request.exchange, actual_start, actual_end, None) if self._settings.is_source_enabled("datalake_reference") else []
-        steps: list[ProviderStep[TradingCalendarItem]] = []
-        if self._settings.is_source_enabled("tushare"):
-            steps.append(ProviderStep("tushare", lambda missing_start, missing_end: tushare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda missing_start, missing_end: akshare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)))
+        handlers = {
+            "datalake_reference": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: datalake_reference.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+            "tushare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: tushare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+            "akshare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: akshare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+        }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "markets.trading_calendar",
-            datalake_items,
+            [],
             ("exchange", "trade_date"),
-            lambda items: _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
-            tuple(steps),
+            lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
+            SourceInstanceExecutor(self._settings).build_steps("markets.trading_calendar", handlers, ("datalake_reference", "tushare", "akshare")),
+            self._settings.get_contract_source_order("markets.trading_calendar", ("datalake_reference", "tushare", "akshare")),
         )
         if request.is_open is not None:
             merged_items = [item for item in merged_items if item.is_open == request.is_open]
         sorted_items = sorted(merged_items, key=lambda item: item.trade_date)
-        report = ContractReport.from_fallback_report("markets.trading_calendar", fallback_report, "datalake_reference", datalake_items != [], degraded=True)
+        report = ContractReport.from_fallback_report("markets.trading_calendar", fallback_report, degraded=True)
         return sorted_items, report
 
     def get_previous_trading_days(self, request: PreviousTradingDaysRequest) -> list[TradingCalendarItem]:

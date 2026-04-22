@@ -6,7 +6,7 @@ import pandas as pd
 
 from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, RightsIssueItem, ShareChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteItem, StockRiskFlagItem, SurveyItem, UnlockScheduleItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
-from quotemux.runtime_core.executor import ProviderStep, run_fallback_chain_with_report
+from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
 from quotemux.reports import ContractReport
@@ -103,7 +103,7 @@ def _build_missing_date_ranges(start_date: str, end_date: str, existing_dates: s
 
 def _build_missing_quote_requests(
     codes: list[str],
-    datalake_items: list[StockQuoteItem],
+    current_items: list[StockQuoteItem],
     freq: str,
     trade_date: str,
     start_date: str,
@@ -113,14 +113,14 @@ def _build_missing_quote_requests(
     count: int | None,
 ) -> list[tuple[list[str], str, str]]:
     if trade_date == "" and start_date == "" and end_date == "" and start_time == "" and end_time == "" and count:
-        if has_enough_stock_quote_rows(datalake_items, codes, count, "code"):
+        if has_enough_stock_quote_rows(current_items, codes, count, "code"):
             return []
-        missing_codes = [code for code in codes if sum(1 for item in datalake_items if item.code == code) < count]
+        missing_codes = [code for code in codes if sum(1 for item in current_items if item.code == code) < count]
         return [(missing_codes, "", "")] if missing_codes else []
     if freq != "1d":
-        if has_enough_stock_quote_rows(datalake_items, codes, count, "code"):
+        if has_enough_stock_quote_rows(current_items, codes, count, "code"):
             return []
-        missing_codes = [code for code in codes if sum(1 for item in datalake_items if item.code == code) < (count or 1)]
+        missing_codes = [code for code in codes if sum(1 for item in current_items if item.code == code) < (count or 1)]
         if missing_codes == []:
             return []
         actual_start_date = trade_date or start_date
@@ -136,9 +136,9 @@ def _build_missing_quote_requests(
     actual_start_date = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
     actual_end_date = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
     if actual_start_date == "" and actual_end_date == "":
-        if has_enough_stock_quote_rows(datalake_items, codes, count, "code"):
+        if has_enough_stock_quote_rows(current_items, codes, count, "code"):
             return []
-        missing_codes = [code for code in codes if sum(1 for item in datalake_items if item.code == code) < (count or 1)]
+        missing_codes = [code for code in codes if sum(1 for item in current_items if item.code == code) < (count or 1)]
         return [(missing_codes, "", "")] if missing_codes else []
     if actual_start_date == "":
         actual_start_date = actual_end_date
@@ -149,7 +149,7 @@ def _build_missing_quote_requests(
     expected_trade_dates = [item.trade_date for item in trading_calendar_items]
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
-        existing_dates = {item.trade_time for item in datalake_items if item.code == code and item.freq == "1d"}
+        existing_dates = {item.trade_time for item in current_items if item.code == code and item.freq == "1d"}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
             missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
@@ -167,20 +167,30 @@ def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> lis
 
 
 def _build_steps(freq: str, request_freq: str, request_count: int | None, actual_adjust: str, settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
-    steps: list[ProviderStep[StockQuoteItem]] = []
+    handlers = {
+        "datalake": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: datalake.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "efinance": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: efinance_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "mootdx": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: mootdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "akshare": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: akshare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+    }
     if freq == "1d":
-        if settings.is_source_enabled("tushare"):
-            steps.append(ProviderStep("tushare", lambda missing_codes, missing_start, missing_end: tushare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)))
+        handlers["tushare"] = ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: tushare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust))
+        fallback_order = ("datalake", "tushare", "efinance", "mootdx", "akshare")
     else:
-        if settings.is_source_enabled("opentdx"):
-            steps.append(ProviderStep("opentdx", lambda missing_codes, missing_start, missing_end: opentdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)))
-    if settings.is_source_enabled("efinance"):
-        steps.append(ProviderStep("efinance", lambda missing_codes, missing_start, missing_end: efinance_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)))
-    if settings.is_source_enabled("mootdx"):
-        steps.append(ProviderStep("mootdx", lambda missing_codes, missing_start, missing_end: mootdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)))
-    if settings.is_source_enabled("akshare"):
-        steps.append(ProviderStep("akshare", lambda missing_codes, missing_start, missing_end: akshare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)))
-    return tuple(steps)
+        handlers["opentdx"] = ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: opentdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust))
+        fallback_order = ("datalake", "opentdx", "efinance", "mootdx", "akshare")
+    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily" if freq == "1d" else "stocks.quotes.intraday", handlers, fallback_order)
+
+
+def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
+    handlers = {
+        "datalake": ("get_stock_daily_snapshot_full", lambda instance: lambda missing_codes, request_trade_date: datalake.get_stock_daily_snapshot_full(request_trade_date)),
+        "tushare": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: tushare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "efinance": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: efinance_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "mootdx": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: mootdx_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "akshare": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: akshare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+    }
+    return SourceInstanceExecutor(settings).build_steps("stocks.daily_snapshot", handlers, ("datalake", "tushare", "efinance", "mootdx", "akshare"))
 
 
 def _indicator_codes_from_params(code: str, codes: str) -> list[str]:
@@ -223,20 +233,20 @@ class QuoteMuxStocks:
         actual_adjust = request.adjust or "none"
         request_freq = _fallback_quote_freq(actual_freq)
         request_count = _fallback_quote_count(actual_freq, request.count)
-        datalake_items = datalake.get_stock_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, actual_adjust) if self._settings.is_source_enabled("datalake") else []
         contract_name = "stocks.quotes.daily" if request_freq == "1d" else "stocks.quotes.intraday"
         merged_items, fallback_report = run_fallback_chain_with_report(
             contract_name,
-            datalake_items,
+            [],
             ("code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count),
             _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
+            self._settings.get_contract_source_order(contract_name, ("datalake", "tushare", "opentdx", "efinance", "mootdx", "akshare")),
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_stock_quotes(merged_items, actual_freq, actual_adjust)
         trimmed_items = trim_items_per_key(merged_items, "code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
-        report = ContractReport.from_fallback_report(contract_name, fallback_report, "datalake", datalake_items != [])
+        report = ContractReport.from_fallback_report(contract_name, fallback_report)
         return sorted_items[:actual_limit], report
 
     def get_daily_snapshot(self, request: StockDailySnapshotRequest) -> list[StockQuoteItem]:
@@ -251,25 +261,16 @@ class QuoteMuxStocks:
             raise ValueError("limit 瓒呭嚭鍏佽鑼冨洿")
         if request.offset < 0:
             raise ValueError("offset 涓嶈兘灏忎簬 0")
-        datalake_items = datalake.get_stock_daily_snapshot_full(actual_trade_date) if self._settings.is_source_enabled("datalake") else []
-        steps: list[ProviderStep[StockQuoteItem]] = []
-        if self._settings.is_source_enabled("tushare"):
-            steps.append(ProviderStep("tushare", lambda missing_codes, request_trade_date: tushare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")))
-        if self._settings.is_source_enabled("efinance"):
-            steps.append(ProviderStep("efinance", lambda missing_codes, request_trade_date: efinance_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")))
-        if self._settings.is_source_enabled("mootdx"):
-            steps.append(ProviderStep("mootdx", lambda missing_codes, request_trade_date: mootdx_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda missing_codes, request_trade_date: akshare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")))
         merged_items, fallback_report = run_fallback_chain_with_report(
             "stocks.daily_snapshot",
-            datalake_items,
+            [],
             ("code", "trade_time", "freq"),
-            lambda items: [(_missing_snapshot_codes(actual_trade_date, items), actual_trade_date)] if _missing_snapshot_codes(actual_trade_date, items) else [],
-            tuple(steps),
+            lambda items: [(_missing_snapshot_codes(actual_trade_date, items), actual_trade_date)] if items == [] or _missing_snapshot_codes(actual_trade_date, items) else [],
+            _build_daily_snapshot_steps(self._settings),
+            self._settings.get_contract_source_order("stocks.daily_snapshot", ("datalake", "tushare", "efinance", "mootdx", "akshare")),
         )
         sorted_items = sort_items(merged_items, ("code", "trade_time"))
-        report = ContractReport.from_fallback_report("stocks.daily_snapshot", fallback_report, "datalake", datalake_items != [])
+        report = ContractReport.from_fallback_report("stocks.daily_snapshot", fallback_report)
         return sorted_items[request.offset: request.offset + request.limit], report
 
     def _build_missing_money_flow_requests(self, items: list[StockMoneyFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[str, str]]:
@@ -295,12 +296,18 @@ class QuoteMuxStocks:
         return missing_ranges
 
     def get_money_flow(self, code: str, trade_date: str, start_date: str, end_date: str, view: str) -> list[StockMoneyFlowItem]:
-        datalake_items = datalake.get_stock_money_flow(code, trade_date, start_date, end_date, view) if self._settings.is_source_enabled("datalake") else []
-        merged_items = datalake_items
-        if self._settings.is_source_enabled("tushare"):
-            for missing_start, missing_end in self._build_missing_money_flow_requests(datalake_items, trade_date, start_date, end_date):
-                ts_items = tushare_provider.get_stock_money_flow(code, "", missing_start, missing_end, view)
-                merged_items = merge_model_lists(merged_items, ts_items, ("code", "trade_date", "view"))
+        handlers = {
+            "datalake": ("get_stock_money_flow", lambda instance: lambda missing_start, missing_end: datalake.get_stock_money_flow(code, "", missing_start, missing_end, view)),
+            "tushare": ("get_stock_money_flow", lambda instance: lambda missing_start, missing_end: tushare_provider.get_stock_money_flow(code, "", missing_start, missing_end, view)),
+        }
+        merged_items, _ = run_fallback_chain_with_report(
+            "stocks.money_flow",
+            [],
+            ("code", "trade_date", "view"),
+            lambda items: self._build_missing_money_flow_requests(items, trade_date, start_date, end_date),
+            SourceInstanceExecutor(self._settings).build_steps("stocks.money_flow", handlers, ("datalake", "tushare")),
+            self._settings.get_contract_source_order("stocks.money_flow", ("datalake", "tushare")),
+        )
         return sorted(merged_items, key=lambda item: (item.code, item.trade_date))
 
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
@@ -547,4 +554,5 @@ class QuoteMuxStocks:
         if not self._settings.is_source_enabled("tushare_stocks"):
             return []
         return tushare_stocks.get_auctions(code, session, trade_date, start_date, end_date)
+
 

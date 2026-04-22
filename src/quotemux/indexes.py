@@ -6,7 +6,7 @@ import pandas as pd
 
 from platform_models import IndexCatalogItem, IndexMemberItem, IndexQuoteItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_datetime_value, parse_date_text
-from quotemux.runtime_core.executor import ProviderStep, run_fallback_chain_with_report
+from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
@@ -174,6 +174,27 @@ def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
     return sorted(merged.values(), key=lambda item: (item.code, item.trade_date))
 
 
+def _build_quote_steps(request_freq: str, request_count: int | None, settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexQuoteItem], ...]:
+    handlers = {
+        "datalake": ("get_index_quotes", lambda instance: lambda index_codes, missing_start, missing_end: datalake.get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count)),
+        "tushare": ("get_index_quotes", lambda instance: lambda index_codes, missing_start, missing_end: tushare_provider.get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count)),
+        "efinance": ("get_index_quotes", lambda instance: lambda index_codes, missing_start, missing_end: efinance_provider.get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count)),
+        "mootdx": ("get_index_quotes", lambda instance: lambda index_codes, missing_start, missing_end: mootdx_provider.get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count)),
+        "akshare": ("get_index_quotes", lambda instance: lambda index_codes, missing_start, missing_end: akshare_provider.get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count)),
+    }
+    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("datalake", "tushare", "opentdx", "efinance", "mootdx", "akshare"))
+
+
+def _build_member_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexMemberItem], ...]:
+    handlers = {
+        "tushare": ("get_index_members", lambda instance: lambda request_index_code, request_trade_date: tushare_provider.get_index_members(request_index_code, request_trade_date)),
+        "efinance": ("get_index_members", lambda instance: lambda request_index_code, request_trade_date: efinance_provider.get_index_members(request_index_code, request_trade_date)),
+        "mootdx": ("get_index_members", lambda instance: lambda request_index_code, request_trade_date: mootdx_provider.get_index_members(request_index_code, request_trade_date)),
+        "akshare": ("get_index_members", lambda instance: lambda request_index_code, request_trade_date: akshare_provider.get_index_members(request_index_code, request_trade_date)),
+    }
+    return SourceInstanceExecutor(settings).build_steps("indexes.members", handlers, ("tushare", "efinance", "mootdx", "akshare"))
+
+
 class QuoteMuxIndexes:
     def __init__(self, settings: QuoteMuxSettings) -> None:
         self._settings = settings
@@ -181,9 +202,9 @@ class QuoteMuxIndexes:
     def get_catalog(self, category: str, market: str, publisher: str, status: str, limit: int, offset: int) -> list[IndexCatalogItem]:
         actual_limit = ensure_limit(limit)
         actual_market = _normalize_catalog_market(market)
-        datalake_items = datalake_reference.get_index_catalog(category, actual_market, publisher, status, actual_limit + offset, 0) if self._settings.is_source_enabled("datalake_reference") else []
+        reference_items = datalake_reference.get_index_catalog(category, actual_market, publisher, status, actual_limit + offset, 0) if self._settings.is_source_enabled("datalake_reference") else []
         ts_items = tushare_provider.get_index_catalog("", category, actual_market, publisher, status) if self._settings.is_source_enabled("tushare") else []
-        merged_items = merge_model_lists(datalake_items, ts_items, ("index_code",))
+        merged_items = merge_model_lists(reference_items, ts_items, ("index_code",))
         filtered_items = _filter_catalog_items(merged_items, category, actual_market, publisher, status)
         return sorted(filtered_items, key=lambda item: item.index_code)[offset: offset + actual_limit]
 
@@ -204,28 +225,19 @@ class QuoteMuxIndexes:
         actual_freq = request.freq or "1d"
         request_freq = _fallback_quote_freq(actual_freq)
         request_count = _fallback_quote_count(actual_freq, request.count)
-        datalake_items = datalake.get_index_quotes(request.index_codes, request_freq, request.trade_date, request.start_date, request.end_date, request_count) if self._settings.is_source_enabled("datalake") else []
-        steps: list[ProviderStep[IndexQuoteItem]] = []
-        if self._settings.is_source_enabled("tushare"):
-            steps.append(ProviderStep("tushare", lambda missing_codes, missing_start, missing_end: tushare_provider.get_index_quotes(missing_codes, request_freq, "", missing_start, missing_end, request_count)))
-        if self._settings.is_source_enabled("efinance"):
-            steps.append(ProviderStep("efinance", lambda missing_codes, missing_start, missing_end: efinance_provider.get_index_quotes(missing_codes, request_freq, "", missing_start, missing_end, request_count)))
-        if self._settings.is_source_enabled("mootdx"):
-            steps.append(ProviderStep("mootdx", lambda missing_codes, missing_start, missing_end: mootdx_provider.get_index_quotes(missing_codes, request_freq, "", missing_start, missing_end, request_count)))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda missing_codes, missing_start, missing_end: akshare_provider.get_index_quotes(missing_codes, request_freq, "", missing_start, missing_end, request_count)))
         merged_items, fallback_report = run_fallback_chain_with_report(
             "indexes.quotes.daily",
-            datalake_items,
+            [],
             ("index_code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count),
-            tuple(steps),
+            _build_quote_steps(request_freq, request_count, self._settings),
+            self._settings.get_contract_source_order("indexes.quotes.daily", ("datalake", "tushare", "opentdx", "efinance", "mootdx", "akshare")),
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_index_quotes(merged_items, actual_freq)
         trimmed_items = trim_items_per_key(merged_items, "index_code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("index_code", "trade_time"))
-        report = ContractReport.from_fallback_report("indexes.quotes.daily", fallback_report, "datalake", datalake_items != [])
+        report = ContractReport.from_fallback_report("indexes.quotes.daily", fallback_report)
         return sorted_items[:actual_limit], report
 
     def get_members(self, request: IndexMembersRequest) -> list[IndexMemberItem]:
@@ -233,26 +245,20 @@ class QuoteMuxIndexes:
         return items
 
     def get_members_with_report(self, request: IndexMembersRequest) -> tuple[list[IndexMemberItem], ContractReport]:
-        base_items = tushare_provider.get_index_members(request.index_code, request.trade_date) if self._settings.is_source_enabled("tushare") else []
-        steps: list[ProviderStep[IndexMemberItem]] = []
-        if self._settings.is_source_enabled("efinance"):
-            steps.append(ProviderStep("efinance", lambda request_index_code, request_trade_date: efinance_provider.get_index_members(request_index_code, request_trade_date)))
-        if self._settings.is_source_enabled("mootdx"):
-            steps.append(ProviderStep("mootdx", lambda request_index_code, request_trade_date: mootdx_provider.get_index_members(request_index_code, request_trade_date)))
-        if self._settings.is_source_enabled("akshare"):
-            steps.append(ProviderStep("akshare", lambda request_index_code, request_trade_date: akshare_provider.get_index_members(request_index_code, request_trade_date)))
         merged_items, fallback_report = run_fallback_chain_with_report(
             "indexes.members",
-            base_items,
+            [],
             ("index_code", "code"),
             lambda current_items: [(request.index_code, request.trade_date)] if current_items == [] else [],
-            tuple(steps),
+            _build_member_steps(self._settings),
+            self._settings.get_contract_source_order("indexes.members", ("tushare", "efinance", "mootdx", "akshare")),
         )
         normalized_items = _merge_index_members(merged_items)
         if normalized_items == []:
-            return [], ContractReport.from_fallback_report("indexes.members", fallback_report, "tushare", base_items != [], degraded=True)
+            return [], ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
         name_map = datalake_reference.get_stock_names([item.code for item in normalized_items]) if self._settings.is_source_enabled("datalake_reference") else {}
         result = [IndexMemberItem(**{**item.model_dump(), "name": name_map.get(item.code, item.name)}) for item in normalized_items]
-        report = ContractReport.from_fallback_report("indexes.members", fallback_report, "tushare", base_items != [], degraded=True)
+        report = ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
         return result, report
+
 

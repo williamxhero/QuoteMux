@@ -58,6 +58,7 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
         "event_count": 0,
         "status_counts": {},
         "provider_counts": {},
+        "source_instance_counts": {},
         "contract_counts": {},
         "conflict_count": 0,
         "quarantine_count": 0,
@@ -67,6 +68,7 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
 
     status_counts: dict[str, int] = defaultdict(int)
     provider_counts: dict[str, dict[str, int]] = {}
+    source_instance_counts: dict[str, dict[str, object]] = {}
     contract_counts: dict[str, dict[str, int]] = {}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         if raw_line == "":
@@ -83,6 +85,35 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
         provider_entry[status] += 1
         if bool(detail_dict.get("provider_hit", False)):
             provider_entry["provider_hit_count"] += 1
+        package_id = str(detail_dict.get("package_id", provider))
+        source_instance_id = str(detail_dict.get("source_instance_id", provider))
+        handler = str(detail_dict.get("handler", ""))
+        profile_id = str(detail_dict.get("profile_id", ""))
+        profile_version = str(detail_dict.get("profile_version", ""))
+        instance_key = "|".join([profile_id, contract_name, package_id, source_instance_id, handler])
+        instance_entry = source_instance_counts.setdefault(
+            instance_key,
+            {
+                "profile_id": profile_id,
+                "profile_version": profile_version,
+                "contract_name": contract_name,
+                "package_id": package_id,
+                "source_instance_id": source_instance_id,
+                "handler": handler,
+                "event_count": 0,
+                "request_count": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "elapsed_ms": 0.0,
+            },
+        )
+        instance_entry["event_count"] = int(instance_entry["event_count"]) + 1
+        instance_entry["request_count"] = int(instance_entry["request_count"]) + int(detail_dict.get("request_count", 0))
+        if status == "success":
+            instance_entry["success_count"] = int(instance_entry["success_count"]) + int(detail_dict.get("request_count", 0))
+        if status == "error":
+            instance_entry["error_count"] = int(instance_entry["error_count"]) + 1
+        instance_entry["elapsed_ms"] = round(float(instance_entry["elapsed_ms"]) + float(detail_dict.get("elapsed_ms", 0.0)), 3)
         contract_entry = contract_counts.setdefault(contract_name, defaultdict(int))
         contract_entry["event_count"] += 1
         contract_entry[status] += 1
@@ -94,6 +125,10 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
     summary["provider_counts"] = {
         key: dict(value)
         for key, value in sorted(provider_counts.items())
+    }
+    summary["source_instance_counts"] = {
+        key: value
+        for key, value in sorted(source_instance_counts.items())
     }
     summary["contract_counts"] = {
         key: dict(value)
