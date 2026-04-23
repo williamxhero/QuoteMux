@@ -10,9 +10,9 @@ from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
 
 
-datalake = SourceProxy("datalake")
-datalake_reference = SourceProxy("datalake_reference")
-tushare_provider = SourceProxy("tushare")
+_datalake = SourceProxy("datalake")
+_datalake_reference = SourceProxy("datalake_reference")
+_tushare_provider = SourceProxy("tushare")
 
 
 def _build_missing_date_ranges(start_date: str, end_date: str, existing_dates: set[str]) -> list[tuple[str, str]]:
@@ -76,7 +76,7 @@ class QuoteMuxBoards:
             actual_end_date = actual_start_date
         expected_trade_dates = []
         if self._settings.is_source_enabled("datalake_reference"):
-            trading_calendar_items = datalake_reference.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
+            trading_calendar_items = _datalake_reference.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
             expected_trade_dates = [item.trade_date for item in trading_calendar_items]
         existing_dates = {item.trade_date for item in items}
         missing_ranges = _build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
@@ -99,7 +99,7 @@ class QuoteMuxBoards:
         instances = self._settings.get_contract_source_instances("boards.quotes", ("datalake",))
         if not any(item.package_id == "datalake" for item in instances):
             return []
-        items = datalake.get_board_quotes(board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count)
+        items = _datalake.get_board_quotes(board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count)
         items = sorted(items, key=lambda item: (item.board_code, item.trade_time))
         if count:
             grouped: dict[str, list[BoardQuoteItem]] = {}
@@ -114,27 +114,27 @@ class QuoteMuxBoards:
     def get_catalog(self, category: str, market: str, status: str, limit: int, offset: int) -> list[BoardCatalogItem]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_board_catalog(category, market, status, ensure_limit(limit), offset)
+        return _datalake_reference.get_board_catalog(category, market, status, ensure_limit(limit), offset)
 
     def get_profile(self, board_code: str) -> BoardCatalogItem | None:
         if not self._settings.is_source_enabled("datalake_reference"):
             return None
-        return datalake_reference.get_board_profile(board_code)
+        return _datalake_reference.get_board_profile(board_code)
 
     def get_members(self, board_code: str, trade_date: str) -> list[BoardMemberItem]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_board_members(board_code, trade_date)
+        return _datalake_reference.get_board_members(board_code, trade_date)
 
     def get_member_history(self, board_code: str, start_date: str, end_date: str) -> list[BoardMemberHistoryItem]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_board_member_history(board_code, start_date, end_date)
+        return _datalake_reference.get_board_member_history(board_code, start_date, end_date)
 
     def get_money_flow(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
         handlers = {
-            "datalake": ("get_board_money_flow", lambda instance: lambda missing_start, missing_end: datalake.get_board_money_flow(board_code, "", missing_start, missing_end, scope)),
-            "tushare": ("get_board_money_flow", lambda instance: lambda missing_start, missing_end: tushare_provider.get_board_money_flow(board_code, "", missing_start, missing_end, scope)),
+            "datalake": ("get_board_money_flow", lambda instance: lambda missing_start, missing_end: _datalake.get_board_money_flow(board_code, "", missing_start, missing_end, scope)),
+            "tushare": ("get_board_money_flow", lambda instance: lambda missing_start, missing_end: _tushare_provider.get_board_money_flow(board_code, "", missing_start, missing_end, scope)),
         }
         merged_items, _ = run_fallback_chain_with_report(
             "boards.money_flow",
@@ -149,10 +149,14 @@ class QuoteMuxBoards:
     def get_market_money_flow(self, trade_date: str, scope: str, limit: int, offset: int) -> list[BoardMoneyFlowItem]:
         if not self._settings.is_source_enabled("datalake"):
             return []
-        return datalake.get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset)
+        return _datalake.get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset)
 
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_board_categories(parent_code, level)
+        return _datalake_reference.get_board_categories(parent_code, level)
+
+
+
+
 

@@ -27,12 +27,12 @@ except Exception:
 
 
 DEFAULT_TS_DAILY_CLOSE_TIME = time(15, 0)
-akshare_provider = SourceProxy("akshare")
-datalake_reference = SourceProxy("datalake_reference")
-efinance_provider = SourceProxy("efinance")
-mootdx_provider = SourceProxy("mootdx")
-opentdx_provider = SourceProxy("opentdx")
-tushare_provider = SourceProxy("tushare")
+_akshare_provider = SourceProxy("akshare")
+_datalake_reference = SourceProxy("datalake_reference")
+_efinance_provider = SourceProxy("efinance")
+_mootdx_provider = SourceProxy("mootdx")
+_opentdx_provider = SourceProxy("opentdx")
+_tushare_provider = SourceProxy("tushare")
 INDEX_NAME_MAP = {
     "SHSE.000001": "涓婅瘉鎸囨暟",
     "SZSE.399107": "娣辫瘉锛℃寚",
@@ -209,7 +209,7 @@ def _call_opentdx(callback):
 
 
 def _expected_trade_dates(start_date: date, end_date: date) -> set[date]:
-    items = datalake_reference.get_trading_calendar("SSE", _trade_date_text(start_date), _trade_date_text(end_date), True)
+    items = _datalake_reference.get_trading_calendar("SSE", _trade_date_text(start_date), _trade_date_text(end_date), True)
     return {pd.to_datetime(item.trade_date).date() for item in items}
 
 
@@ -577,7 +577,7 @@ class QuoteMuxUpdater:
     def fetch_stock_minute_bars_seed(self, code: str, start_date: date, end_date: date) -> pd.DataFrame:
         if start_date > end_date or not self._settings.is_source_enabled("opentdx"):
             return pd.DataFrame(columns=["bar_time", "open", "high", "low", "close", "volume", "amount"])
-        items = opentdx_provider.get_stock_quotes([normalize_stock_code(code)], "1m", "", _trade_date_text(start_date), _trade_date_text(end_date), "", "", None, "none")
+        items = _opentdx_provider.get_stock_quotes([normalize_stock_code(code)], "1m", "", _trade_date_text(start_date), _trade_date_text(end_date), "", "", None, "none")
         frame = _stock_items_to_frame(items)
         if frame.empty:
             return pd.DataFrame(columns=["bar_time", "open", "high", "low", "close", "volume", "amount"])
@@ -587,7 +587,7 @@ class QuoteMuxUpdater:
     def fetch_index_daily_bars_seed(self, index_code: str, start_date: date, end_date: date) -> pd.DataFrame:
         if start_date > end_date or not self._settings.is_source_enabled("opentdx"):
             return pd.DataFrame(columns=["trade_date", "open", "high", "low", "close", "amount"])
-        items = opentdx_provider.get_index_quotes([normalize_index_code(index_code)], "1d", "", _trade_date_text(start_date), _trade_date_text(end_date), None)
+        items = _opentdx_provider.get_index_quotes([normalize_index_code(index_code)], "1d", "", _trade_date_text(start_date), _trade_date_text(end_date), None)
         frame = _index_items_to_frame(items)
         if frame.empty:
             return pd.DataFrame(columns=["trade_date", "open", "high", "low", "close", "amount"])
@@ -631,9 +631,9 @@ class QuoteMuxUpdater:
             return completeness["missing_bar_count"] > 0
 
         handlers = {
-            "efinance": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: efinance_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
-            "mootdx": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: mootdx_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
-            "akshare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: akshare_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
+            "efinance": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _efinance_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
+            "mootdx": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _mootdx_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
+            "akshare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _akshare_provider.get_stock_quotes(codes, "1m", "", start_text, end_text, "", "", None, "none")),
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "updater.stock_bar_1m",
@@ -674,9 +674,9 @@ class QuoteMuxUpdater:
             return not expected_dates.issubset(actual_dates)
 
         handlers = {
-            "efinance": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: efinance_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
-            "mootdx": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: mootdx_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
-            "akshare": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: akshare_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
+            "efinance": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: _efinance_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
+            "mootdx": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: _mootdx_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
+            "akshare": ("get_index_quotes", lambda instance: lambda index_codes, start_text, end_text: _akshare_provider.get_index_quotes(index_codes, "1d", "", start_text, end_text, None)),
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "updater.index_bar_1d",
@@ -745,10 +745,10 @@ class QuoteMuxUpdater:
             return [code for code in missing_codes if code not in ready_codes]
 
         handlers = {
-            "tushare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: tushare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
-            "efinance": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: efinance_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
-            "mootdx": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: mootdx_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
-            "akshare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: akshare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "tushare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _tushare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "efinance": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _efinance_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "mootdx": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _mootdx_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
+            "akshare": ("get_stock_quotes", lambda instance: lambda codes, start_text, end_text: _akshare_provider.get_stock_quotes(codes, "1d", start_text, "", "", "", "", None, "none")),
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "updater.stock_daily_1d.ohlcva",
@@ -770,4 +770,6 @@ class QuoteMuxUpdater:
                 work = work.drop(columns=[fallback_column])
         report = ContractReport.from_fallback_report("updater.stock_daily_1d.ohlcva", fallback_report, "seed", base_items != [])
         return work, report
+
+
 

@@ -36,4 +36,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-quotemux = ["py.typed"]
+quotemux = ["py.typed", "source_packages/builtin_manifests.json"]

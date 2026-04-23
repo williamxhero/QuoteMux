@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from platform_models import NewsEventQueryResult
 from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
 
 
-datalake_news = SourceProxy("datalake_news")
+_datalake_news = SourceProxy("datalake_news")
 
 
 class QuoteMuxNews:
@@ -28,7 +28,7 @@ class QuoteMuxNews:
     ) -> NewsEventQueryResult:
         if not self._settings.is_source_enabled("datalake_news"):
             return NewsEventQueryResult(events=[])
-        items = datalake_news.get_news_events(
+        items = _datalake_news.get_news_events(
             trade_date,
             announcement_date,
             crawl_date,
@@ -41,6 +41,9 @@ class QuoteMuxNews:
             include_content_text,
         )
         if include_sources and items != []:
-            sources_by_event_id = datalake_news.get_news_event_sources([item.event_id for item in items])
+            sources_by_event_id = _datalake_news.get_news_event_sources([item.event_id for item in items])
             items = [item.model_copy(update={"sources": sources_by_event_id.get(item.event_id, [])}) for item in items]
         return NewsEventQueryResult(events=items)
+
+
+

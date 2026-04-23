@@ -16,17 +16,13 @@ from quotemux.settings import QuoteMuxSettings
 
 
 MAX_DAILY_INDICATOR_CODES = 200
-akshare_provider = SourceProxy("akshare")
-datalake = SourceProxy("datalake")
-datalake_reference = SourceProxy("datalake_reference")
-efinance_provider = SourceProxy("efinance")
-mootdx_provider = SourceProxy("mootdx")
-opentdx_provider = SourceProxy("opentdx")
-tushare_provider = SourceProxy("tushare")
-tushare_stock_chips = SourceProxy("tushare_stock_chips")
-tushare_stock_finance = SourceProxy("tushare_stock_finance")
-tushare_stock_ownership = SourceProxy("tushare_stock_ownership")
-tushare_stocks = SourceProxy("tushare_stocks")
+_akshare_provider = SourceProxy("akshare")
+_datalake = SourceProxy("datalake")
+_datalake_reference = SourceProxy("datalake_reference")
+_efinance_provider = SourceProxy("efinance")
+_mootdx_provider = SourceProxy("mootdx")
+_opentdx_provider = SourceProxy("opentdx")
+_tushare_provider = SourceProxy("tushare")
 
 
 def _fallback_quote_freq(freq: str) -> str:
@@ -145,7 +141,7 @@ def _build_missing_quote_requests(
     if actual_end_date == "":
         actual_end_date = actual_start_date
     expected_trade_dates = []
-    trading_calendar_items = datalake_reference.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
+    trading_calendar_items = _datalake_reference.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
     expected_trade_dates = [item.trade_date for item in trading_calendar_items]
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
@@ -159,7 +155,7 @@ def _build_missing_quote_requests(
 
 
 def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> list[str]:
-    expected_codes = datalake_reference.get_stock_active_codes(trade_date)
+    expected_codes = _datalake_reference.get_stock_active_codes(trade_date)
     if expected_codes == []:
         return []
     existing_codes = {item.code for item in items if item.trade_time == trade_date and item.freq == "1d"}
@@ -168,27 +164,27 @@ def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> lis
 
 def _build_steps(freq: str, request_freq: str, request_count: int | None, actual_adjust: str, settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
     handlers = {
-        "datalake": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: datalake.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
-        "efinance": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: efinance_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
-        "mootdx": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: mootdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
-        "akshare": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: akshare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "datalake": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: _datalake.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "efinance": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: _efinance_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "mootdx": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: _mootdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
+        "akshare": ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: _akshare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust)),
     }
     if freq == "1d":
-        handlers["tushare"] = ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: tushare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust))
+        handlers["tushare"] = ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: _tushare_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust))
         fallback_order = ("datalake", "tushare", "efinance", "mootdx", "akshare")
     else:
-        handlers["opentdx"] = ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: opentdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust))
+        handlers["opentdx"] = ("get_stock_quotes", lambda instance: lambda missing_codes, missing_start, missing_end: _opentdx_provider.get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust))
         fallback_order = ("datalake", "opentdx", "efinance", "mootdx", "akshare")
     return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily" if freq == "1d" else "stocks.quotes.intraday", handlers, fallback_order)
 
 
 def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
     handlers = {
-        "datalake": ("get_stock_daily_snapshot_full", lambda instance: lambda missing_codes, request_trade_date: datalake.get_stock_daily_snapshot_full(request_trade_date)),
-        "tushare": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: tushare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
-        "efinance": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: efinance_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
-        "mootdx": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: mootdx_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
-        "akshare": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: akshare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "datalake": ("get_stock_daily_snapshot_full", lambda instance: lambda missing_codes, request_trade_date: _datalake.get_stock_daily_snapshot_full(request_trade_date)),
+        "tushare": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: _tushare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "efinance": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: _efinance_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "mootdx": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: _mootdx_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
+        "akshare": ("get_stock_quotes", lambda instance: lambda missing_codes, request_trade_date: _akshare_provider.get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")),
     }
     return SourceInstanceExecutor(settings).build_steps("stocks.daily_snapshot", handlers, ("datalake", "tushare", "efinance", "mootdx", "akshare"))
 
@@ -287,7 +283,7 @@ class QuoteMuxStocks:
             actual_end_date = actual_start_date
         expected_trade_dates = []
         if self._settings.is_source_enabled("datalake_reference"):
-            trading_calendar_items = datalake_reference.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
+            trading_calendar_items = _datalake_reference.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
             expected_trade_dates = [item.trade_date for item in trading_calendar_items]
         existing_dates = {item.trade_date for item in items}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
@@ -297,8 +293,8 @@ class QuoteMuxStocks:
 
     def get_money_flow(self, code: str, trade_date: str, start_date: str, end_date: str, view: str) -> list[StockMoneyFlowItem]:
         handlers = {
-            "datalake": ("get_stock_money_flow", lambda instance: lambda missing_start, missing_end: datalake.get_stock_money_flow(code, "", missing_start, missing_end, view)),
-            "tushare": ("get_stock_money_flow", lambda instance: lambda missing_start, missing_end: tushare_provider.get_stock_money_flow(code, "", missing_start, missing_end, view)),
+            "datalake": ("get_stock_money_flow", lambda instance: lambda missing_start, missing_end: _datalake.get_stock_money_flow(code, "", missing_start, missing_end, view)),
+            "tushare": ("get_stock_money_flow", lambda instance: lambda missing_start, missing_end: _tushare_provider.get_stock_money_flow(code, "", missing_start, missing_end, view)),
         }
         merged_items, _ = run_fallback_chain_with_report(
             "stocks.money_flow",
@@ -313,68 +309,68 @@ class QuoteMuxStocks:
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
         if not self._settings.is_source_enabled("tushare"):
             return []
-        ts_items = tushare_provider.get_stock_financial_statements(codes, report_period, start_period, end_period, report_type)
+        ts_items = _tushare_provider.get_stock_financial_statements(codes, report_period, start_period, end_period, report_type)
         return sorted(ts_items, key=lambda item: (item.code, item.report_period, item.announce_date, item.report_type))
 
     def get_finance_indicators(self, code: str, codes: str, report_period: str, start_period: str, end_period: str) -> list[StockFinanceIndicatorItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_stock_finance_indicators(code, codes, report_period, start_period, end_period)
+        return _tushare_provider.get_stock_finance_indicators(code, codes, report_period, start_period, end_period)
 
     def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int) -> list[StockBasicInfo]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_stock_catalog(codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset)
+        return _datalake_reference.get_stock_catalog(codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset)
 
     def get_archive(self, trade_date: str, code: str, name: str, industry: str, area: str, limit: int, offset: int) -> list[StockArchiveItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_stock_archive(trade_date, code, name, industry, area, ensure_limit(limit), offset)
+        return _tushare_provider.get_stock_archive(trade_date, code, name, industry, area, ensure_limit(limit), offset)
 
     def get_basic(self, code: str) -> StockBasicInfo | None:
         if not self._settings.is_source_enabled("datalake_reference"):
             return None
-        return datalake_reference.get_stock_basic(code)
+        return _datalake_reference.get_stock_basic(code)
 
     def get_profile(self, code: str) -> StockProfileItem | None:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return None
-        return tushare_stocks.get_company_profile(code)
+        return _tushare_provider.get_company_profile(code)
 
     def get_name_history(self, code: str, start_date: str, end_date: str) -> list[NameHistoryItem]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_stock_name_history(code, start_date, end_date)
+        return _datalake_reference.get_stock_name_history(code, start_date, end_date)
 
     def get_managers(self, code: str) -> list[StockManagerItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_managers(code)
+        return _tushare_provider.get_managers(code)
 
     def get_management_rewards(self, code: str, start_date: str, end_date: str) -> list[ManagementRewardItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_management_rewards(code, start_date, end_date)
+        return _tushare_provider.get_management_rewards(code, start_date, end_date)
 
     def get_hl_signal(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[HLSignalItem]:
         if not self._settings.is_source_enabled("datalake_reference"):
             return []
-        return datalake_reference.get_hl_signal(code, trade_date, start_date, end_date)
+        return _datalake_reference.get_hl_signal(code, trade_date, start_date, end_date)
 
     def get_nine_turn(self, code: str, freq: str, trade_date: str, start_date: str, end_date: str) -> list[NineTurnItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_nine_turn(code, freq, trade_date, start_date, end_date)
+        return _tushare_provider.get_nine_turn(code, freq, trade_date, start_date, end_date)
 
     def get_adj_factors(self, code: str, start_date: str, end_date: str, base_date: str) -> list[AdjFactorItem]:
         if not self._settings.is_source_enabled("datalake"):
             return []
-        return datalake.get_adj_factors(code, start_date, end_date, base_date)
+        return _datalake.get_adj_factors(code, start_date, end_date, base_date)
 
     def get_ah_comparisons(self, code: str, trade_date: str, start_date: str, end_date: str, limit: int, offset: int) -> list[StockAHComparisonItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_stock_ah_comparisons(code, trade_date, start_date, end_date, ensure_limit(limit), offset)
+        return _tushare_provider.get_stock_ah_comparisons(code, trade_date, start_date, end_date, ensure_limit(limit), offset)
 
     def _resolve_indicator_request(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> tuple[list[str], str, str, str]:
         actual_codes = _indicator_codes_from_params(code, codes)
@@ -391,168 +387,172 @@ class QuoteMuxStocks:
         return [], actual_trade_date, "", ""
 
     def get_daily_basic(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[StockDailyBasicItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
         actual_codes, actual_trade_date, actual_start, actual_end = self._resolve_indicator_request(code, codes, trade_date, start_date, end_date)
         if actual_codes == []:
-            items = tushare_stocks.get_stock_daily_basic("", "", actual_trade_date, "", "")
+            items = _tushare_provider.get_stock_daily_basic("", "", actual_trade_date, "", "")
             return sorted(items, key=lambda item: (item.code, item.trade_date))
-        ts_items = tushare_stocks.get_stock_daily_basic(code, codes, actual_trade_date, actual_start, actual_end)
+        ts_items = _tushare_provider.get_stock_daily_basic(code, codes, actual_trade_date, actual_start, actual_end)
         return sorted(ts_items, key=lambda item: (item.code, item.trade_date))
 
     def get_daily_valuation(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[StockDailyValuationItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
         actual_codes, actual_trade_date, actual_start, actual_end = self._resolve_indicator_request(code, codes, trade_date, start_date, end_date)
         if actual_codes == []:
-            items = tushare_stocks.get_stock_daily_valuation("", "", actual_trade_date, "", "")
+            items = _tushare_provider.get_stock_daily_valuation("", "", actual_trade_date, "", "")
             return sorted(items, key=lambda item: (item.code, item.trade_date))
-        ts_items = tushare_stocks.get_stock_daily_valuation(code, codes, actual_trade_date, actual_start, actual_end)
+        ts_items = _tushare_provider.get_stock_daily_valuation(code, codes, actual_trade_date, actual_start, actual_end)
         return sorted(ts_items, key=lambda item: (item.code, item.trade_date))
 
     def get_daily_market_value(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[StockDailyMarketValueItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
         actual_codes, actual_trade_date, actual_start, actual_end = self._resolve_indicator_request(code, codes, trade_date, start_date, end_date)
         if actual_codes == []:
-            items = tushare_stocks.get_stock_daily_market_value("", "", actual_trade_date, "", "")
+            items = _tushare_provider.get_stock_daily_market_value("", "", actual_trade_date, "", "")
             return sorted(items, key=lambda item: (item.code, item.trade_date))
-        ts_items = tushare_stocks.get_stock_daily_market_value(code, codes, actual_trade_date, actual_start, actual_end)
+        ts_items = _tushare_provider.get_stock_daily_market_value(code, codes, actual_trade_date, actual_start, actual_end)
         return sorted(ts_items, key=lambda item: (item.code, item.trade_date))
 
     def get_risk_flags(self, trade_date: str, start_date: str, end_date: str, flag_type: str, status: str, limit: int, offset: int) -> list[StockRiskFlagItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_stock_risk_flags(trade_date, start_date, end_date, flag_type, status, ensure_limit(limit), offset)
+        return _tushare_provider.get_stock_risk_flags(trade_date, start_date, end_date, flag_type, status, ensure_limit(limit), offset)
 
     def get_premarket(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[StockPremarketItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_premarket(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_premarket(code, trade_date, start_date, end_date)
 
     def get_chip_distribution(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ChipDistributionItem]:
-        if not self._settings.is_source_enabled("tushare_stock_chips"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_chips.get_chip_distribution(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_chip_distribution(code, trade_date, start_date, end_date)
 
     def get_chip_performance(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ChipPerformanceItem]:
-        if not self._settings.is_source_enabled("tushare_stock_chips"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_chips.get_chip_performance(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_chip_performance(code, trade_date, start_date, end_date)
 
     def get_dividends(self, code: str, start_date: str, end_date: str) -> list[DividendItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_dividends(code, start_date, end_date)
+        return _tushare_provider.get_dividends(code, start_date, end_date)
 
     def get_repurchases(self, code: str, start_date: str, end_date: str) -> list[RepurchaseItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_repurchases(code, start_date, end_date)
+        return _tushare_provider.get_repurchases(code, start_date, end_date)
 
     def get_rights_issues(self, code: str, start_date: str, end_date: str) -> list[RightsIssueItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_rights_issues(code, start_date, end_date)
+        return _tushare_provider.get_rights_issues(code, start_date, end_date)
 
     def get_share_changes(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareChangeItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_share_changes(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_share_changes(code, trade_date, start_date, end_date)
 
     def get_unlock_schedules(self, code: str, unlock_date: str, start_date: str, end_date: str) -> list[UnlockScheduleItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_unlock_schedules(code, unlock_date, start_date, end_date)
+        return _tushare_provider.get_unlock_schedules(code, unlock_date, start_date, end_date)
 
     def get_audits(self, code: str, report_period: str, start_period: str, end_period: str) -> list[AuditItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_audits(code, report_period, start_period, end_period)
+        return _tushare_provider.get_audits(code, report_period, start_period, end_period)
 
     def get_disclosure_dates(self, code: str, report_period: str, start_period: str, end_period: str) -> list[DisclosureDateItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_disclosure_dates(code, report_period, start_period, end_period)
+        return _tushare_provider.get_disclosure_dates(code, report_period, start_period, end_period)
 
     def get_express(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ExpressItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_express(code, report_period, start_period, end_period)
+        return _tushare_provider.get_express(code, report_period, start_period, end_period)
 
     def get_forecasts(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ForecastItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_forecasts(code, report_period, start_period, end_period)
+        return _tushare_provider.get_forecasts(code, report_period, start_period, end_period)
 
     def get_main_business(self, code: str, report_period: str, start_period: str, end_period: str, classification: str) -> list[MainBusinessItem]:
-        if not self._settings.is_source_enabled("tushare_stock_finance"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_finance.get_main_business(code, report_period, start_period, end_period, classification)
+        return _tushare_provider.get_main_business(code, report_period, start_period, end_period, classification)
 
     def get_ccass_holdings(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[CcassHoldingItem]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_ccass_holdings(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_ccass_holdings(code, trade_date, start_date, end_date)
 
     def get_ccass_holding_details(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[CcassHoldingDetailItem]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_ccass_holding_details(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_ccass_holding_details(code, trade_date, start_date, end_date)
 
     def get_hk_connect_holdings(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[HKConnectHoldingItem]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_hk_connect_holdings(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_hk_connect_holdings(code, trade_date, start_date, end_date)
 
     def get_pledge_stats(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[PledgeStatItem]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_pledge_stats(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_pledge_stats(code, trade_date, start_date, end_date)
 
     def get_pledge_details(self, code: str, start_date: str, end_date: str, status: str) -> list[PledgeDetailItem]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_pledge_details(code, start_date, end_date, status)
+        return _tushare_provider.get_pledge_details(code, start_date, end_date, status)
 
     def get_shareholder_count(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareholderCountItem]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_shareholder_count(code, trade_date, start_date, end_date)
+        return _tushare_provider.get_shareholder_count(code, trade_date, start_date, end_date)
 
     def get_shareholder_top10(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_shareholder_top10(code, report_period, start_period, end_period, False)
+        return _tushare_provider.get_shareholder_top10(code, report_period, start_period, end_period, False)
 
     def get_shareholder_top10_float(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
-        if not self._settings.is_source_enabled("tushare_stock_ownership"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stock_ownership.get_shareholder_top10(code, report_period, start_period, end_period, True)
+        return _tushare_provider.get_shareholder_top10(code, report_period, start_period, end_period, True)
 
     def get_research_reports(self, code: str, report_date: str, start_date: str, end_date: str):
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_research_reports(code, report_date, start_date, end_date)
+        return _tushare_provider.get_research_reports(code, report_date, start_date, end_date)
 
     def get_surveys(self, code: str, survey_date: str, start_date: str, end_date: str) -> list[SurveyItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_surveys(code, survey_date, start_date, end_date)
+        return _tushare_provider.get_surveys(code, survey_date, start_date, end_date)
 
     def get_bse_code_mappings(self, old_code: str, new_code: str, status: str) -> list[BSECodeMappingItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_bse_code_mappings(old_code, new_code, status)
+        return _tushare_provider.get_bse_code_mappings(old_code, new_code, status)
 
     def get_hk_connect_targets(self, direction: str, status: str, effective_date: str) -> list[HKConnectTargetItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_hk_connect_targets(direction, status, effective_date)
+        return _tushare_provider.get_hk_connect_targets(direction, status, effective_date)
 
     def get_auctions(self, code: str, session: str, trade_date: str, start_date: str, end_date: str) -> list[AuctionItem]:
-        if not self._settings.is_source_enabled("tushare_stocks"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_stocks.get_auctions(code, session, trade_date, start_date, end_date)
+        return _tushare_provider.get_auctions(code, session, trade_date, start_date, end_date)
+
+
+
+
 
 

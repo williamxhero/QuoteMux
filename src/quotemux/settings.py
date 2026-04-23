@@ -11,12 +11,7 @@ DEFAULT_ENABLED_SOURCES = (
     "datalake_news",
     "datalake_reference",
     "local_topics",
-    "tushare_market_topics",
     "tushare",
-    "tushare_stock_chips",
-    "tushare_stock_finance",
-    "tushare_stock_ownership",
-    "tushare_stocks",
     "opentdx",
     "efinance",
     "mootdx",
@@ -58,6 +53,7 @@ class QuoteMuxSettings:
                     display_name=source_name,
                     enabled=True,
                     priority=index + 1,
+                    timeout_seconds=None,
                     config_values={},
                     secret_values={},
                     tags=(),
@@ -66,23 +62,7 @@ class QuoteMuxSettings:
                 if source_name in self.enabled_sources
             )
         snapshot = get_config_runtime().get_active_snapshot()
-        instances = snapshot.get_contract_source_instances(contract_name, fallback)
-        if instances == ():
-            return tuple(
-                SourceInstanceConfig(
-                    instance_id=f"{source_name}-default",
-                    package_id=source_name,
-                    display_name=source_name,
-                    enabled=True,
-                    priority=index + 1,
-                    config_values={},
-                    secret_values={},
-                    tags=(),
-                )
-                for index, source_name in enumerate(fallback)
-                if source_name in DEFAULT_ENABLED_SOURCES
-            )
-        return instances
+        return snapshot.get_contract_source_instances(contract_name, fallback)
 
     def list_enabled_sources(self) -> tuple[str, ...]:
         if self.enabled_sources != ():

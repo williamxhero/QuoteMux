@@ -41,6 +41,41 @@ class ContractReport:
     quarantine_count: int = 0
     degraded: bool = False
 
+    def package_reports(self) -> tuple[dict[str, object], ...]:
+        packages: dict[str, dict[str, object]] = {}
+        for item in self.source_instance_reports:
+            package = packages.get(item.package_id)
+            if package is None:
+                package = {
+                    "package_id": item.package_id,
+                    "request_count": 0,
+                    "success_count": 0,
+                    "error_count": 0,
+                    "elapsed_ms": 0.0,
+                }
+                packages[item.package_id] = package
+            package["request_count"] = int(package["request_count"]) + item.request_count
+            package["success_count"] = int(package["success_count"]) + item.success_count
+            package["error_count"] = int(package["error_count"]) + item.error_count
+            package["elapsed_ms"] = round(float(package["elapsed_ms"]) + item.elapsed_ms, 3)
+        return tuple(packages.values())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "contract_name": self.contract_name,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version,
+            "source_hit_counts": dict(self.source_hit_counts),
+            "source_request_counts": dict(self.source_request_counts),
+            "package_reports": list(self.package_reports()),
+            "source_instance_reports": [item.to_dict() for item in self.source_instance_reports],
+            "source_error_count": self.source_error_count,
+            "source_skipped_count": self.source_skipped_count,
+            "conflict_count": self.conflict_count,
+            "quarantine_count": self.quarantine_count,
+            "degraded": self.degraded,
+        }
+
     @classmethod
     def empty(cls, contract_name: str, base_source_name: str = "", base_hit: bool = False) -> ContractReport:
         source_hit_counts = {base_source_name: int(base_hit)} if base_source_name else {}

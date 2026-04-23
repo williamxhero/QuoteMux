@@ -12,11 +12,10 @@ from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
 
 
-akshare_provider = SourceProxy("akshare")
-datalake_reference = SourceProxy("datalake_reference")
-local_topics = SourceProxy("local_topics")
-tushare_market_topics = SourceProxy("tushare_market_topics")
-tushare_provider = SourceProxy("tushare")
+_akshare_provider = SourceProxy("akshare")
+_datalake_reference = SourceProxy("datalake_reference")
+_local_topics = SourceProxy("local_topics")
+_tushare_provider = SourceProxy("tushare")
 
 
 def _resolve_calendar_range(start_date: str, end_date: str) -> tuple[str, str]:
@@ -54,7 +53,7 @@ class QuoteMuxMarkets:
     def get_main_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[MarketCapitalFlowItem]:
         if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_provider.get_market_capital_flow(trade_date, start_date, end_date)
+        return _tushare_provider.get_market_capital_flow(trade_date, start_date, end_date)
 
     def get_trading_calendar(self, request: TradingCalendarRequest) -> list[TradingCalendarItem]:
         items, _ = self.get_trading_calendar_with_report(request)
@@ -63,9 +62,9 @@ class QuoteMuxMarkets:
     def get_trading_calendar_with_report(self, request: TradingCalendarRequest) -> tuple[list[TradingCalendarItem], ContractReport]:
         actual_start, actual_end = _resolve_calendar_range(request.start_date, request.end_date)
         handlers = {
-            "datalake_reference": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: datalake_reference.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
-            "tushare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: tushare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
-            "akshare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: akshare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+            "datalake_reference": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: _datalake_reference.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+            "tushare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: _tushare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+            "akshare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: _akshare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "markets.trading_calendar",
@@ -101,56 +100,59 @@ class QuoteMuxMarkets:
         return self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=f"{request.start_year}-01-01", end_date=f"{request.end_year}-12-31", is_open=None))
 
     def get_connect_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[ConnectCapitalFlowItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_connect_capital_flow(trade_date, start_date, end_date)
+        return _tushare_provider.get_connect_capital_flow(trade_date, start_date, end_date)
 
     def get_connect_quotas(self, trade_date: str, start_date: str, end_date: str, market_type: str) -> list[ConnectQuotaItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_connect_quotas(trade_date, start_date, end_date, market_type)
+        return _tushare_provider.get_connect_quotas(trade_date, start_date, end_date, market_type)
 
     def get_connect_active_top10(self, trade_date: str, start_date: str, end_date: str, market_type: str, limit: int) -> list[ConnectActiveTop10Item]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit))
+        return _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit))
 
     def get_block_trades(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[BlockTradeItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_block_trades(trade_date, start_date, end_date, code, ensure_limit(limit))
+        return _tushare_provider.get_block_trades(trade_date, start_date, end_date, code, ensure_limit(limit))
 
     def get_dragon_tiger(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_dragon_tiger(trade_date, start_date, end_date, code, ensure_limit(limit))
+        return _tushare_provider.get_dragon_tiger(trade_date, start_date, end_date, code, ensure_limit(limit))
 
     def get_dragon_tiger_institutions(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerInstitutionItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_dragon_tiger_institutions(trade_date, start_date, end_date, code, ensure_limit(limit))
+        return _tushare_provider.get_dragon_tiger_institutions(trade_date, start_date, end_date, code, ensure_limit(limit))
 
     def get_hot_money(self, name: str, tag: str, limit: int, offset: int) -> list[HotMoneyProfileItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        items = tushare_market_topics.get_hot_money_profiles(name)
+        items = _tushare_provider.get_hot_money_profiles(name)
         if tag:
             items = [item for item in items if item.tag == tag]
         return items[offset: offset + ensure_limit(limit)]
 
     def get_hot_money_details(self, trade_date: str, start_date: str, end_date: str, name: str, limit: int, offset: int) -> list[HotMoneyDetailItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        items = tushare_market_topics.get_hot_money_details(trade_date, start_date, end_date, name, ensure_limit(limit))
+        items = _tushare_provider.get_hot_money_details(trade_date, start_date, end_date, name, ensure_limit(limit))
         return items[offset: offset + ensure_limit(limit)]
 
     def get_open_auctions(self, codes: str, trade_date: str) -> list[AuctionItem]:
-        if not self._settings.is_source_enabled("tushare_market_topics"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        return tushare_market_topics.get_market_open_auctions(codes, trade_date)
+        return _tushare_provider.get_market_open_auctions(codes, trade_date)
 
     def get_sessions(self, codes: str) -> list[TradingSessionItem]:
         if not self._settings.is_source_enabled("local_topics"):
             return []
-        return local_topics.get_market_sessions(codes)
+        return _local_topics.get_market_sessions(codes)
+
+
+
 
