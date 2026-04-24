@@ -60,8 +60,10 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
         "provider_counts": {},
         "source_instance_counts": {},
         "contract_counts": {},
+        "capability_counts": {},
         "conflict_count": 0,
         "quarantine_count": 0,
+        "store_counts": {"hit": 0, "miss": 0, "write": 0},
     }
     if not path.exists():
         return summary
@@ -70,6 +72,7 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
     provider_counts: dict[str, dict[str, int]] = {}
     source_instance_counts: dict[str, dict[str, object]] = {}
     contract_counts: dict[str, dict[str, int]] = {}
+    store_counts = {"hit": 0, "miss": 0, "write": 0}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         if raw_line == "":
             continue
@@ -119,6 +122,12 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
         contract_entry[status] += 1
         if bool(detail_dict.get("provider_hit", False)):
             contract_entry["provider_hit_count"] += 1
+        if status == "store_hit":
+            store_counts["hit"] += 1
+        if status == "store_miss":
+            store_counts["miss"] += 1
+        if status == "store_write":
+            store_counts["write"] += 1
 
     summary["event_count"] = int(sum(status_counts.values()))
     summary["status_counts"] = dict(status_counts)
@@ -134,7 +143,9 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
         key: dict(value)
         for key, value in sorted(contract_counts.items())
     }
+    summary["capability_counts"] = dict(summary["contract_counts"])
     summary["conflict_count"] = int(status_counts.get("conflict", 0))
     summary["quarantine_count"] = int(status_counts.get("quarantine", 0))
+    summary["store_counts"] = store_counts
     return summary
 

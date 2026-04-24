@@ -10,12 +10,26 @@ from quotemux.reports import ContractReport
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
 from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
+from quotemux.store import load_store_result, store_result
 
 
 _akshare_provider = SourceProxy("akshare")
-_datalake_reference = SourceProxy("datalake_reference")
-_local_topics = SourceProxy("local_topics")
+_derived_core = SourceProxy("derived_core")
+_static_core = SourceProxy("static_core")
 _tushare_provider = SourceProxy("tushare")
+_datalake_ref = _static_core
+
+
+def _today_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _payloads_with_as_of_date(items: list[object]) -> list[dict[str, object]]:
+    return [{**item.model_dump(), "as_of_date": _today_text()} for item in items if hasattr(item, "model_dump")]
+
+
+def _payloads_with_request_scope(items: list[object], request_trade_date: str, request_n: int) -> list[dict[str, object]]:
+    return [{**item.model_dump(), "request_trade_date": request_trade_date, "request_n": request_n} for item in items if hasattr(item, "model_dump")]
 
 
 def _resolve_calendar_range(start_date: str, end_date: str) -> tuple[str, str]:
@@ -50,10 +64,42 @@ class QuoteMuxMarkets:
     def __init__(self, settings: QuoteMuxSettings) -> None:
         self._settings = settings
 
+    def _store_list(
+        self,
+        capability_id: str,
+        store_identity: dict[str, object],
+        model_type: type[object],
+        unique_fields: tuple[str, ...],
+        sort_fields: tuple[str, ...],
+        fetcher,
+        payload_builder=None,
+    ) -> list[object]:
+        store_items, store_read = load_store_result(capability_id, store_identity, model_type)
+        if store_read.hit:
+            return list(store_items)
+        fetched_items = list(fetcher())
+        merged_items = store_items if store_read.partial_hit else []
+        if merged_items != []:
+            from quotemux.common import merge_model_lists
+
+            merged_items = merge_model_lists(store_items, fetched_items, unique_fields)
+        else:
+            merged_items = fetched_items
+        sorted_items = sorted(merged_items, key=lambda item: tuple(getattr(item, field) for field in sort_fields)) if sort_fields else merged_items
+        payload_items = payload_builder(sorted_items) if payload_builder is not None else sorted_items
+        store_result(capability_id, store_identity, payload_items, ContractReport(contract_name=capability_id))
+        return sorted_items
+
     def get_main_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[MarketCapitalFlowItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_market_capital_flow(trade_date, start_date, end_date)
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}
+        return self._store_list(
+            "markets.indicators.main_capital_flow",
+            store_identity,
+            MarketCapitalFlowItem,
+            ("market", "trade_date"),
+            ("trade_date", "market"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_market_capital_flow(trade_date, start_date, end_date),
+        )
 
     def get_trading_calendar(self, request: TradingCalendarRequest) -> list[TradingCalendarItem]:
         items, _ = self.get_trading_calendar_with_report(request)
@@ -61,30 +107,75 @@ class QuoteMuxMarkets:
 
     def get_trading_calendar_with_report(self, request: TradingCalendarRequest) -> tuple[list[TradingCalendarItem], ContractReport]:
         actual_start, actual_end = _resolve_calendar_range(request.start_date, request.end_date)
+        store_identity = {
+            "exchange": request.exchange,
+            "start_date": actual_start,
+            "end_date": actual_end,
+            "is_open": request.is_open,
+        }
+        store_items, store_read = load_store_result("markets.calendar.trading", store_identity, TradingCalendarItem)
+        if store_read.hit:
+            if request.is_open is not None:
+                store_items = [item for item in store_items if item.is_open == request.is_open]
+            from quotemux.config_runtime.runtime import get_config_runtime
+
+            active_snapshot = get_config_runtime().get_active_snapshot()
+            return sorted(store_items, key=lambda item: item.trade_date), ContractReport(
+                contract_name="markets.calendar.trading",
+                profile_id=active_snapshot.profile_id,
+                profile_version=active_snapshot.version,
+            ).with_store_stats(hit=True)
         handlers = {
-            "datalake_reference": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: _datalake_reference.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
-            "tushare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: _tushare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
-            "akshare": ("get_trading_calendar", lambda instance: lambda missing_start, missing_end: _akshare_provider.get_trading_calendar(request.exchange, missing_start, missing_end, None)),
+            "get_trading_calendar": lambda instance: lambda missing_start, missing_end: {
+                "static_core": _static_core,
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_trading_calendar(request.exchange, missing_start, missing_end, None),
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
-            "markets.trading_calendar",
-            [],
+            "markets.calendar.trading",
+            store_items if store_read.partial_hit else [],
             ("exchange", "trade_date"),
             lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
-            SourceInstanceExecutor(self._settings).build_steps("markets.trading_calendar", handlers, ("datalake_reference", "tushare", "akshare")),
-            self._settings.get_contract_source_order("markets.trading_calendar", ("datalake_reference", "tushare", "akshare")),
+            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("static_core", "tushare", "akshare")),
+            self._settings.get_contract_source_order("markets.calendar.trading", ("static_core", "tushare", "akshare")),
         )
         if request.is_open is not None:
             merged_items = [item for item in merged_items if item.is_open == request.is_open]
         sorted_items = sorted(merged_items, key=lambda item: item.trade_date)
-        report = ContractReport.from_fallback_report("markets.trading_calendar", fallback_report, degraded=True)
+        report = ContractReport.from_fallback_report("markets.calendar.trading", fallback_report, degraded=True)
+        store_write = store_result("markets.calendar.trading", store_identity, sorted_items, report, report.quarantine_count)
+        report = report.with_store_stats(partial_hit=store_read.partial_hit, miss=store_read.status in {"miss", "skip"}, stale=store_read.status == "stale", write=store_write.status == "write")
         return sorted_items, report
 
     def get_previous_trading_days(self, request: PreviousTradingDaysRequest) -> list[TradingCalendarItem]:
+        store_identity = {
+            "exchange": request.exchange,
+            "trade_date": request.trade_date,
+            "n": request.n,
+        }
+        store_items, store_read = load_store_result("markets.calendar.trading.previous", store_identity, TradingCalendarItem)
+        if store_read.hit:
+            return list(store_items)
         items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date="", end_date=request.trade_date, is_open=True))
-        return [item for item in items if item.trade_date < request.trade_date][-request.n:]
+        result = [item for item in items if item.trade_date < request.trade_date][-request.n:]
+        store_result(
+            "markets.calendar.trading.previous",
+            store_identity,
+            _payloads_with_request_scope(result, request.trade_date, request.n),
+            ContractReport(contract_name="markets.calendar.trading.previous"),
+        )
+        return result
 
     def get_next_trading_days(self, request: NextTradingDaysRequest) -> list[TradingCalendarItem]:
+        store_identity = {
+            "exchange": request.exchange,
+            "trade_date": request.trade_date,
+            "n": request.n,
+        }
+        store_items, store_read = load_store_result("markets.calendar.trading.next", store_identity, TradingCalendarItem)
+        if store_read.hit:
+            return list(store_items)
         trade_day = parse_date_text(request.trade_date)
         end_date = ""
         if trade_day is not None:
@@ -94,53 +185,123 @@ class QuoteMuxMarkets:
                 next_year_day = date(trade_day.year + 1, 2, 28)
             end_date = next_year_day.strftime("%Y-%m-%d")
         items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=request.trade_date, end_date=end_date, is_open=True))
-        return [item for item in items if item.trade_date > request.trade_date][: request.n]
+        result = [item for item in items if item.trade_date > request.trade_date][: request.n]
+        store_result(
+            "markets.calendar.trading.next",
+            store_identity,
+            _payloads_with_request_scope(result, request.trade_date, request.n),
+            ContractReport(contract_name="markets.calendar.trading.next"),
+        )
+        return result
 
     def get_yearly_trading_calendar(self, request: YearlyTradingCalendarRequest) -> list[TradingCalendarItem]:
-        return self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=f"{request.start_year}-01-01", end_date=f"{request.end_year}-12-31", is_open=None))
+        store_identity = {
+            "exchange": request.exchange,
+            "start_year": request.start_year,
+            "end_year": request.end_year,
+        }
+        store_items, store_read = load_store_result("markets.calendar.trading.yearly", store_identity, TradingCalendarItem)
+        if store_read.hit:
+            return list(store_items)
+        result = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=f"{request.start_year}-01-01", end_date=f"{request.end_year}-12-31", is_open=None))
+        store_result("markets.calendar.trading.yearly", store_identity, result, ContractReport(contract_name="markets.calendar.trading.yearly"))
+        return result
 
     def get_connect_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[ConnectCapitalFlowItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_connect_capital_flow(trade_date, start_date, end_date)
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}
+        return self._store_list(
+            "markets.connect.capital_flow",
+            store_identity,
+            ConnectCapitalFlowItem,
+            ("market", "trade_date"),
+            ("trade_date", "market"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_connect_capital_flow(trade_date, start_date, end_date),
+        )
 
     def get_connect_quotas(self, trade_date: str, start_date: str, end_date: str, market_type: str) -> list[ConnectQuotaItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_connect_quotas(trade_date, start_date, end_date, market_type)
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "market_type": market_type}
+        return self._store_list(
+            "markets.connect.quotas",
+            store_identity,
+            ConnectQuotaItem,
+            ("market", "trade_date"),
+            ("trade_date", "market"),
+            lambda: [] if not self._settings.is_source_enabled("derived_core") else _derived_core.get_connect_quota_series(trade_date, start_date, end_date, market_type),
+        )
 
     def get_connect_active_top10(self, trade_date: str, start_date: str, end_date: str, market_type: str, limit: int) -> list[ConnectActiveTop10Item]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit))
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "market_type": market_type, "limit": limit}
+        items = self._store_list(
+            "markets.connect.active_top10",
+            store_identity,
+            ConnectActiveTop10Item,
+            ("market", "trade_date", "code", "rank"),
+            ("trade_date", "market", "rank", "code"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit)),
+        )
+        return items[: ensure_limit(limit)]
 
     def get_block_trades(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[BlockTradeItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_block_trades(trade_date, start_date, end_date, code, ensure_limit(limit))
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
+        items = self._store_list(
+            "markets.events.block_trades",
+            store_identity,
+            BlockTradeItem,
+            ("trade_date", "code", "buyer", "seller"),
+            ("trade_date", "code", "buyer", "seller"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_block_trades(trade_date, start_date, end_date, code, ensure_limit(limit)),
+        )
+        return items[: ensure_limit(limit)]
 
     def get_dragon_tiger(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_dragon_tiger(trade_date, start_date, end_date, code, ensure_limit(limit))
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
+        items = self._store_list(
+            "markets.participants.dragon_tiger",
+            store_identity,
+            DragonTigerItem,
+            ("trade_date", "code", "reason"),
+            ("trade_date", "code", "reason"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_dragon_tiger(trade_date, start_date, end_date, code, ensure_limit(limit)),
+        )
+        return items[: ensure_limit(limit)]
 
     def get_dragon_tiger_institutions(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerInstitutionItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_dragon_tiger_institutions(trade_date, start_date, end_date, code, ensure_limit(limit))
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
+        items = self._store_list(
+            "markets.participants.dragon_tiger.institutions",
+            store_identity,
+            DragonTigerInstitutionItem,
+            ("trade_date", "code", "institution_count"),
+            ("trade_date", "code"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_dragon_tiger_institutions(trade_date, start_date, end_date, code, ensure_limit(limit)),
+        )
+        return items[: ensure_limit(limit)]
 
     def get_hot_money(self, name: str, tag: str, limit: int, offset: int) -> list[HotMoneyProfileItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_hot_money_profiles(name)
+        store_identity = {"name": name, "tag": tag, "limit": limit, "offset": offset}
+        items = self._store_list(
+            "markets.participants.hot_money",
+            store_identity,
+            HotMoneyProfileItem,
+            ("name",),
+            ("name",),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_hot_money_profiles(name),
+            _payloads_with_as_of_date,
+        )
         if tag:
             items = [item for item in items if item.tag == tag]
         return items[offset: offset + ensure_limit(limit)]
 
     def get_hot_money_details(self, trade_date: str, start_date: str, end_date: str, name: str, limit: int, offset: int) -> list[HotMoneyDetailItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_hot_money_details(trade_date, start_date, end_date, name, ensure_limit(limit))
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "name": name, "limit": limit, "offset": offset}
+        items = self._store_list(
+            "markets.participants.hot_money.details",
+            store_identity,
+            HotMoneyDetailItem,
+            ("trade_date", "name", "code"),
+            ("trade_date", "name", "code"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_hot_money_details(trade_date, start_date, end_date, name, ensure_limit(limit)),
+        )
         return items[offset: offset + ensure_limit(limit)]
 
     def get_open_auctions(self, codes: str, trade_date: str) -> list[AuctionItem]:
@@ -149,9 +310,15 @@ class QuoteMuxMarkets:
         return _tushare_provider.get_market_open_auctions(codes, trade_date)
 
     def get_sessions(self, codes: str) -> list[TradingSessionItem]:
-        if not self._settings.is_source_enabled("local_topics"):
+        store_identity = {"codes": codes}
+        store_items, store_read = load_store_result("markets.trading.sessions", store_identity, TradingSessionItem)
+        if store_read.hit:
+            return store_items
+        if not self._settings.is_source_enabled("static_core"):
             return []
-        return _local_topics.get_market_sessions(codes)
+        items = _static_core.get_market_sessions(codes)
+        store_result("markets.trading.sessions", store_identity, _payloads_with_as_of_date(items), ContractReport(contract_name="markets.trading.sessions"))
+        return items
 
 
 

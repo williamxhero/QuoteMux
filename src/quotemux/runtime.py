@@ -7,7 +7,8 @@ from quotemux.news import QuoteMuxNews
 from quotemux.rankings import QuoteMuxRankings
 from quotemux.settings import QuoteMuxSettings
 from quotemux.stocks import QuoteMuxStocks
-from quotemux.updater import QuoteMuxUpdater
+from quotemux.datasets import QuoteMuxDatasets
+from quotemux.store.admin import QuoteMuxCacheAdmin
 
 
 class QuoteMux:
@@ -19,7 +20,8 @@ class QuoteMux:
         self.boards = QuoteMuxBoards(self.settings)
         self.news = QuoteMuxNews(self.settings)
         self.rankings = QuoteMuxRankings(self.settings)
-        self.updater = QuoteMuxUpdater(self.settings)
+        self.datasets = QuoteMuxDatasets(self.settings)
+        self.cache = QuoteMuxCacheAdmin(self)
 
     @classmethod
     def from_settings(cls, settings: QuoteMuxSettings | None = None) -> QuoteMux:

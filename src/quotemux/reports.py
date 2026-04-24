@@ -39,7 +39,20 @@ class ContractReport:
     source_skipped_count: int = 0
     conflict_count: int = 0
     quarantine_count: int = 0
+    store_hit_count: int = 0
+    store_partial_hit_count: int = 0
+    store_miss_count: int = 0
+    store_stale_count: int = 0
+    store_write_count: int = 0
     degraded: bool = False
+
+    @property
+    def capability_id(self) -> str:
+        return self.contract_name
+
+    @property
+    def store_hit(self) -> bool:
+        return self.store_hit_count > 0
 
     def package_reports(self) -> tuple[dict[str, object], ...]:
         packages: dict[str, dict[str, object]] = {}
@@ -62,6 +75,7 @@ class ContractReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "capability_id": self.capability_id,
             "contract_name": self.contract_name,
             "profile_id": self.profile_id,
             "profile_version": self.profile_version,
@@ -73,6 +87,12 @@ class ContractReport:
             "source_skipped_count": self.source_skipped_count,
             "conflict_count": self.conflict_count,
             "quarantine_count": self.quarantine_count,
+            "store_hit_count": self.store_hit_count,
+            "store_partial_hit_count": self.store_partial_hit_count,
+            "store_miss_count": self.store_miss_count,
+            "store_stale_count": self.store_stale_count,
+            "store_write_count": self.store_write_count,
+            "store_hit": self.store_hit,
             "degraded": self.degraded,
         }
 
@@ -123,5 +143,25 @@ class ContractReport:
             source_skipped_count=fallback_report.total_skipped_count(),
             conflict_count=fallback_report.total_conflict_count(),
             degraded=degraded,
+        )
+
+    def with_store_stats(self, *, hit: bool = False, partial_hit: bool = False, miss: bool = False, stale: bool = False, write: bool = False) -> ContractReport:
+        return ContractReport(
+            contract_name=self.contract_name,
+            profile_id=self.profile_id,
+            profile_version=self.profile_version,
+            source_hit_counts=dict(self.source_hit_counts),
+            source_request_counts=dict(self.source_request_counts),
+            source_instance_reports=self.source_instance_reports,
+            source_error_count=self.source_error_count,
+            source_skipped_count=self.source_skipped_count,
+            conflict_count=self.conflict_count,
+            quarantine_count=self.quarantine_count,
+            store_hit_count=self.store_hit_count + int(hit),
+            store_partial_hit_count=self.store_partial_hit_count + int(partial_hit),
+            store_miss_count=self.store_miss_count + int(miss),
+            store_stale_count=self.store_stale_count + int(stale),
+            store_write_count=self.store_write_count + int(write),
+            degraded=self.degraded,
         )
 

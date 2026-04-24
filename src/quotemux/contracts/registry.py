@@ -3,44 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from platform_models import IndexMemberItem, IndexQuoteItem, StockQuoteItem, TradingCalendarItem
-from quotemux.contracts.policies import get_contract_policy
-from quotemux.requests import IndexBar1dRequest, IndexMembersRequest, IndexQuotesRequest, StockBar1mRequest, StockDailyOhlcvaRepairRequest, StockDailySnapshotRequest, StockQuotesRequest, TradingCalendarRequest
-
-
-MANIFEST_CONTRACT_NAMES = (
-    "boards.money_flow",
-    "boards.quotes",
-    "boards.reference",
-    "indexes.members",
-    "indexes.quotes",
-    "indexes.quotes.daily",
-    "indexes.reference",
-    "markets.events.news",
-    "markets.topics",
-    "markets.trading.sessions",
-    "markets.trading_calendar",
-    "reference",
-    "stocks.corporate_actions",
-    "stocks.daily_snapshot",
-    "stocks.finance",
-    "stocks.finance.statements",
-    "stocks.indicators",
-    "stocks.indicators.chips",
-    "stocks.indicators.daily_basic",
-    "stocks.indicators.daily_market_value",
-    "stocks.indicators.daily_valuation",
-    "stocks.money_flow",
-    "stocks.ownership",
-    "stocks.profile",
-    "stocks.quotes",
-    "stocks.quotes.daily",
-    "stocks.quotes.intraday",
-    "stocks.research",
-    "updater",
-    "updater.index_bar_1d",
-    "updater.stock_bar_1m",
-    "updater.stock_daily_1d.ohlcva",
-)
+from quotemux.capabilities import get_capability_definition, is_known_capability_id, list_capability_definitions, list_capability_ids, normalize_capability_id
+from quotemux.contracts.strategies import allowed_merge_strategies
+from quotemux.requests import IndexMembersRequest, IndexQuotesRequest, StockDailySnapshotRequest, StockQuotesRequest, TradingCalendarRequest
 
 
 @dataclass(frozen=True)
@@ -48,63 +13,97 @@ class ContractDefinition:
     name: str
     request_type: type[object]
     result_type: type[object]
+    result_shape: str
     key_fields: tuple[str, ...]
     source_order: tuple[str, ...]
     degraded: bool
     degraded_policy: str
+    merge_strategy: str
+    allowed_merge_strategies: tuple[str, ...]
     missing_request_builder: str
+    api_paths: tuple[str, ...]
 
 
-def _build_contract_definition(
-    name: str,
-    request_type: type[object],
-    result_type: type[object],
-    key_fields: tuple[str, ...],
-    degraded: bool,
-    missing_request_builder: str,
-) -> ContractDefinition:
-    policy = get_contract_policy(name)
+_REQUEST_TYPES = {
+    "indexes.members": IndexMembersRequest,
+    "indexes.quotes.daily": IndexQuotesRequest,
+    "markets.calendar.trading": TradingCalendarRequest,
+    "markets.calendar.trading.next": TradingCalendarRequest,
+    "markets.calendar.trading.previous": TradingCalendarRequest,
+    "markets.calendar.trading.yearly": TradingCalendarRequest,
+    "stocks.quotes.daily": StockQuotesRequest,
+    "stocks.quotes.daily_snapshot": StockDailySnapshotRequest,
+    "stocks.quotes.intraday": StockQuotesRequest,
+}
+
+_RESULT_TYPES = {
+    "indexes.members": IndexMemberItem,
+    "indexes.quotes.daily": IndexQuoteItem,
+    "markets.calendar.trading": TradingCalendarItem,
+    "markets.calendar.trading.next": TradingCalendarItem,
+    "markets.calendar.trading.previous": TradingCalendarItem,
+    "markets.calendar.trading.yearly": TradingCalendarItem,
+    "stocks.quotes.daily": StockQuoteItem,
+    "stocks.quotes.daily_snapshot": StockQuoteItem,
+    "stocks.quotes.intraday": StockQuoteItem,
+}
+
+_MISSING_REQUEST_BUILDERS = {
+    "indexes.members": "indexes.members_request",
+    "indexes.quotes.daily": "indexes.quote_ranges",
+    "markets.calendar.trading": "markets.calendar_ranges",
+    "markets.calendar.trading.next": "markets.calendar_ranges",
+    "markets.calendar.trading.previous": "markets.calendar_ranges",
+    "markets.calendar.trading.yearly": "markets.calendar_ranges",
+    "stocks.quotes.daily": "stocks.quote_ranges",
+    "stocks.quotes.daily_snapshot": "stocks.snapshot_codes",
+    "stocks.quotes.intraday": "stocks.quote_ranges",
+}
+
+
+def _build_definition(capability_id: str) -> ContractDefinition:
+    from quotemux.contracts.policies import get_contract_policy
+
+    definition = get_capability_definition(capability_id)
+    policy = get_contract_policy(capability_id)
     return ContractDefinition(
-        name=name,
-        request_type=request_type,
-        result_type=result_type,
-        key_fields=key_fields,
+        name=definition.capability_id,
+        request_type=_REQUEST_TYPES.get(definition.capability_id, object),
+        result_type=_RESULT_TYPES.get(definition.capability_id, object),
+        result_shape=definition.result_shape,
+        key_fields=definition.key_fields,
         source_order=policy.source_order,
-        degraded=degraded,
+        degraded=policy.mode == "degraded",
         degraded_policy=policy.mode,
-        missing_request_builder=missing_request_builder,
+        merge_strategy=policy.merge_strategy,
+        allowed_merge_strategies=allowed_merge_strategies(definition.result_shape),
+        missing_request_builder=_MISSING_REQUEST_BUILDERS.get(definition.capability_id, ""),
+        api_paths=definition.api_paths,
     )
 
 
-CONTRACT_DEFINITIONS = {
-    "stocks.quotes.intraday": _build_contract_definition("stocks.quotes.intraday", StockQuotesRequest, StockQuoteItem, ("code", "trade_time", "freq"), False, "stocks.quote_ranges"),
-    "stocks.quotes.daily": _build_contract_definition("stocks.quotes.daily", StockQuotesRequest, StockQuoteItem, ("code", "trade_time", "freq"), False, "stocks.quote_ranges"),
-    "stocks.daily_snapshot": _build_contract_definition("stocks.daily_snapshot", StockDailySnapshotRequest, StockQuoteItem, ("code", "trade_time", "freq"), False, "stocks.snapshot_codes"),
-    "indexes.quotes.daily": _build_contract_definition("indexes.quotes.daily", IndexQuotesRequest, IndexQuoteItem, ("index_code", "trade_time", "freq"), False, "indexes.quote_ranges"),
-    "indexes.members": _build_contract_definition("indexes.members", IndexMembersRequest, IndexMemberItem, ("index_code", "code"), True, "indexes.members_request"),
-    "markets.trading_calendar": _build_contract_definition("markets.trading_calendar", TradingCalendarRequest, TradingCalendarItem, ("exchange", "trade_date"), True, "markets.calendar_ranges"),
-    "updater.stock_bar_1m": _build_contract_definition("updater.stock_bar_1m", StockBar1mRequest, StockQuoteItem, ("code", "trade_time", "freq"), False, "updater.stock_bar_ranges"),
-    "updater.index_bar_1d": _build_contract_definition("updater.index_bar_1d", IndexBar1dRequest, IndexQuoteItem, ("index_code", "trade_time", "freq"), False, "updater.index_bar_ranges"),
-    "updater.stock_daily_1d.ohlcva": _build_contract_definition("updater.stock_daily_1d.ohlcva", StockDailyOhlcvaRepairRequest, StockQuoteItem, ("code", "trade_time", "freq"), False, "updater.daily_ohlcva_codes"),
-}
+def get_contract_result_shape(contract_name: str) -> str:
+    return get_capability_definition(contract_name).result_shape
 
-CONTRACT_NAMES = tuple(sorted({*MANIFEST_CONTRACT_NAMES, *CONTRACT_DEFINITIONS.keys()}))
+
+def get_contract_allowed_merge_strategies(contract_name: str) -> tuple[str, ...]:
+    return allowed_merge_strategies(get_contract_result_shape(contract_name))
 
 
 def get_contract_definition(contract_name: str) -> ContractDefinition:
-    definition = CONTRACT_DEFINITIONS.get(contract_name)
-    if definition is None:
-        raise KeyError(f"未知 contract: {contract_name}")
-    return definition
+    normalized = normalize_capability_id(contract_name)
+    if normalized not in _REQUEST_TYPES:
+        raise KeyError(f"未知 capability 定义: {contract_name}")
+    return _build_definition(normalized)
 
 
 def list_contract_definitions() -> tuple[ContractDefinition, ...]:
-    return tuple(CONTRACT_DEFINITIONS.values())
+    return tuple(_build_definition(capability_id) for capability_id in _REQUEST_TYPES)
 
 
 def list_contract_names() -> tuple[str, ...]:
-    return CONTRACT_NAMES
+    return list_capability_ids()
 
 
 def is_known_contract_name(contract_name: str) -> bool:
-    return contract_name in CONTRACT_NAMES
+    return is_known_capability_id(contract_name)

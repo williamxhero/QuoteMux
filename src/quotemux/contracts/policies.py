@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from quotemux.capabilities import get_capability_definition, list_capability_definitions, normalize_capability_id
 from quotemux.config_runtime.models import ContractPolicyOverride
+from quotemux.contracts.strategies import normalize_merge_strategy
 
 
 FALLBACK_MODE_AUTO = "auto"
@@ -16,107 +18,24 @@ class ContractPolicy:
     mode: str
     source_order: tuple[str, ...]
     stage_namespace: tuple[str, ...]
+    merge_strategy: str
+
+
+def _build_policy(capability_id: str) -> ContractPolicy:
+    definition = get_capability_definition(capability_id)
+    return ContractPolicy(
+        name=definition.capability_id,
+        mode=definition.policy_mode,
+        source_order=definition.default_source_order,
+        stage_namespace=tuple(definition.capability_id.split(".")),
+        merge_strategy=definition.default_merge_strategy,
+    )
 
 
 CONTRACT_POLICIES = {
-    "stocks.quotes.intraday": ContractPolicy(
-        name="stocks.quotes.intraday",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("datalake", "opentdx", "efinance", "mootdx", "akshare"),
-        stage_namespace=("stocks", "quotes", "intraday"),
-    ),
-    "stocks.quotes.daily": ContractPolicy(
-        name="stocks.quotes.daily",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("datalake", "tushare", "efinance", "mootdx", "akshare"),
-        stage_namespace=("stocks", "quotes", "daily"),
-    ),
-    "stocks.daily_snapshot": ContractPolicy(
-        name="stocks.daily_snapshot",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("datalake", "tushare", "efinance", "mootdx", "akshare"),
-        stage_namespace=("stocks", "daily-snapshot"),
-    ),
-    "stocks.money_flow": ContractPolicy(
-        name="stocks.money_flow",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("datalake", "tushare"),
-        stage_namespace=("stocks", "money-flow"),
-    ),
-    "indexes.quotes.daily": ContractPolicy(
-        name="indexes.quotes.daily",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("datalake", "tushare", "opentdx", "efinance", "mootdx", "akshare"),
-        stage_namespace=("indexes", "quotes", "daily"),
-    ),
-    "indexes.members": ContractPolicy(
-        name="indexes.members",
-        mode=FALLBACK_MODE_DEGRADED,
-        source_order=("tushare", "efinance", "mootdx", "akshare"),
-        stage_namespace=("indexes", "members"),
-    ),
-    "markets.trading_calendar": ContractPolicy(
-        name="markets.trading_calendar",
-        mode=FALLBACK_MODE_DEGRADED,
-        source_order=("datalake_reference", "tushare", "akshare"),
-        stage_namespace=("markets", "trading-calendar"),
-    ),
-    "boards.money_flow": ContractPolicy(
-        name="boards.money_flow",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("datalake", "tushare"),
-        stage_namespace=("boards", "money-flow"),
-    ),
-    "updater.stock_bar_1m": ContractPolicy(
-        name="updater.stock_bar_1m",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("opentdx", "efinance", "mootdx", "akshare"),
-        stage_namespace=("updater", "stock-bar-1m"),
-    ),
-    "updater.index_bar_1d": ContractPolicy(
-        name="updater.index_bar_1d",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("opentdx", "efinance", "mootdx", "akshare"),
-        stage_namespace=("updater", "index-bar-1d"),
-    ),
-    "updater.stock_daily_1d.ohlcva": ContractPolicy(
-        name="updater.stock_daily_1d.ohlcva",
-        mode=FALLBACK_MODE_AUTO,
-        source_order=("tushare", "efinance", "mootdx", "akshare"),
-        stage_namespace=("updater", "stock-daily-1d", "ohlcva"),
-    ),
-    "stocks.indicators.daily_basic": ContractPolicy(
-        name="stocks.indicators.daily_basic",
-        mode=FALLBACK_MODE_A2_ONLY,
-        source_order=("tushare",),
-        stage_namespace=("stocks", "indicators", "daily-basic"),
-    ),
-    "stocks.indicators.daily_valuation": ContractPolicy(
-        name="stocks.indicators.daily_valuation",
-        mode=FALLBACK_MODE_A2_ONLY,
-        source_order=("tushare",),
-        stage_namespace=("stocks", "indicators", "daily-valuation"),
-    ),
-    "stocks.indicators.daily_market_value": ContractPolicy(
-        name="stocks.indicators.daily_market_value",
-        mode=FALLBACK_MODE_A2_ONLY,
-        source_order=("tushare",),
-        stage_namespace=("stocks", "indicators", "daily-market-value"),
-    ),
-    "stocks.finance.statements": ContractPolicy(
-        name="stocks.finance.statements",
-        mode=FALLBACK_MODE_A2_ONLY,
-        source_order=("tushare",),
-        stage_namespace=("stocks", "finance", "statements"),
-    ),
-    "reference.stock_basic": ContractPolicy(
-        name="reference.stock_basic",
-        mode=FALLBACK_MODE_A2_ONLY,
-        source_order=("tushare",),
-        stage_namespace=("reference", "stock-basic"),
-    ),
+    definition.capability_id: _build_policy(definition.capability_id)
+    for definition in list_capability_definitions()
 }
-
 
 AUTO_FALLBACK_CONTRACTS = {name for name, policy in CONTRACT_POLICIES.items() if policy.mode == FALLBACK_MODE_AUTO}
 DEGRADED_FALLBACK_CONTRACTS = {name for name, policy in CONTRACT_POLICIES.items() if policy.mode == FALLBACK_MODE_DEGRADED}
@@ -124,9 +43,10 @@ A2_ONLY_CONTRACTS = {name for name, policy in CONTRACT_POLICIES.items() if polic
 
 
 def get_contract_policy(contract_name: str) -> ContractPolicy:
-    policy = CONTRACT_POLICIES.get(contract_name)
+    normalized = normalize_capability_id(contract_name)
+    policy = CONTRACT_POLICIES.get(normalized)
     if policy is None:
-        raise KeyError(f"未知 contract: {contract_name}")
+        raise KeyError(f"未知 capability: {contract_name}")
     return policy
 
 
@@ -140,6 +60,7 @@ def list_default_contract_policies() -> tuple[ContractPolicyOverride, ...]:
             contract_name=policy.name,
             mode=policy.mode,
             source_order=policy.source_order,
+            merge_strategy=normalize_merge_strategy(policy.merge_strategy),
         )
         for policy in CONTRACT_POLICIES.values()
     )
