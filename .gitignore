@@ -1,7 +1,5 @@
 __pycache__
-/src/quotemux/sources/datalake_news
-/src/quotemux/sources/datalake
-/.pytest_cache
+.pytest_cache
 /build
 /dist
 /tests

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from platform_models import NewsEventItem, NewsEventQueryResult
+from quotemux.reports import ContractReport
 from quotemux.settings import QuoteMuxSettings
-from quotemux.store import load_store_result
+from quotemux.sources.datalake.news import get_news_event_sources, get_news_events
+from quotemux.store import load_store_result, store_result
 
 
 class QuoteMuxNews:
@@ -40,3 +42,37 @@ class QuoteMuxNews:
         if store_read.hit or store_read.partial_hit:
             return NewsEventQueryResult(events=list(store_items))
         return NewsEventQueryResult(events=[])
+
+    def update_events_capture(
+        self,
+        trade_date: str,
+        announcement_date: str,
+        crawl_date: str,
+        stock_code: str,
+        event_type: str,
+        min_importance_score: int | None,
+        sort_by: str,
+        limit: int,
+        offset: int,
+        include_sources: bool,
+        include_content_text: bool,
+    ) -> tuple[list[NewsEventItem], ContractReport]:
+        store_identity = {
+            "trade_date": trade_date,
+            "announcement_date": announcement_date,
+            "crawl_date": crawl_date,
+            "stock_code": stock_code,
+            "event_type": event_type,
+            "min_importance_score": min_importance_score,
+            "sort_by": sort_by,
+            "limit": limit,
+            "offset": offset,
+            "include_sources": include_sources,
+            "include_content_text": include_content_text,
+        }
+        items = get_news_events(trade_date, announcement_date, crawl_date, stock_code, event_type, min_importance_score, sort_by, limit, offset, include_content_text)
+        if include_sources and items != []:
+            sources = get_news_event_sources([item.event_id for item in items])
+            items = [item.model_copy(update={"sources": sources.get(item.event_id, [])}) for item in items]
+        write_result = store_result("markets.events.news", store_identity, items, ContractReport(contract_name="markets.events.news"))
+        return items, ContractReport(contract_name="markets.events.news").with_store_stats(write=write_result.status == "write")
