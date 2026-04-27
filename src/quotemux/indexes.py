@@ -7,7 +7,7 @@ import pandas as pd
 from platform_models import IndexCatalogItem, IndexMemberItem, IndexQuoteItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_datetime_value, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
-from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
+from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, sort_items, trim_items_per_key
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
 from quotemux.runtime_core.registry import SourceProxy
@@ -18,10 +18,7 @@ from quotemux.store import load_store_result, store_result
 _akshare_provider = SourceProxy("akshare")
 _efinance_provider = SourceProxy("efinance")
 _mootdx_provider = SourceProxy("mootdx")
-_static_core = SourceProxy("static_core")
 _tushare_provider = SourceProxy("tushare")
-_datalake = _static_core
-_datalake_ref = _static_core
 
 
 def _normalize_catalog_market(market: str) -> str:
@@ -145,9 +142,6 @@ def _build_missing_quote_requests(
     if actual_end_date == "":
         actual_end_date = actual_start_date
     expected_trade_dates = []
-    if actual_start_date and actual_end_date:
-        trading_calendar_items = _static_core.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
-        expected_trade_dates = [item.trade_date for item in trading_calendar_items]
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for index_code in index_codes:
         existing_dates = {item.trade_time for item in items if item.index_code == index_code and item.freq == "1d"}
@@ -179,14 +173,13 @@ def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
 def _build_quote_steps(request_freq: str, request_count: int | None, settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexQuoteItem], ...]:
     handlers = {
         "get_index_quotes": lambda instance: lambda index_codes, missing_start, missing_end: {
-            "static_core": _static_core,
             "tushare": _tushare_provider,
             "efinance": _efinance_provider,
             "mootdx": _mootdx_provider,
             "akshare": _akshare_provider,
         }[instance.package_id].get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count),
     }
-    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("static_core", "tushare", "efinance", "mootdx", "akshare"))
+    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("tushare", "efinance", "mootdx", "akshare"))
 
 
 def _build_member_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexMemberItem], ...]:
@@ -212,10 +205,8 @@ class QuoteMuxIndexes:
         store_items, store_read = load_store_result("indexes.catalog", store_identity, IndexCatalogItem)
         if store_read.hit:
             return store_items
-        reference_items = _static_core.get_index_catalog(category, actual_market, publisher, status, actual_limit + offset, 0) if self._settings.is_source_enabled("static_core") else []
         ts_items = _tushare_provider.get_index_catalog("", category, actual_market, publisher, status) if self._settings.is_source_enabled("tushare") else []
-        merged_items = merge_model_lists(reference_items, ts_items, ("index_code",))
-        filtered_items = _filter_catalog_items(merged_items, category, actual_market, publisher, status)
+        filtered_items = _filter_catalog_items(ts_items, category, actual_market, publisher, status)
         result = sorted(filtered_items, key=lambda item: item.index_code)[offset: offset + actual_limit]
         store_result("indexes.catalog", store_identity, result, ContractReport(contract_name="indexes.catalog"))
         return result
@@ -225,10 +216,8 @@ class QuoteMuxIndexes:
         store_items, store_read = load_store_result("indexes.profile", store_identity, IndexCatalogItem)
         if store_read.hit:
             return store_items[0] if store_items else None
-        datalake_item = _static_core.get_index_profile(index_code) if self._settings.is_source_enabled("static_core") else None
         ts_items = _tushare_provider.get_index_catalog(index_code, "", "", "", "") if self._settings.is_source_enabled("tushare") else []
-        merged_items = merge_model_lists([datalake_item] if datalake_item is not None else [], ts_items, ("index_code",))
-        item = merged_items[0] if merged_items else None
+        item = ts_items[0] if ts_items else None
         store_result("indexes.profile", store_identity, [item] if item is not None else [], ContractReport(contract_name="indexes.profile"))
         return item
 
@@ -274,7 +263,7 @@ class QuoteMuxIndexes:
             ("index_code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count),
             _build_quote_steps(request_freq, request_count, self._settings),
-            self._settings.get_contract_source_order("indexes.quotes.daily", ("static_core", "tushare", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("indexes.quotes.daily", ("tushare", "efinance", "mootdx", "akshare")),
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_index_quotes(merged_items, actual_freq)
@@ -313,8 +302,7 @@ class QuoteMuxIndexes:
         normalized_items = _merge_index_members(merged_items)
         if normalized_items == []:
             return [], ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
-        name_map = {} if not self._settings.is_source_enabled("static_core") else _static_core.get_stock_names([item.code for item in normalized_items])
-        result = [IndexMemberItem(**{**item.model_dump(), "name": name_map.get(item.code, item.name)}) for item in normalized_items]
+        result = normalized_items
         report = ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
         store_write = store_result("indexes.members", store_identity, result, report, report.quarantine_count)
         report = report.with_store_stats(partial_hit=store_read.partial_hit, miss=store_read.status in {"miss", "skip"}, stale=store_read.status == "stale", write=store_write.status == "write")

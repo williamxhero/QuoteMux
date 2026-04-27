@@ -193,7 +193,6 @@ def _result_score(result: ProviderFetchResult[T], order_index: int) -> float:
     if result.fetched_row_count == 0 or result.error_count >= result.request_count:
         return 0.0
     source_trust = {
-        "datalake": 1.0,
         "tushare": 0.86,
         "opentdx": 0.82,
         "efinance": 0.72,

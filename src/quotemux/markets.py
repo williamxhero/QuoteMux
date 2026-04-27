@@ -14,10 +14,7 @@ from quotemux.store import load_store_result, store_result
 
 
 _akshare_provider = SourceProxy("akshare")
-_derived_core = SourceProxy("derived_core")
-_static_core = SourceProxy("static_core")
 _tushare_provider = SourceProxy("tushare")
-_datalake_ref = _static_core
 
 
 def _today_text() -> str:
@@ -127,7 +124,6 @@ class QuoteMuxMarkets:
             ).with_store_stats(hit=True)
         handlers = {
             "get_trading_calendar": lambda instance: lambda missing_start, missing_end: {
-                "static_core": _static_core,
                 "tushare": _tushare_provider,
                 "akshare": _akshare_provider,
             }[instance.package_id].get_trading_calendar(request.exchange, missing_start, missing_end, None),
@@ -137,8 +133,8 @@ class QuoteMuxMarkets:
             store_items if store_read.partial_hit else [],
             ("exchange", "trade_date"),
             lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
-            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("static_core", "tushare", "akshare")),
-            self._settings.get_contract_source_order("markets.calendar.trading", ("static_core", "tushare", "akshare")),
+            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("markets.calendar.trading", ("tushare", "akshare")),
         )
         if request.is_open is not None:
             merged_items = [item for item in merged_items if item.is_open == request.is_open]
@@ -226,7 +222,7 @@ class QuoteMuxMarkets:
             ConnectQuotaItem,
             ("market", "trade_date"),
             ("trade_date", "market"),
-            lambda: [] if not self._settings.is_source_enabled("derived_core") else _derived_core.get_connect_quota_series(trade_date, start_date, end_date, market_type),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_connect_quotas(trade_date, start_date, end_date, market_type),
         )
 
     def get_connect_active_top10(self, trade_date: str, start_date: str, end_date: str, market_type: str, limit: int) -> list[ConnectActiveTop10Item]:
@@ -314,9 +310,9 @@ class QuoteMuxMarkets:
         store_items, store_read = load_store_result("markets.trading.sessions", store_identity, TradingSessionItem)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("static_core"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        items = _static_core.get_market_sessions(codes)
+        items = _tushare_provider.get_market_sessions(codes)
         store_result("markets.trading.sessions", store_identity, _payloads_with_as_of_date(items), ContractReport(contract_name="markets.trading.sessions"))
         return items
 

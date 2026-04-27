@@ -7,9 +7,6 @@ from quotemux.config_runtime.runtime import get_config_runtime
 
 
 DEFAULT_ENABLED_SOURCES = (
-    "static_core",
-    "news_store",
-    "derived_core",
     "tushare",
     "opentdx",
     "efinance",
@@ -36,14 +33,20 @@ class QuoteMuxSettings:
         override = self.contract_source_orders.get(contract_name)
         if override is not None:
             return override
+        if self.enabled_sources != ():
+            return fallback
         snapshot = get_config_runtime().get_active_snapshot()
         return snapshot.get_contract_source_order(contract_name, fallback)
 
     def get_contract_mode(self, contract_name: str, fallback: str) -> str:
+        if self.enabled_sources != ():
+            return fallback
         snapshot = get_config_runtime().get_active_snapshot()
         return snapshot.get_contract_mode(contract_name, fallback)
 
     def get_contract_merge_strategy(self, contract_name: str, fallback: str) -> str:
+        if self.enabled_sources != ():
+            return fallback
         snapshot = get_config_runtime().get_active_snapshot()
         return snapshot.get_contract_merge_strategy(contract_name, fallback)
 

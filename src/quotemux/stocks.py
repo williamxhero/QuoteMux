@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteItem, StockRiskFlagItem, SurveyItem, UnlockScheduleItem
+from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteItem, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
@@ -18,14 +18,10 @@ from quotemux.settings import QuoteMuxSettings
 
 MAX_DAILY_INDICATOR_CODES = 200
 _akshare_provider = SourceProxy("akshare")
-_derived_core = SourceProxy("derived_core")
 _efinance_provider = SourceProxy("efinance")
 _mootdx_provider = SourceProxy("mootdx")
 _opentdx_provider = SourceProxy("opentdx")
-_static_core = SourceProxy("static_core")
 _tushare_provider = SourceProxy("tushare")
-_datalake = _static_core
-_datalake_ref = _static_core
 
 
 def _today_text() -> str:
@@ -86,6 +82,131 @@ def _aggregate_stock_quotes(items: list[StockQuoteItem], freq: str, adjust: str)
                 )
             )
     return result
+
+
+def _rsi(series: pd.Series, period: int) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period, min_periods=period).mean()
+    avg_loss = loss.rolling(period, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    return 100 - 100 / (1 + rs)
+
+
+def _build_technical_factor_items(quote_items: list[StockQuoteItem], adjust: str) -> list[TechnicalFactorItem]:
+    if quote_items == []:
+        return []
+    frame = pd.DataFrame([item.model_dump() for item in quote_items])
+    frame["trade_date"] = frame["trade_time"].astype(str)
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame["high"] = pd.to_numeric(frame["high"], errors="coerce")
+    frame["low"] = pd.to_numeric(frame["low"], errors="coerce")
+    frame = frame.sort_values("trade_date").reset_index(drop=True)
+    frame["ma5"] = frame["close"].rolling(5, min_periods=5).mean()
+    frame["ma10"] = frame["close"].rolling(10, min_periods=10).mean()
+    frame["ma20"] = frame["close"].rolling(20, min_periods=20).mean()
+    frame["ma60"] = frame["close"].rolling(60, min_periods=60).mean()
+    frame["ema12"] = frame["close"].ewm(span=12, adjust=False).mean()
+    frame["ema26"] = frame["close"].ewm(span=26, adjust=False).mean()
+    frame["dif"] = frame["ema12"] - frame["ema26"]
+    frame["dea"] = frame["dif"].ewm(span=9, adjust=False).mean()
+    frame["macd"] = (frame["dif"] - frame["dea"]) * 2
+    frame["rsi6"] = _rsi(frame["close"], 6)
+    frame["rsi12"] = _rsi(frame["close"], 12)
+    frame["rsi24"] = _rsi(frame["close"], 24)
+    low_n = frame["low"].rolling(9, min_periods=9).min()
+    high_n = frame["high"].rolling(9, min_periods=9).max()
+    rsv = (frame["close"] - low_n) / (high_n - low_n).replace(0, pd.NA) * 100
+    frame["kdj_k"] = rsv.ewm(com=2, adjust=False).mean()
+    frame["kdj_d"] = frame["kdj_k"].ewm(com=2, adjust=False).mean()
+    frame["kdj_j"] = 3 * frame["kdj_k"] - 2 * frame["kdj_d"]
+    boll_mid = frame["close"].rolling(20, min_periods=20).mean()
+    boll_std = frame["close"].rolling(20, min_periods=20).std()
+    frame["boll_upper"] = boll_mid + 2 * boll_std
+    frame["boll_mid"] = boll_mid
+    frame["boll_lower"] = boll_mid - 2 * boll_std
+    return [
+        TechnicalFactorItem(
+            code=str(row["code"]),
+            trade_date=str(row["trade_date"]),
+            adjust=adjust,
+            ma5=float(row["ma5"]) if pd.notna(row["ma5"]) else None,
+            ma10=float(row["ma10"]) if pd.notna(row["ma10"]) else None,
+            ma20=float(row["ma20"]) if pd.notna(row["ma20"]) else None,
+            ma60=float(row["ma60"]) if pd.notna(row["ma60"]) else None,
+            ema12=float(row["ema12"]) if pd.notna(row["ema12"]) else None,
+            ema26=float(row["ema26"]) if pd.notna(row["ema26"]) else None,
+            dif=float(row["dif"]) if pd.notna(row["dif"]) else None,
+            dea=float(row["dea"]) if pd.notna(row["dea"]) else None,
+            macd=float(row["macd"]) if pd.notna(row["macd"]) else None,
+            rsi6=float(row["rsi6"]) if pd.notna(row["rsi6"]) else None,
+            rsi12=float(row["rsi12"]) if pd.notna(row["rsi12"]) else None,
+            rsi24=float(row["rsi24"]) if pd.notna(row["rsi24"]) else None,
+            kdj_k=float(row["kdj_k"]) if pd.notna(row["kdj_k"]) else None,
+            kdj_d=float(row["kdj_d"]) if pd.notna(row["kdj_d"]) else None,
+            kdj_j=float(row["kdj_j"]) if pd.notna(row["kdj_j"]) else None,
+            boll_upper=float(row["boll_upper"]) if pd.notna(row["boll_upper"]) else None,
+            boll_mid=float(row["boll_mid"]) if pd.notna(row["boll_mid"]) else None,
+            boll_lower=float(row["boll_lower"]) if pd.notna(row["boll_lower"]) else None,
+        )
+        for _, row in frame.iterrows()
+    ]
+
+
+def _build_shareholder_change_items(items: list[ShareholderCountItem]) -> list[ShareholderChangeItem]:
+    rows: list[ShareholderChangeItem] = []
+    previous_count: int | None = None
+    for item in sorted(items, key=lambda value: value.trade_date):
+        change_count = item.holder_count - previous_count if item.holder_count is not None and previous_count is not None else None
+        change_pct = None
+        if change_count is not None and previous_count not in {None, 0}:
+            change_pct = change_count / previous_count * 100
+        rows.append(
+            ShareholderChangeItem(
+                code=item.code,
+                trade_date=item.trade_date,
+                holder_count=item.holder_count,
+                change_count=change_count,
+                change_pct=change_pct,
+            )
+        )
+        previous_count = item.holder_count
+    return rows
+
+
+def _build_hl_signal_items(code: str, quote_items: list[StockQuoteItem]) -> list[HLSignalItem]:
+    if quote_items == []:
+        return []
+    frame = pd.DataFrame([item.model_dump() for item in quote_items])
+    frame["trade_time_dt"] = pd.to_datetime(frame["trade_time"], errors="coerce")
+    frame["high"] = pd.to_numeric(frame["high"], errors="coerce")
+    frame["low"] = pd.to_numeric(frame["low"], errors="coerce")
+    frame = frame.dropna(subset=["trade_time_dt", "high", "low"])
+    if frame.empty:
+        return []
+    frame["trade_date"] = frame["trade_time_dt"].dt.strftime("%Y-%m-%d")
+    items: list[HLSignalItem] = []
+    for trade_date, group in frame.groupby("trade_date", sort=True):
+        max_high = group["high"].max()
+        min_low = group["low"].min()
+        high_rows = group[group["high"] == max_high].sort_values("trade_time_dt")
+        low_rows = group[group["low"] == min_low].sort_values("trade_time_dt")
+        high_dt = high_rows.iloc[0]["trade_time_dt"] if not high_rows.empty else None
+        low_dt = low_rows.iloc[0]["trade_time_dt"] if not low_rows.empty else None
+        high_time = high_dt.strftime("%H:%M:%S") if pd.notna(high_dt) else ""
+        low_time = low_dt.strftime("%H:%M:%S") if pd.notna(low_dt) else ""
+        if high_time and low_time and high_dt < low_dt:
+            first_extreme = "high"
+            signal = "high_first"
+        elif high_time and low_time and low_dt < high_dt:
+            first_extreme = "low"
+            signal = "low_first"
+        else:
+            first_extreme = ""
+            signal = "same_time"
+        items.append(HLSignalItem(code=code, trade_date=str(trade_date), first_extreme=first_extreme, high_time=high_time, low_time=low_time, signal=signal))
+    return items
 
 
 def _build_missing_date_ranges(start_date: str, end_date: str, existing_dates: set[str]) -> list[tuple[str, str]]:
@@ -154,8 +275,6 @@ def _build_missing_quote_requests(
     if actual_end_date == "":
         actual_end_date = actual_start_date
     expected_trade_dates = []
-    trading_calendar_items = _static_core.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
-    expected_trade_dates = [item.trade_date for item in trading_calendar_items]
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
         existing_dates = {item.trade_time for item in current_items if item.code == code and item.freq == "1d"}
@@ -168,17 +287,14 @@ def _build_missing_quote_requests(
 
 
 def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> list[str]:
-    expected_codes = _static_core.get_stock_active_codes(trade_date)
-    if expected_codes == []:
-        return []
-    existing_codes = {item.code for item in items if item.trade_time == trade_date and item.freq == "1d"}
-    return [code for code in expected_codes if code not in existing_codes]
+    del trade_date
+    del items
+    return []
 
 
 def _build_steps(freq: str, request_freq: str, request_count: int | None, actual_adjust: str, settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
     handlers = {
         "get_stock_quotes": lambda instance: lambda missing_codes, missing_start, missing_end: {
-            "static_core": _static_core,
             "efinance": _efinance_provider,
             "mootdx": _mootdx_provider,
             "akshare": _akshare_provider,
@@ -187,15 +303,17 @@ def _build_steps(freq: str, request_freq: str, request_count: int | None, actual
         }[instance.package_id].get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust),
     }
     if freq == "1d":
-        fallback_order = ("static_core", "tushare", "efinance", "mootdx", "akshare")
+        fallback_order = ("tushare", "efinance", "mootdx", "akshare")
     else:
-        fallback_order = ("static_core", "opentdx", "efinance", "mootdx", "akshare")
+        fallback_order = ("opentdx", "efinance", "mootdx", "akshare")
     return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily" if freq == "1d" else "stocks.quotes.intraday", handlers, fallback_order)
 
 
 def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
     handlers = {
-        "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: _static_core.get_stock_daily_snapshot_full(request_trade_date),
+        "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: {
+            "tushare": _tushare_provider,
+        }[instance.package_id].get_stock_daily_snapshot_full(request_trade_date),
         "get_stock_quotes": lambda instance: lambda missing_codes, request_trade_date: {
             "tushare": _tushare_provider,
             "efinance": _efinance_provider,
@@ -203,7 +321,7 @@ def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderSte
             "akshare": _akshare_provider,
         }[instance.package_id].get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none"),
     }
-    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("static_core", "tushare", "efinance", "mootdx", "akshare"))
+    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "mootdx", "akshare"))
 
 
 def _indicator_codes_from_params(code: str, codes: str) -> list[str]:
@@ -314,7 +432,7 @@ class QuoteMuxStocks:
             ("code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count),
             _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
-            self._settings.get_contract_source_order(contract_name, ("static_core", "tushare", "opentdx", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order(contract_name, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_stock_quotes(merged_items, actual_freq, actual_adjust)
@@ -359,9 +477,9 @@ class QuoteMuxStocks:
             "stocks.quotes.daily_snapshot",
             store_items if store_read.partial_hit else [],
             ("code", "trade_time", "freq"),
-            lambda items: [(_missing_snapshot_codes(actual_trade_date, items), actual_trade_date)] if items == [] or _missing_snapshot_codes(actual_trade_date, items) else [],
+            lambda items: [([], actual_trade_date)] if items == [] else [],
             _build_daily_snapshot_steps(self._settings),
-            self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("static_core", "tushare", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "mootdx", "akshare")),
         )
         sorted_items = sort_items(merged_items, ("code", "trade_time"))
         report = ContractReport.from_fallback_report("stocks.quotes.daily_snapshot", fallback_report)
@@ -382,9 +500,6 @@ class QuoteMuxStocks:
         if actual_end_date == "":
             actual_end_date = actual_start_date
         expected_trade_dates = []
-        if self._settings.is_source_enabled("static_core"):
-            trading_calendar_items = _static_core.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)
-            expected_trade_dates = [item.trade_date for item in trading_calendar_items]
         existing_dates = {item.trade_date for item in items}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
@@ -394,7 +509,6 @@ class QuoteMuxStocks:
     def get_money_flow(self, code: str, trade_date: str, start_date: str, end_date: str, view: str) -> list[StockMoneyFlowItem]:
         handlers = {
             "get_stock_money_flow": lambda instance: lambda missing_start, missing_end: {
-                "static_core": _static_core,
                 "tushare": _tushare_provider,
             }[instance.package_id].get_stock_money_flow(code, "", missing_start, missing_end, view),
         }
@@ -403,8 +517,8 @@ class QuoteMuxStocks:
             [],
             ("code", "trade_date", "view"),
             lambda items: self._build_missing_money_flow_requests(items, trade_date, start_date, end_date),
-            SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow", handlers, ("static_core", "tushare")),
-            self._settings.get_contract_source_order("stocks.indicators.money_flow", ("static_core", "tushare")),
+            SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow", handlers, ("tushare",)),
+            self._settings.get_contract_source_order("stocks.indicators.money_flow", ("tushare",)),
         )
         return sorted(merged_items, key=lambda item: (item.code, item.trade_date))
 
@@ -447,9 +561,9 @@ class QuoteMuxStocks:
         store_items, store_read = load_store_result("stocks.catalog", store_identity, StockBasicInfo)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("static_core"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        items = _static_core.get_stock_catalog(codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset)
+        items = _tushare_provider.get_stock_catalog(codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset)
         store_result("stocks.catalog", store_identity, items, ContractReport(contract_name="stocks.catalog"))
         return items
 
@@ -463,9 +577,9 @@ class QuoteMuxStocks:
         store_items, store_read = load_store_result("stocks.profile.basic", store_identity, StockBasicInfo)
         if store_read.hit:
             return store_items[0] if store_items else None
-        if not self._settings.is_source_enabled("static_core"):
+        if not self._settings.is_source_enabled("tushare"):
             return None
-        item = _static_core.get_stock_basic(code)
+        item = _tushare_provider.get_stock_basic(code)
         store_result("stocks.profile.basic", store_identity, [item] if item is not None else [], ContractReport(contract_name="stocks.profile.basic"))
         return item
 
@@ -485,9 +599,9 @@ class QuoteMuxStocks:
         store_items, store_read = load_store_result("stocks.profile.name_history", store_identity, NameHistoryItem)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("static_core"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        items = _static_core.get_stock_name_history(code, start_date, end_date)
+        items = _tushare_provider.get_stock_name_history(code, start_date, end_date)
         store_result("stocks.profile.name_history", store_identity, items, ContractReport(contract_name="stocks.profile.name_history"))
         return items
 
@@ -502,9 +616,23 @@ class QuoteMuxStocks:
         return _tushare_provider.get_management_rewards(code, start_date, end_date)
 
     def get_hl_signal(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[HLSignalItem]:
-        if not self._settings.is_source_enabled("derived_core"):
+        normalized = normalize_stock_code(code)
+        if normalized == "":
             return []
-        return _derived_core.get_hl_signal(code, trade_date, start_date, end_date)
+        provider_map = {
+            "opentdx": _opentdx_provider,
+            "efinance": _efinance_provider,
+            "mootdx": _mootdx_provider,
+            "akshare": _akshare_provider,
+        }
+        for source_name in ("opentdx", "efinance", "mootdx", "akshare"):
+            if not self._settings.is_source_enabled(source_name):
+                continue
+            quote_items = provider_map[source_name].get_stock_quotes([normalized], "1m", trade_date, start_date, end_date, "", "", None, "none")
+            signal_items = _build_hl_signal_items(normalized, quote_items)
+            if signal_items:
+                return signal_items
+        return []
 
     def get_nine_turn(self, code: str, freq: str, trade_date: str, start_date: str, end_date: str) -> list[NineTurnItem]:
         if not self._settings.is_source_enabled("tushare"):
@@ -516,11 +644,28 @@ class QuoteMuxStocks:
         store_items, store_read = load_store_result("stocks.factors.adj", store_identity, AdjFactorItem)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("static_core"):
+        if not self._settings.is_source_enabled("tushare"):
             return []
-        items = _static_core.get_adj_factors(code, start_date, end_date, base_date)
+        items = _tushare_provider.get_adj_factors(code, start_date, end_date, base_date)
         store_result("stocks.factors.adj", store_identity, items, ContractReport(contract_name="stocks.factors.adj"))
         return items
+
+    def get_technical_factors(self, code: str, trade_date: str, start_date: str, end_date: str, adjust: str) -> list[TechnicalFactorItem]:
+        normalized = normalize_stock_code(code)
+        if normalized == "":
+            return []
+        quote_items = self.get_quotes(
+            StockQuotesRequest(
+                codes=[normalized],
+                freq="1d",
+                trade_date=trade_date,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                limit=5000,
+            )
+        )
+        return _build_technical_factor_items(quote_items, adjust)
 
     def get_ah_comparisons(self, code: str, trade_date: str, start_date: str, end_date: str, limit: int, offset: int) -> list[StockAHComparisonItem]:
         if not self._settings.is_source_enabled("tushare"):
@@ -772,6 +917,10 @@ class QuoteMuxStocks:
             ("code", "trade_date"),
             lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_shareholder_count(code, trade_date, start_date, end_date),
         )
+
+    def get_shareholder_changes(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareholderChangeItem]:
+        count_items = self.get_shareholder_count(code, trade_date, start_date, end_date)
+        return _build_shareholder_change_items(count_items)
 
     def get_shareholder_top10(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
