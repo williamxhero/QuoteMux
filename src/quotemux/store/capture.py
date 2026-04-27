@@ -1098,32 +1098,26 @@ def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[Captur
     return ()
 
 
-def _scheduled_time(policy: CapturePolicy, now: datetime) -> datetime:
+def _scheduled_time(policy: CapturePolicy, now: datetime) -> datetime | None:
     local_now = now.astimezone(ZoneInfo(policy.timezone)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(policy.timezone))
-    if policy.cadence == CADENCE_WEEKLY:
-        target_weekday = policy.weekday if policy.weekday is not None else 0
-        delta_days = (local_now.weekday() - target_weekday) % 7
-        scheduled_day = local_now.date() - timedelta(days=delta_days)
+    local_date = local_now.date()
+    if policy.cadence == CADENCE_DAILY:
+        scheduled_day = local_date
+    elif policy.cadence == CADENCE_WEEKLY:
+        if local_date.weekday() != 6:
+            return None
+        scheduled_day = local_date
     elif policy.cadence == CADENCE_MONTHLY:
-        target_day = policy.month_day if policy.month_day is not None else 1
-        max_day = monthrange(local_now.year, local_now.month)[1]
-        scheduled_day = local_now.date().replace(day=min(max(1, target_day), max_day))
-        if local_now.date() < scheduled_day:
-            previous_month_last = local_now.date().replace(day=1) - timedelta(days=1)
-            max_previous_day = monthrange(previous_month_last.year, previous_month_last.month)[1]
-            scheduled_day = previous_month_last.replace(day=min(max(1, target_day), max_previous_day))
+        if local_date.day != monthrange(local_date.year, local_date.month)[1]:
+            return None
+        scheduled_day = local_date
     elif policy.cadence == CADENCE_YEARLY:
-        target_month = policy.month if policy.month is not None else 1
-        target_day = policy.month_day if policy.month_day is not None else 1
-        max_day = monthrange(local_now.year, target_month)[1]
-        scheduled_day = date(local_now.year, target_month, min(max(1, target_day), max_day))
-        if local_now.date() < scheduled_day:
-            previous_year = local_now.year - 1
-            max_previous_day = monthrange(previous_year, target_month)[1]
-            scheduled_day = date(previous_year, target_month, min(max(1, target_day), max_previous_day))
+        if local_date.month != 12 or local_date.day != 31:
+            return None
+        scheduled_day = local_date
     else:
-        scheduled_day = local_now.date()
-    scheduled = datetime.combine(scheduled_day, policy.run_time, ZoneInfo(policy.timezone))
+        scheduled_day = local_date
+    scheduled = datetime.combine(scheduled_day, time(0, 0), ZoneInfo(policy.timezone))
     return scheduled.replace(tzinfo=None)
 
 
@@ -1131,8 +1125,7 @@ def is_capture_due(policy: CapturePolicy, runs: CaptureRunRepository, now: datet
     if not policy.enabled:
         return False
     planned_time = _scheduled_time(policy, now)
-    local_now = now.astimezone(ZoneInfo(policy.timezone)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(policy.timezone))
-    if local_now.replace(tzinfo=None) < planned_time:
+    if planned_time is None:
         return False
     previous = runs.latest_for_planned_time(policy.capability_id, planned_time)
     return previous is None or previous.status == CAPTURE_SKIPPED
@@ -1266,8 +1259,9 @@ class QuoteMuxCaptureJob:
         now = self._now_provider()
         runs: list[dict[str, object]] = []
         for policy in self._policies.list():
-            if is_capture_due(policy, self._runs, now):
-                runs.append(self.run_capture(policy.capability_id, _scheduled_time(policy, now)))
+            planned_time = _scheduled_time(policy, now)
+            if planned_time is not None and is_capture_due(policy, self._runs, now):
+                runs.append(self.run_capture(policy.capability_id, planned_time))
         return tuple(runs)
 
     def run_capture(self, capability_id: str, planned_time: datetime | None = None) -> dict[str, object]:
