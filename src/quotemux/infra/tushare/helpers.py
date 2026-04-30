@@ -10,7 +10,7 @@ from quotemux.infra.tushare.rate_limit import call_tushare_api
 
 
 def query_frame(api_name: str, **kwargs: object) -> pd.DataFrame:
-    from markethub_packages.tushare.source import get_ts_pro
+    from quotemux_packages.tushare.source import get_ts_pro
 
     pro = get_ts_pro()
     if pro is None:

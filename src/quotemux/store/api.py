@@ -47,24 +47,37 @@ def get_admin_capture_policy(capability_id: str) -> dict[str, object]:
 def put_admin_capture_policy(capability_id: str, payload: dict[str, object]) -> dict[str, object]:
     admin = QuoteMuxCaptureAdmin()
     current = admin.get_policy(capability_id)
-    run_time_value = payload.get("run_time", current["run_time"])
-    run_time = _parse_run_time(str(run_time_value))
+    schedule = _fixed_capture_schedule(payload, current)
     return admin.update_policy(
         CapturePolicyPayload(
             capability_id=capability_id,
-            enabled=bool(payload.get("enabled", current["enabled"])),
-            cadence=str(payload.get("cadence", current["cadence"])),
-            run_time=run_time,
+            enabled=bool(schedule["enabled"]),
+            cadence=str(schedule["cadence"]),
+            run_time=time(0, 0),
             timezone=str(payload.get("timezone", current["timezone"])),
-            weekday=_optional_int(payload.get("weekday", current["weekday"])),
-            month=_optional_int(payload.get("month", current["month"])),
-            month_day=_optional_int(payload.get("month_day", current["month_day"])),
+            weekday=_optional_int(schedule["weekday"]),
+            month=_optional_int(schedule["month"]),
+            month_day=_optional_int(schedule["month_day"]),
             scope_profile=str(payload.get("scope_profile", current["scope_profile"])),
             window_count=int(payload.get("window_count", current["window_count"])),
             batch_size=int(payload.get("batch_size", current["batch_size"])),
             notes=str(payload.get("notes", current["notes"])),
         )
     )
+
+
+def _fixed_capture_schedule(payload: dict[str, object], current: dict[str, object]) -> dict[str, object]:
+    enabled = bool(payload.get("enabled", current["enabled"]))
+    cadence = str(payload.get("cadence", current["cadence"]))
+    if not enabled:
+        return {"enabled": False, "cadence": cadence, "weekday": None, "month": None, "month_day": None}
+    if cadence == "weekly":
+        return {"enabled": True, "cadence": "weekly", "weekday": 6, "month": None, "month_day": None}
+    if cadence == "monthly":
+        return {"enabled": True, "cadence": "monthly", "weekday": None, "month": None, "month_day": 31}
+    if cadence == "yearly":
+        return {"enabled": True, "cadence": "yearly", "weekday": None, "month": 12, "month_day": 31}
+    return {"enabled": True, "cadence": cadence, "weekday": None, "month": None, "month_day": None}
 
 
 def get_admin_capture_runs(capability_id: str = "", status: str = "", limit: int = 100) -> tuple[dict[str, object], ...]:
@@ -83,10 +96,3 @@ def _optional_int(value: object) -> int | None:
     if value is None:
         return None
     return int(value)
-
-
-def _parse_run_time(value: str) -> time:
-    parts = value.split(":")
-    if len(parts) == 2:
-        return time(int(parts[0]), int(parts[1]))
-    return time(int(parts[0]), int(parts[1]), int(parts[2]))

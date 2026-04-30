@@ -9,8 +9,9 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
 from quotemux.capabilities import get_capability_definition, list_capability_definitions
-from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 from quotemux.reports import ContractReport
+from quotemux.store.cache_db import execute_many, execute_sql, query_dataframe
+from quotemux.store.payload_store import CachePayloadRef, get_payload, put_payload
 
 
 CACHE_HIT = "hit"
@@ -18,6 +19,8 @@ CACHE_PARTIAL_HIT = "partial_hit"
 CACHE_MISS = "miss"
 CACHE_STALE = "stale"
 CACHE_SKIP = "skip"
+CACHE_NEVER_EXPIRE_TTL_SECONDS = -1
+CACHE_NEVER_EXPIRE_UNTIL = datetime.max
 
 
 @dataclass(frozen=True)
@@ -341,17 +344,35 @@ SCHEMA_SQL = (
         capability_id text not null references capability_cache_policy(capability_id),
         time_key timestamp without time zone not null,
         identity_value text not null,
-        payload_json jsonb not null,
-        source_json jsonb not null default '{}'::jsonb,
+        payload_sha256 text not null,
+        payload_path text not null,
+        source_sha256 text not null,
+        source_path text not null,
         fresh_until timestamp without time zone not null,
         created_at timestamp without time zone not null default now(),
         updated_at timestamp without time zone not null default now(),
         unique (capability_id, time_key, identity_value)
     )
     """,
+    "alter table capability_cache_rows add column if not exists payload_sha256 text not null default ''",
+    "alter table capability_cache_rows add column if not exists payload_path text not null default ''",
+    "alter table capability_cache_rows add column if not exists source_sha256 text not null default ''",
+    "alter table capability_cache_rows add column if not exists source_path text not null default ''",
+    """
+    do $$
+    begin
+        if exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public' and table_name = 'capability_cache_rows' and column_name = 'payload_json'
+        ) then
+            alter table capability_cache_rows alter column payload_json drop not null;
+        end if;
+    end $$;
+    """,
     "create index if not exists idx_cache_rows_capability_time on capability_cache_rows (capability_id, time_key)",
     "create index if not exists idx_cache_rows_capability_fresh_until on capability_cache_rows (capability_id, fresh_until)",
-    "create index if not exists idx_cache_rows_payload_gin on capability_cache_rows using gin (payload_json)",
+    "drop index if exists idx_cache_rows_payload_gin",
     """
     create table if not exists capability_cache_coverage (
         id bigserial primary key,
@@ -457,6 +478,16 @@ def build_time_key(payload: dict[str, object], time_field: str) -> datetime:
 
 def build_scope_identity(payload: dict[str, object], fields: Sequence[str]) -> str:
     return build_identity_value(payload, fields)
+
+
+def _fresh_until_from_ttl(written_at: datetime, ttl_seconds: int) -> datetime:
+    if ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS:
+        return CACHE_NEVER_EXPIRE_UNTIL
+    return written_at + timedelta(seconds=ttl_seconds)
+
+
+def _is_fresh(policy: CachePolicy, fresh_until: datetime, now: datetime) -> bool:
+    return policy.ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS or fresh_until > now
 
 
 def _policy_from_row(row: dict[str, object]) -> CachePolicy:
@@ -751,38 +782,68 @@ class CacheStatusRepository:
 
 
 class CacheRowRepository:
-    def read(self, capability_id: str, time_start: datetime, time_end: datetime) -> tuple[dict[str, object], ...]:
+    def read(self, capability_id: str, time_start: datetime, time_end: datetime, never_expires: bool) -> tuple[dict[str, object], ...]:
         if not _ensure_schema():
             return ()
         frame = query_dataframe(
             """
-            select payload_json
+            select payload_sha256, payload_path, source_sha256, source_path
             from capability_cache_rows
-            where capability_id = %s and time_key >= %s and time_key <= %s and fresh_until > now()
+            where capability_id = %s
+              and time_key >= %s
+              and time_key <= %s
+              and (%s or fresh_until > now())
+              and payload_path <> ''
             order by time_key asc, identity_value asc
             """,
-            (capability_id, time_start, time_end),
+            (capability_id, time_start, time_end, never_expires),
         )
         if _is_empty_dataframe(frame):
             return ()
-        return tuple(row["payload_json"] for row in frame.to_dict("records") if isinstance(row["payload_json"], dict))
+        payloads: list[dict[str, object]] = []
+        for row in frame.to_dict("records"):
+            payload = get_payload(
+                CachePayloadRef(
+                    str(row["payload_sha256"]),
+                    str(row["payload_path"]),
+                    str(row["source_sha256"]),
+                    str(row["source_path"]),
+                )
+            )
+            if payload is not None:
+                payloads.append(payload)
+        return tuple(payloads)
 
     def upsert_many(self, capability_id: str, rows: Sequence[tuple[datetime, str, dict[str, object], dict[str, object], datetime]]) -> bool:
         if not _ensure_schema():
             return False
         params = [
-            (capability_id, time_key, identity_value, Jsonb(payload_json), Jsonb(source_json), fresh_until)
+            (
+                capability_id,
+                time_key,
+                identity_value,
+                payload_ref.payload_sha256,
+                payload_ref.payload_path,
+                payload_ref.source_sha256,
+                payload_ref.source_path,
+                fresh_until,
+            )
             for time_key, identity_value, payload_json, source_json, fresh_until in rows
+            for payload_ref in (put_payload(capability_id, time_key, payload_json, source_json),)
         ]
         return execute_many(
             """
             insert into capability_cache_rows (
-                capability_id, time_key, identity_value, payload_json, source_json, fresh_until
+                capability_id, time_key, identity_value,
+                payload_sha256, payload_path, source_sha256, source_path,
+                fresh_until
             )
-            values (%s, %s, %s, %s, %s, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s)
             on conflict (capability_id, time_key, identity_value) do update set
-                payload_json = excluded.payload_json,
-                source_json = excluded.source_json,
+                payload_sha256 = excluded.payload_sha256,
+                payload_path = excluded.payload_path,
+                source_sha256 = excluded.source_sha256,
+                source_path = excluded.source_path,
                 fresh_until = excluded.fresh_until,
                 updated_at = now()
             """,
@@ -899,6 +960,8 @@ def _request_scopes(policy: CachePolicy, request_identity: dict[str, object]) ->
 
 def _payload_matches_scope(payload: dict[str, object], scope: CacheScope) -> bool:
     for field, value in scope.criteria.items():
+        if _normalize_text(value) == "":
+            continue
         if field in {"start_year", "end_year", "is_open", "sort_by", "limit", "offset", "include_sources", "include_content_text"}:
             continue
         if field in {"event_type", "stock_code"} and _normalize_text(value) == "":
@@ -941,7 +1004,7 @@ def _filter_payloads(payloads: Sequence[dict[str, object]], scopes: Sequence[Cac
 
 
 def _coverage_covers(policy: CachePolicy, coverage: CacheCoverage, scope: CacheScope, now: datetime) -> bool:
-    if coverage.fresh_until <= now:
+    if not _is_fresh(policy, coverage.fresh_until, now):
         return False
     if policy.coverage_mode == "snapshot":
         return coverage.scope_identity == scope.scope_identity
@@ -949,7 +1012,7 @@ def _coverage_covers(policy: CachePolicy, coverage: CacheCoverage, scope: CacheS
 
 
 def _coverage_overlaps(policy: CachePolicy, coverage: CacheCoverage, scope: CacheScope, now: datetime) -> bool:
-    if coverage.fresh_until <= now:
+    if not _is_fresh(policy, coverage.fresh_until, now):
         return False
     if policy.coverage_mode == "snapshot":
         return coverage.scope_identity == scope.scope_identity
@@ -989,7 +1052,7 @@ class UnifiedPostgresCacheStore:
 
     def read(self, capability_id: str, request_identity: dict[str, object]) -> CacheReadResult:
         policy = self.policies.get(capability_id)
-        if policy is None or not policy.enabled:
+        if policy is None or not policy.enabled or not policy.read_enabled:
             self.audit.write(capability_id, "cache_skip", "", None, None, {"reason": "policy_disabled"})
             return CacheReadResult(CACHE_SKIP, (), "", None, None, {"reason": "policy_disabled"})
         scopes = _request_scopes(policy, request_identity)
@@ -999,7 +1062,7 @@ class UnifiedPostgresCacheStore:
         stale_count = 0
         for scope in scopes:
             coverages = self.coverage.find_for_scope(capability_id, scope.scope_identity)
-            stale_count += sum(1 for item in coverages if item.fresh_until <= now)
+            stale_count += sum(1 for item in coverages if not _is_fresh(policy, item.fresh_until, now))
             full = next((item for item in coverages if _coverage_covers(policy, item, scope, now)), None)
             if full is not None:
                 full_coverages.append((scope, full))
@@ -1029,9 +1092,10 @@ class UnifiedPostgresCacheStore:
     def _read_covered_payloads(self, policy: CachePolicy, capability_id: str, coverages: Sequence[tuple[CacheScope, CacheCoverage]]) -> tuple[dict[str, object], ...]:
         payloads: list[dict[str, object]] = []
         seen: set[str] = set()
+        never_expires = policy.ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS
         for scope, coverage in coverages:
             start, end = _coverage_read_range(policy, coverage, scope)
-            for payload in self.rows.read(capability_id, start, end):
+            for payload in self.rows.read(capability_id, start, end, never_expires):
                 marker = repr(sorted(payload.items()))
                 if marker in seen:
                     continue
@@ -1041,11 +1105,11 @@ class UnifiedPostgresCacheStore:
 
     def write(self, capability_id: str, request_identity: dict[str, object], items: Sequence[object], report: ContractReport) -> CacheWriteResult:
         policy = self.policies.get(capability_id)
-        if policy is None or not policy.enabled:
+        if policy is None or not policy.write_enabled:
             self.audit.write(capability_id, "cache_skip", "", None, None, {"reason": "policy_disabled"})
             return CacheWriteResult(CACHE_SKIP, 0, 0)
         written_at = datetime.now()
-        fresh_until = written_at + timedelta(seconds=policy.ttl_seconds)
+        fresh_until = _fresh_until_from_ttl(written_at, policy.ttl_seconds)
         source_json = _source_json(report)
         payloads = [_serialize_value(item) for item in items]
         typed_payloads = [payload for payload in payloads if isinstance(payload, dict)]

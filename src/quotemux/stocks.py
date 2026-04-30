@@ -303,7 +303,7 @@ def _build_steps(freq: str, request_freq: str, request_count: int | None, actual
         }[instance.package_id].get_stock_quotes(missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust),
     }
     if freq == "1d":
-        fallback_order = ("tushare", "efinance", "mootdx", "akshare")
+        fallback_order = ("tushare", "efinance", "mootdx", "akshare", "opentdx")
     else:
         fallback_order = ("opentdx", "efinance", "mootdx", "akshare")
     return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily" if freq == "1d" else "stocks.quotes.intraday", handlers, fallback_order)
@@ -313,6 +313,8 @@ def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderSte
     handlers = {
         "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: {
             "tushare": _tushare_provider,
+            "efinance": _efinance_provider,
+            "akshare": _akshare_provider,
         }[instance.package_id].get_stock_daily_snapshot_full(request_trade_date),
         "get_stock_quotes": lambda instance: lambda missing_codes, request_trade_date: {
             "tushare": _tushare_provider,
@@ -321,7 +323,7 @@ def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderSte
             "akshare": _akshare_provider,
         }[instance.package_id].get_stock_quotes(missing_codes, "1d", request_trade_date, "", "", "", "", None, "none"),
     }
-    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "mootdx", "akshare"))
+    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "akshare", "mootdx"))
 
 
 def _indicator_codes_from_params(code: str, codes: str) -> list[str]:
@@ -371,6 +373,17 @@ class QuoteMuxStocks:
         payload_items = payload_builder(sorted_items) if payload_builder is not None else sorted_items
         store_result(capability_id, store_identity, payload_items, ContractReport(contract_name=capability_id))
         return sorted_items
+
+    def _source_list(self, capability_id: str, handlers: dict[str, object], source_order: tuple[str, ...], key_fields: tuple[str, ...]) -> list[object]:
+        items, _ = run_fallback_chain_with_report(
+            capability_id,
+            [],
+            key_fields,
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps(capability_id, handlers, source_order),
+            self._settings.get_contract_source_order(capability_id, source_order),
+        )
+        return items
 
     def _store_single(self, capability_id: str, store_identity: dict[str, object], model_type: type[object], fetcher, payload_builder=None):
         store_items, store_read = load_store_result(capability_id, store_identity, model_type)
@@ -432,7 +445,7 @@ class QuoteMuxStocks:
             ("code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count),
             _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
-            self._settings.get_contract_source_order(contract_name, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order(contract_name, ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_stock_quotes(merged_items, actual_freq, actual_adjust)
@@ -479,7 +492,7 @@ class QuoteMuxStocks:
             ("code", "trade_time", "freq"),
             lambda items: [([], actual_trade_date)] if items == [] else [],
             _build_daily_snapshot_steps(self._settings),
-            self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
         )
         sorted_items = sort_items(merged_items, ("code", "trade_time"))
         report = ContractReport.from_fallback_report("stocks.quotes.daily_snapshot", fallback_report)
@@ -510,6 +523,7 @@ class QuoteMuxStocks:
         handlers = {
             "get_stock_money_flow": lambda instance: lambda missing_start, missing_end: {
                 "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
             }[instance.package_id].get_stock_money_flow(code, "", missing_start, missing_end, view),
         }
         merged_items, _ = run_fallback_chain_with_report(
@@ -517,8 +531,8 @@ class QuoteMuxStocks:
             [],
             ("code", "trade_date", "view"),
             lambda items: self._build_missing_money_flow_requests(items, trade_date, start_date, end_date),
-            SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow", handlers, ("tushare",)),
-            self._settings.get_contract_source_order("stocks.indicators.money_flow", ("tushare",)),
+            SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("stocks.indicators.money_flow", ("tushare", "akshare")),
         )
         return sorted(merged_items, key=lambda item: (item.code, item.trade_date))
 
@@ -530,13 +544,19 @@ class QuoteMuxStocks:
             "end_period": end_period,
             "report_type": report_type,
         }
+        handlers = {
+            "get_stock_financial_statements": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_stock_financial_statements(codes, report_period, start_period, end_period, report_type),
+        }
         return self._store_list(
             "stocks.finance.statements",
             store_identity,
             StockFinancialStatementItem,
             ("code", "report_period", "report_type", "announce_date"),
             ("code", "report_period", "announce_date", "report_type"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_stock_financial_statements(codes, report_period, start_period, end_period, report_type),
+            lambda: self._source_list("stocks.finance.statements", handlers, ("tushare", "akshare"), ("code", "report_period", "report_type", "announce_date")),
         )
 
     def get_finance_indicators(self, code: str, codes: str, report_period: str, start_period: str, end_period: str) -> list[StockFinanceIndicatorItem]:
@@ -547,13 +567,20 @@ class QuoteMuxStocks:
             "start_period": start_period,
             "end_period": end_period,
         }
+        handlers = {
+            "get_stock_finance_indicators": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+                "efinance": _efinance_provider,
+            }[instance.package_id].get_stock_finance_indicators(code, codes, report_period, start_period, end_period),
+        }
         return self._store_list(
             "stocks.finance.indicators",
             store_identity,
             StockFinanceIndicatorItem,
             ("code", "report_period"),
             ("code", "report_period"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_stock_finance_indicators(code, codes, report_period, start_period, end_period),
+            lambda: self._source_list("stocks.finance.indicators", handlers, ("tushare", "akshare", "efinance"), ("code", "report_period")),
         )
 
     def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int) -> list[StockBasicInfo]:
@@ -585,14 +612,28 @@ class QuoteMuxStocks:
 
     def get_profile(self, code: str) -> StockProfileItem | None:
         store_identity = {"code": code}
-        store_items, store_read = load_store_result("stocks.profile.company", store_identity, StockProfileItem)
-        if store_read.hit:
-            return store_items[0] if store_items else None
-        if not self._settings.is_source_enabled("tushare"):
-            return None
-        item = _tushare_provider.get_company_profile(code)
-        store_result("stocks.profile.company", store_identity, _payloads_with_as_of_date([item] if item is not None else []), ContractReport(contract_name="stocks.profile.company"))
-        return item
+        handlers = {
+            "get_company_profile": lambda instance: lambda: [
+                item
+                for item in [
+                    {
+                        "tushare": _tushare_provider,
+                        "akshare": _akshare_provider,
+                    }[instance.package_id].get_company_profile(code)
+                ]
+                if item is not None
+            ],
+        }
+        items = self._store_list(
+            "stocks.profile.company",
+            store_identity,
+            StockProfileItem,
+            ("code",),
+            ("code",),
+            lambda: self._source_list("stocks.profile.company", handlers, ("tushare", "akshare"), ("code",)),
+            _payloads_with_as_of_date,
+        )
+        return items[0] if items else None
 
     def get_name_history(self, code: str, start_date: str, end_date: str) -> list[NameHistoryItem]:
         store_identity = {"code": code, "start_date": start_date, "end_date": end_date}
@@ -738,57 +779,87 @@ class QuoteMuxStocks:
 
     def get_dividends(self, code: str, start_date: str, end_date: str) -> list[DividendItem]:
         store_identity = {"code": code, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_dividends": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_dividends(code, start_date, end_date),
+        }
         return self._store_list(
             "stocks.corporate_actions.dividends",
             store_identity,
             DividendItem,
             ("code", "announce_date", "record_date", "ex_date"),
             ("code", "announce_date", "record_date", "ex_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_dividends(code, start_date, end_date),
+            lambda: self._source_list("stocks.corporate_actions.dividends", handlers, ("tushare", "akshare"), ("code", "announce_date", "record_date", "ex_date")),
         )
 
     def get_repurchases(self, code: str, start_date: str, end_date: str) -> list[RepurchaseItem]:
         store_identity = {"code": code, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_repurchases": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_repurchases(code, start_date, end_date),
+        }
         return self._store_list(
             "stocks.corporate_actions.repurchases",
             store_identity,
             RepurchaseItem,
             ("code", "announce_date", "progress"),
             ("code", "announce_date", "progress"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_repurchases(code, start_date, end_date),
+            lambda: self._source_list("stocks.corporate_actions.repurchases", handlers, ("tushare", "akshare"), ("code", "announce_date", "progress")),
         )
 
     def get_rights_issues(self, code: str, start_date: str, end_date: str) -> list[RightsIssueItem]:
         store_identity = {"code": code, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_rights_issues": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_rights_issues(code, start_date, end_date),
+        }
         return self._store_list(
             "stocks.corporate_actions.rights_issues",
             store_identity,
             RightsIssueItem,
             ("code", "announce_date", "record_date"),
             ("code", "announce_date", "record_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_rights_issues(code, start_date, end_date),
+            lambda: self._source_list("stocks.corporate_actions.rights_issues", handlers, ("tushare", "akshare"), ("code", "announce_date", "record_date")),
         )
 
     def get_share_changes(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareChangeItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_share_changes": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_share_changes(code, trade_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.corporate_actions.share_changes",
             store_identity,
             ShareChangeItem,
             ("code", "change_date", "reason"),
             ("code", "change_date", "reason"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_share_changes(code, trade_date, start_date, end_date),
+            lambda: self._source_list("stocks.corporate_actions.share_changes", handlers, ("tushare", "akshare"), ("code", "change_date", "reason")),
         )
 
     def get_unlock_schedules(self, code: str, unlock_date: str, start_date: str, end_date: str) -> list[UnlockScheduleItem]:
         store_identity = {"code": code, "unlock_date": unlock_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_unlock_schedules": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_unlock_schedules(code, unlock_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.corporate_actions.unlock_schedules",
             store_identity,
             UnlockScheduleItem,
             ("code", "unlock_date", "holder_type", "share_type"),
             ("code", "unlock_date", "holder_type", "share_type"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_unlock_schedules(code, unlock_date, start_date, end_date),
+            lambda: self._source_list("stocks.corporate_actions.unlock_schedules", handlers, ("tushare", "akshare"), ("code", "unlock_date", "holder_type", "share_type")),
         )
 
     def get_audits(self, code: str, report_period: str, start_period: str, end_period: str) -> list[AuditItem]:
@@ -804,35 +875,54 @@ class QuoteMuxStocks:
 
     def get_disclosure_dates(self, code: str, report_period: str, start_period: str, end_period: str) -> list[DisclosureDateItem]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
+        handlers = {
+            "get_disclosure_dates": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_disclosure_dates(code, report_period, start_period, end_period),
+        }
         return self._store_list(
             "stocks.finance.disclosure_dates",
             store_identity,
             DisclosureDateItem,
             ("code", "report_period", "plan_date", "actual_date"),
             ("code", "report_period", "plan_date", "actual_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_disclosure_dates(code, report_period, start_period, end_period),
+            lambda: self._source_list("stocks.finance.disclosure_dates", handlers, ("tushare", "akshare"), ("code", "report_period", "plan_date", "actual_date")),
         )
 
     def get_express(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ExpressItem]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
+        handlers = {
+            "get_express": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+                "efinance": _efinance_provider,
+            }[instance.package_id].get_express(code, report_period, start_period, end_period),
+        }
         return self._store_list(
             "stocks.finance.express",
             store_identity,
             ExpressItem,
             ("code", "report_period", "announce_date"),
             ("code", "report_period", "announce_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_express(code, report_period, start_period, end_period),
+            lambda: self._source_list("stocks.finance.express", handlers, ("tushare", "akshare", "efinance"), ("code", "report_period", "announce_date")),
         )
 
     def get_forecasts(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ForecastItem]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
+        handlers = {
+            "get_forecasts": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_forecasts(code, report_period, start_period, end_period),
+        }
         return self._store_list(
             "stocks.finance.forecasts",
             store_identity,
             ForecastItem,
             ("code", "report_period", "forecast_type"),
             ("code", "report_period", "forecast_type"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_forecasts(code, report_period, start_period, end_period),
+            lambda: self._source_list("stocks.finance.forecasts", handlers, ("tushare", "akshare"), ("code", "report_period", "forecast_type")),
         )
 
     def get_main_business(self, code: str, report_period: str, start_period: str, end_period: str, classification: str) -> list[MainBusinessItem]:
@@ -849,7 +939,17 @@ class QuoteMuxStocks:
             MainBusinessItem,
             ("code", "report_period", "classification", "segment_name"),
             ("code", "report_period", "classification", "segment_name"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_main_business(code, report_period, start_period, end_period, classification),
+            lambda: self._source_list(
+                "stocks.finance.main_business",
+                {
+                    "get_main_business": lambda instance: lambda: {
+                        "tushare": _tushare_provider,
+                        "akshare": _akshare_provider,
+                    }[instance.package_id].get_main_business(code, report_period, start_period, end_period, classification),
+                },
+                ("tushare", "akshare"),
+                ("code", "report_period", "classification", "segment_name"),
+            ),
         )
 
     def get_ccass_holdings(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[CcassHoldingItem]:
@@ -876,46 +976,71 @@ class QuoteMuxStocks:
 
     def get_hk_connect_holdings(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[HKConnectHoldingItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_hk_connect_holdings": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_hk_connect_holdings(code, trade_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.ownership.hk_connect_holdings",
             store_identity,
             HKConnectHoldingItem,
             ("code", "trade_date"),
             ("code", "trade_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_hk_connect_holdings(code, trade_date, start_date, end_date),
+            lambda: self._source_list("stocks.ownership.hk_connect_holdings", handlers, ("tushare", "akshare"), ("code", "trade_date")),
         )
 
     def get_pledge_stats(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[PledgeStatItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_pledge_stats": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_pledge_stats(code, trade_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.ownership.pledges.stats",
             store_identity,
             PledgeStatItem,
             ("code", "trade_date"),
             ("code", "trade_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_pledge_stats(code, trade_date, start_date, end_date),
+            lambda: self._source_list("stocks.ownership.pledges.stats", handlers, ("tushare", "akshare"), ("code", "trade_date")),
         )
 
     def get_pledge_details(self, code: str, start_date: str, end_date: str, status: str) -> list[PledgeDetailItem]:
         store_identity = {"code": code, "start_date": start_date, "end_date": end_date, "status": status}
+        handlers = {
+            "get_pledge_details": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_pledge_details(code, start_date, end_date, status),
+        }
         return self._store_list(
             "stocks.ownership.pledges.details",
             store_identity,
             PledgeDetailItem,
             ("code", "holder_name", "start_date", "end_date", "status"),
             ("code", "start_date", "end_date", "holder_name"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_pledge_details(code, start_date, end_date, status),
+            lambda: self._source_list("stocks.ownership.pledges.details", handlers, ("tushare", "akshare"), ("code", "holder_name", "start_date", "end_date", "status")),
         )
 
     def get_shareholder_count(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareholderCountItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_shareholder_count": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+                "efinance": _efinance_provider,
+            }[instance.package_id].get_shareholder_count(code, trade_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.ownership.shareholders.count",
             store_identity,
             ShareholderCountItem,
             ("code", "trade_date"),
             ("code", "trade_date"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_shareholder_count(code, trade_date, start_date, end_date),
+            lambda: self._source_list("stocks.ownership.shareholders.count", handlers, ("tushare", "akshare", "efinance"), ("code", "trade_date")),
         )
 
     def get_shareholder_changes(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareholderChangeItem]:
@@ -924,46 +1049,70 @@ class QuoteMuxStocks:
 
     def get_shareholder_top10(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
+        handlers = {
+            "get_shareholder_top10": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_shareholder_top10(code, report_period, start_period, end_period, False),
+        }
         return self._store_list(
             "stocks.ownership.shareholders.top10",
             store_identity,
             ShareholderTop10Item,
             ("code", "report_period", "rank", "shareholder_name"),
             ("code", "report_period", "rank"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_shareholder_top10(code, report_period, start_period, end_period, False),
+            lambda: self._source_list("stocks.ownership.shareholders.top10", handlers, ("tushare", "akshare"), ("code", "report_period", "rank", "shareholder_name")),
         )
 
     def get_shareholder_top10_float(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
+        handlers = {
+            "get_shareholder_top10": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_shareholder_top10(code, report_period, start_period, end_period, True),
+        }
         return self._store_list(
             "stocks.ownership.shareholders.top10_float",
             store_identity,
             ShareholderTop10Item,
             ("code", "report_period", "rank", "shareholder_name"),
             ("code", "report_period", "rank"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_shareholder_top10(code, report_period, start_period, end_period, True),
+            lambda: self._source_list("stocks.ownership.shareholders.top10_float", handlers, ("tushare", "akshare"), ("code", "report_period", "rank", "shareholder_name")),
         )
 
     def get_research_reports(self, code: str, report_date: str, start_date: str, end_date: str):
         store_identity = {"code": code, "report_date": report_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_research_reports": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_research_reports(code, report_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.research.reports",
             store_identity,
             ResearchReportItem,
             ("code", "report_date", "institution", "title"),
             ("code", "report_date", "institution", "title"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_research_reports(code, report_date, start_date, end_date),
+            lambda: self._source_list("stocks.research.reports", handlers, ("tushare", "akshare"), ("code", "report_date", "institution", "title")),
         )
 
     def get_surveys(self, code: str, survey_date: str, start_date: str, end_date: str) -> list[SurveyItem]:
         store_identity = {"code": code, "survey_date": survey_date, "start_date": start_date, "end_date": end_date}
+        handlers = {
+            "get_surveys": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_surveys(code, survey_date, start_date, end_date),
+        }
         return self._store_list(
             "stocks.research.surveys",
             store_identity,
             SurveyItem,
             ("code", "survey_date", "org_name", "announcement_date"),
             ("code", "survey_date", "announcement_date", "org_name"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_surveys(code, survey_date, start_date, end_date),
+            lambda: self._source_list("stocks.research.surveys", handlers, ("tushare", "akshare"), ("code", "survey_date", "org_name", "announcement_date")),
         )
 
     def get_bse_code_mappings(self, old_code: str, new_code: str, status: str) -> list[BSECodeMappingItem]:

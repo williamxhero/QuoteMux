@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
+from importlib import invalidate_caches
+from pathlib import Path
 import sys
 
 from quotemux.config_runtime.store import read_import_roots
@@ -107,13 +109,28 @@ def _load_handler(target: str):
 
 def _activate_import_roots(import_roots: tuple[str, ...]) -> None:
     for root_text in import_roots:
-        if root_text != "" and root_text not in sys.path:
-            sys.path.insert(0, root_text)
+        if root_text == "":
+            continue
+        root_path = Path(root_text)
+        import_path = root_path.parent if root_path.name == "quotemux_packages" else root_path
+        import_text = str(import_path)
+        if import_text not in sys.path:
+            sys.path.insert(0, import_text)
+    invalidate_caches()
+
+
+def clear_loaded_source_package_modules() -> None:
+    for module_name in list(sys.modules):
+        if module_name == "quotemux_packages" or module_name.startswith("quotemux_packages."):
+            del sys.modules[module_name]
+    invalidate_caches()
 
 
 def build_source_package_registry(import_roots: tuple[str, ...]) -> SourcePackageRegistry:
     _activate_import_roots(import_roots)
-    manifests = [*load_builtin_manifests(), *load_external_manifests(import_roots)]
+    manifests = list(load_external_manifests(import_roots))
+    if manifests == []:
+        manifests.extend(load_builtin_manifests())
     from quotemux.config_runtime.validation import validate_manifests
 
     validate_manifests(tuple(manifests))

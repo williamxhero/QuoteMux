@@ -1366,7 +1366,7 @@ class QuoteMuxCaptureJob:
         if not policy.enabled:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "capture_policy_disabled"})
         cache_policy = self._cache_store.get_policy(policy.capability_id)
-        if cache_policy is None or not cache_policy.enabled or not cache_policy.write_enabled:
+        if cache_policy is None or not cache_policy.write_enabled:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "cache_policy_disabled"})
         if policy.window_count < 1:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "empty_window"})

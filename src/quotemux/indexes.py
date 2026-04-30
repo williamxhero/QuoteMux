@@ -18,6 +18,7 @@ from quotemux.store import load_store_result, store_result
 _akshare_provider = SourceProxy("akshare")
 _efinance_provider = SourceProxy("efinance")
 _mootdx_provider = SourceProxy("mootdx")
+_opentdx_provider = SourceProxy("opentdx")
 _tushare_provider = SourceProxy("tushare")
 
 
@@ -174,12 +175,13 @@ def _build_quote_steps(request_freq: str, request_count: int | None, settings: Q
     handlers = {
         "get_index_quotes": lambda instance: lambda index_codes, missing_start, missing_end: {
             "tushare": _tushare_provider,
+            "opentdx": _opentdx_provider,
             "efinance": _efinance_provider,
             "mootdx": _mootdx_provider,
             "akshare": _akshare_provider,
         }[instance.package_id].get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count),
     }
-    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("tushare", "efinance", "mootdx", "akshare"))
+    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("tushare", "efinance", "mootdx", "akshare", "opentdx"))
 
 
 def _build_member_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexMemberItem], ...]:
@@ -263,7 +265,7 @@ class QuoteMuxIndexes:
             ("index_code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count),
             _build_quote_steps(request_freq, request_count, self._settings),
-            self._settings.get_contract_source_order("indexes.quotes.daily", ("tushare", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order("indexes.quotes.daily", ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_index_quotes(merged_items, actual_freq)

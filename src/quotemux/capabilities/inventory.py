@@ -240,17 +240,45 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "stocks.quotes.intraday":
         return ("opentdx", "efinance", "mootdx", "akshare")
-    if capability_id in {"stocks.quotes.daily", "stocks.quotes.daily_snapshot", "indexes.quotes.daily"}:
-        return ("tushare", "efinance", "mootdx", "akshare")
+    if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily"}:
+        return ("tushare", "efinance", "mootdx", "akshare", "opentdx")
+    if capability_id == "stocks.quotes.daily_snapshot":
+        return ("tushare", "efinance", "akshare", "mootdx")
     if capability_id in {"indexes.members"}:
         return ("tushare", "efinance", "mootdx", "akshare")
     if capability_id.startswith("markets.calendar."):
         return ("tushare", "akshare")
     if capability_id in {"stocks.indicators.money_flow", "boards.indicators.money_flow"}:
-        return ("tushare",)
+        return ("tushare", "akshare")
+    if capability_id in {"boards.catalog", "boards.profile", "boards.members", "boards.quotes.daily", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
+        return ("tushare", "akshare")
+    if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions"}:
+        return ("tushare", "akshare")
+    if capability_id == "markets.participants.dragon_tiger":
+        return ("tushare", "akshare", "efinance")
+    if capability_id in {"stocks.finance.express", "stocks.finance.indicators"}:
+        return ("tushare", "akshare", "efinance")
+    if capability_id in {"stocks.finance.disclosure_dates", "stocks.finance.forecasts", "stocks.finance.main_business", "stocks.finance.statements", "stocks.profile.company", "stocks.research.reports", "stocks.research.surveys"}:
+        return ("tushare", "akshare")
+    if capability_id in {
+        "stocks.corporate_actions.dividends",
+        "stocks.corporate_actions.repurchases",
+        "stocks.corporate_actions.rights_issues",
+        "stocks.corporate_actions.share_changes",
+        "stocks.corporate_actions.unlock_schedules",
+        "stocks.ownership.hk_connect_holdings",
+        "stocks.ownership.pledges.details",
+        "stocks.ownership.pledges.stats",
+        "stocks.ownership.shareholders.changes",
+        "stocks.ownership.shareholders.top10",
+        "stocks.ownership.shareholders.top10_float",
+    }:
+        return ("tushare", "akshare")
+    if capability_id == "stocks.ownership.shareholders.count":
+        return ("tushare", "akshare", "efinance")
     if capability_id == "stocks.signals.hl":
         return ("opentdx", "efinance", "mootdx", "akshare")
-    if capability_id in {"stocks.factors.technical", "stocks.ownership.shareholders.changes", "markets.connect.quotas"}:
+    if capability_id in {"stocks.factors.technical", "markets.connect.quotas"}:
         return ("tushare",)
     if capability_id == "markets.events.news":
         return ()

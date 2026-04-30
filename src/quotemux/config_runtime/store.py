@@ -135,6 +135,9 @@ class RuntimeConfigStore:
     def write_import_roots(self, import_roots: tuple[str, ...]) -> None:
         self._write_json(self._imports_path, list(import_roots))
 
+    def package_install_root(self) -> Path:
+        return self._root / "source_packages"
+
     def read_profile_transitions(self) -> tuple[dict[str, str], ...]:
         payload = self._read_json(self._profile_transitions_path, [])
         return tuple(

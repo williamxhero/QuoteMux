@@ -9,7 +9,8 @@ from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfil
 from quotemux.config_runtime.store import RuntimeConfigStore, RuntimeState, _runtime_root
 from quotemux.config_runtime.validation import ConfigValidationError, validate_instance, validate_profile
 from quotemux.contracts.policies import list_default_contract_policies
-from quotemux.source_packages.registry import build_source_package_registry, refresh_default_source_package_registry
+from quotemux.source_packages.installer import install_source_package_directory
+from quotemux.source_packages.registry import build_source_package_registry, clear_loaded_source_package_modules, refresh_default_source_package_registry
 
 
 class QuoteMuxConfigRuntime:
@@ -43,12 +44,14 @@ class QuoteMuxConfigRuntime:
         return self._store.read_import_roots()
 
     def add_import_root(self, path_text: str) -> tuple[str, ...]:
-        self.ensure_initialized()
+        installed_root = install_source_package_directory(Path(path_text), self._store.package_install_root())
         current = list(self._store.read_import_roots())
-        if path_text not in current:
-            current.append(path_text)
+        if installed_root not in current:
+            current.insert(0, installed_root)
             self._store.write_import_roots(tuple(current))
+        clear_loaded_source_package_modules()
         refresh_default_source_package_registry()
+        self.ensure_initialized()
         return self._store.read_import_roots()
 
     def list_source_instances(self) -> tuple[SourceInstanceConfig, ...]:

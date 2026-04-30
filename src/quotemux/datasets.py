@@ -16,7 +16,6 @@ from quotemux.requests.markets import TradingCalendarRequest
 from quotemux.requests.datasets import IndexBar1dRequest, StockBar1mRequest, StockDailyOhlcvaRepairRequest
 from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
-from markethub_packages.tushare.source import call_tushare_api, get_ts_pro
 
 try:
     from opentdx import MARKET, PERIOD, TdxClient
@@ -47,6 +46,18 @@ INDEX_KLINE_CODE_MAP = {
 CONTRACT_STOCK_INTRADAY = "stocks.quotes.intraday"
 CONTRACT_STOCK_DAILY = "stocks.quotes.daily"
 CONTRACT_INDEX_DAILY = "indexes.quotes.daily"
+
+
+def get_ts_pro():
+    from quotemux_packages.tushare.source import get_ts_pro as load_ts_pro
+
+    return load_ts_pro()
+
+
+def call_tushare_api(*args, **kwargs):
+    from quotemux_packages.tushare.source import call_tushare_api as call_api
+
+    return call_api(*args, **kwargs)
 
 
 def _normalize_datetime(frame: pd.DataFrame, column_name: str) -> pd.DataFrame:
@@ -691,8 +702,8 @@ class QuoteMuxDatasets:
             base_items,
             ("index_code", "trade_time", "freq"),
             lambda items: [([request.index_code], _trade_date_text(request.start_date), _trade_date_text(request.end_date))] if _needs_more(items) else [],
-            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_INDEX_DAILY, handlers, ("opentdx", "efinance", "mootdx", "akshare")),
-            self._settings.get_contract_source_order(CONTRACT_INDEX_DAILY, ("opentdx", "efinance", "mootdx", "akshare")),
+            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_INDEX_DAILY, handlers, ("efinance", "mootdx", "akshare", "opentdx")),
+            self._settings.get_contract_source_order(CONTRACT_INDEX_DAILY, ("efinance", "mootdx", "akshare", "opentdx")),
         )
         out = _index_items_to_frame(merged_items)
         quality = validate_quote_frame(out.rename(columns={"trade_date": "trade_time"}), ["index_code", "trade_time"], "trade_time")

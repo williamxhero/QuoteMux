@@ -38,3 +38,4 @@ py -3.13 -m pip wheel D:/WILL/STOCK/QuoteMux -w D:/WILL/STOCK/QuoteMux/dist
 - `MarketHub` 以 HTTP 外壳形式消费它。
 - `Updater` 以批处理外壳形式消费它。
 - 兼容层仅允许做导入过渡和参数适配，不允许承载 source runtime 逻辑。
+- 小电脑部署使用宿主机 Python 服务，不走 Docker；部署说明见 [docs/deploy_yosef_server.md](docs/deploy_yosef_server.md)。

@@ -4,3 +4,7 @@ __pycache__
 /dist
 /tests
 /src/quotemux.egg-info
+/ops/yosef_server
+/migrations
+/docs
+/tools

@@ -5,7 +5,7 @@ from datetime import time
 
 from quotemux.capabilities import is_known_capability_id
 from quotemux.store.capture import CapturePolicyUpdate, QuoteMuxCaptureJob
-from quotemux.store.postgres import CachePolicy, get_postgres_cache_store
+from quotemux.store.postgres import CACHE_NEVER_EXPIRE_TTL_SECONDS, CachePolicy, get_postgres_cache_store
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,8 @@ class CachePolicyUpdate:
     capability_id: str
     enabled: bool
     ttl_seconds: int | None
+    read_enabled: bool | None = None
+    write_enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -53,8 +55,8 @@ class QuoteMuxCacheAdmin:
         policy = CachePolicy(
             capability_id=current.capability_id,
             enabled=update.enabled,
-            read_enabled=update.enabled,
-            write_enabled=update.enabled,
+            read_enabled=update.enabled if update.read_enabled is None else update.read_enabled,
+            write_enabled=update.enabled if update.write_enabled is None else update.write_enabled,
             ttl_seconds=current.ttl_seconds if update.ttl_seconds is None else update.ttl_seconds,
             time_field=current.time_field,
             key_fields=current.key_fields,
@@ -85,6 +87,10 @@ class QuoteMuxCacheAdmin:
         }
 
 
+def _cache_enabled_by_ttl(ttl_seconds: int) -> bool:
+    return ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS or ttl_seconds > 0
+
+
 class QuoteMuxCaptureAdmin:
     def __init__(self, runtime: object | None = None, job: QuoteMuxCaptureJob | None = None) -> None:
         self._job = job or QuoteMuxCaptureJob(runtime)
@@ -106,7 +112,7 @@ class QuoteMuxCaptureAdmin:
     def update_policy(self, payload: CapturePolicyPayload) -> dict[str, object]:
         if not is_known_capability_id(payload.capability_id):
             raise KeyError(f"未知 capability: {payload.capability_id}")
-        return self._job.update_policy(
+        policy = self._job.update_policy(
             CapturePolicyUpdate(
                 capability_id=payload.capability_id,
                 enabled=payload.enabled,
@@ -120,6 +126,24 @@ class QuoteMuxCaptureAdmin:
                 window_count=payload.window_count,
                 batch_size=payload.batch_size,
                 notes=payload.notes,
+            )
+        )
+        self._sync_cache_policy(payload.capability_id, payload.enabled)
+        return policy
+
+    def _sync_cache_policy(self, capability_id: str, capture_enabled: bool) -> None:
+        current = get_postgres_cache_store().get_policy(capability_id)
+        if current is None:
+            raise KeyError(f"未知缓存策略: {capability_id}")
+        ttl_keeps_cache_enabled = _cache_enabled_by_ttl(current.ttl_seconds)
+        cache_enabled = ttl_keeps_cache_enabled and not capture_enabled
+        QuoteMuxCacheAdmin(self).update_policy(
+            CachePolicyUpdate(
+                capability_id=capability_id,
+                enabled=cache_enabled,
+                ttl_seconds=current.ttl_seconds,
+                read_enabled=cache_enabled,
+                write_enabled=ttl_keeps_cache_enabled,
             )
         )
 

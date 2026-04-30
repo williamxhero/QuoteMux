@@ -12,6 +12,7 @@ from quotemux.reports import ContractReport
 from quotemux.store import load_store_result, store_result
 
 
+_akshare_provider = SourceProxy("akshare")
 _tushare_provider = SourceProxy("tushare")
 
 
@@ -107,9 +108,20 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.quotes.daily", store_identity, BoardQuoteItem)
         if store_read.hit:
             return store_items[: ensure_limit(limit)]
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_board_quotes(board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count)
+        handlers = {
+            "get_board_quotes": lambda instance: lambda request_board_codes: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_board_quotes(request_board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.quotes.daily",
+            store_items if store_read.partial_hit else [],
+            ("board_code", "trade_time", "freq"),
+            lambda current_items: [(board_codes,)] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.quotes.daily", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.quotes.daily", ("tushare", "akshare")),
+        )
         items = sorted(items, key=lambda item: (item.board_code, item.trade_time))
         if count:
             grouped: dict[str, list[BoardQuoteItem]] = {}
@@ -128,9 +140,20 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.catalog", store_identity, BoardCatalogItem)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_board_catalog(category, market, status, ensure_limit(limit), offset)
+        handlers = {
+            "get_board_catalog": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_board_catalog(category, market, status, ensure_limit(limit), offset),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.catalog",
+            store_items if store_read.partial_hit else [],
+            ("board_code",),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.catalog", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.catalog", ("tushare", "akshare")),
+        )
         store_result("boards.catalog", store_identity, _payloads_with_as_of_date(items), ContractReport(contract_name="boards.catalog"))
         return items
 
@@ -139,9 +162,23 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.profile", store_identity, BoardCatalogItem)
         if store_read.hit:
             return store_items[0] if store_items else None
-        if not self._settings.is_source_enabled("tushare"):
-            return None
-        item = _tushare_provider.get_board_profile(board_code)
+        handlers = {
+            "get_board_profile": lambda instance: lambda: [
+                item for item in [{
+                    "tushare": _tushare_provider,
+                    "akshare": _akshare_provider,
+                }[instance.package_id].get_board_profile(board_code)] if item is not None
+            ],
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.profile",
+            store_items if store_read.partial_hit else [],
+            ("board_code",),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.profile", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.profile", ("tushare", "akshare")),
+        )
+        item = items[0] if items else None
         store_result("boards.profile", store_identity, _payloads_with_as_of_date([item] if item is not None else []), ContractReport(contract_name="boards.profile"))
         return item
 
@@ -150,9 +187,20 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.members", store_identity, BoardMemberItem)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_board_members(board_code, trade_date)
+        handlers = {
+            "get_board_members": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_board_members(board_code, trade_date),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.members",
+            store_items if store_read.partial_hit else [],
+            ("board_code", "code"),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.members", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.members", ("tushare", "akshare")),
+        )
         store_result("boards.members", store_identity, items, ContractReport(contract_name="boards.members"))
         return items
 
@@ -171,6 +219,7 @@ class QuoteMuxBoards:
         handlers = {
             "get_board_money_flow": lambda instance: lambda missing_start, missing_end: {
                 "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
             }[instance.package_id].get_board_money_flow(board_code, "", missing_start, missing_end, scope),
         }
         merged_items, _ = run_fallback_chain_with_report(
@@ -178,24 +227,47 @@ class QuoteMuxBoards:
             [],
             ("board_code", "trade_date", "scope"),
             lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
-            SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare",)),
-            self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare",)),
+            SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare")),
         )
         return sorted(merged_items, key=lambda item: (item.board_code, item.trade_date))
 
     def get_market_money_flow(self, trade_date: str, scope: str, limit: int, offset: int) -> list[BoardMoneyFlowItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset)
+        handlers = {
+            "get_board_daily_money_flow_snapshot": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.indicators.money_flow.snapshot",
+            [],
+            ("board_code", "trade_date", "scope"),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow.snapshot", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.indicators.money_flow.snapshot", ("tushare", "akshare")),
+        )
+        return sorted(items, key=lambda item: (item.board_code, item.trade_date))
 
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}
         store_items, store_read = load_store_result("boards.reference.categories", store_identity, BoardCategoryItem)
         if store_read.hit:
             return store_items
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_board_categories(parent_code, level)
+        handlers = {
+            "get_board_categories": lambda instance: lambda: {
+                "tushare": _tushare_provider,
+                "akshare": _akshare_provider,
+            }[instance.package_id].get_board_categories(parent_code, level),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.reference.categories",
+            store_items if store_read.partial_hit else [],
+            ("category_code",),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.reference.categories", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.reference.categories", ("tushare", "akshare")),
+        )
         store_result("boards.reference.categories", store_identity, _payloads_with_as_of_date(items), ContractReport(contract_name="boards.reference.categories"))
         return items
 
