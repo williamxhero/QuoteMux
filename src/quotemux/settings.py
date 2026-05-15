@@ -12,6 +12,7 @@ DEFAULT_ENABLED_SOURCES = (
     "efinance",
     "mootdx",
     "akshare",
+    "derived_core",
 )
 
 

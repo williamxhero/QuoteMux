@@ -261,8 +261,6 @@ def _guess_handler_name(capability_id: str, available_handlers: set[str]) -> str
     handler_name = handler_map.get(normalized, "")
     if normalized == "stocks.quotes.daily_snapshot" and handler_name not in available_handlers and "get_stock_quotes" in available_handlers:
         return "get_stock_quotes"
-    if normalized == "stocks.signals.hl" and handler_name not in available_handlers and "get_stock_quotes" in available_handlers:
-        return "get_stock_quotes"
     if handler_name in available_handlers:
         return handler_name
     if len(available_handlers) == 1:

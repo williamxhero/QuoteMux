@@ -136,14 +136,14 @@ class QuoteMuxCaptureAdmin:
         if current is None:
             raise KeyError(f"未知缓存策略: {capability_id}")
         ttl_keeps_cache_enabled = _cache_enabled_by_ttl(current.ttl_seconds)
-        cache_enabled = ttl_keeps_cache_enabled and not capture_enabled
+        cache_enabled = capture_enabled or ttl_keeps_cache_enabled
         QuoteMuxCacheAdmin(self).update_policy(
             CachePolicyUpdate(
                 capability_id=capability_id,
                 enabled=cache_enabled,
                 ttl_seconds=current.ttl_seconds,
                 read_enabled=cache_enabled,
-                write_enabled=ttl_keeps_cache_enabled,
+                write_enabled=cache_enabled,
             )
         )
 

@@ -4,6 +4,8 @@ from datetime import timedelta
 
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem
 from quotemux.infra.common import format_date_value, parse_date_text
+from quotemux.sources.datalake import reference as _datalake_reference
+from quotemux.sources.datalake import source as _datalake_source
 from quotemux.common import ensure_limit
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.runtime_core.registry import SourceProxy
@@ -14,6 +16,8 @@ from quotemux.store import load_store_result, store_result
 
 _akshare_provider = SourceProxy("akshare")
 _tushare_provider = SourceProxy("tushare")
+_datalake = _datalake_source
+_datalake_ref = _datalake_reference
 
 
 def _today_text() -> str:
@@ -24,6 +28,17 @@ def _today_text() -> str:
 
 def _payloads_with_as_of_date(items: list[object]) -> list[dict[str, object]]:
     return [{**item.model_dump(), "as_of_date": _today_text()} for item in items if hasattr(item, "model_dump")]
+
+
+def _board_member_store_payloads(items: list[BoardMemberItem], trade_date: str) -> list[dict[str, object]]:
+    actual_date = format_date_value(trade_date) or _today_text()
+    payloads = []
+    for item in items:
+        payload = item.model_dump()
+        if payload.get("join_date", "") == "":
+            payload["join_date"] = actual_date
+        payloads.append(payload)
+    return payloads
 
 
 def _build_missing_date_ranges(start_date: str, end_date: str, existing_dates: set[str]) -> list[tuple[str, str]]:
@@ -85,7 +100,7 @@ class QuoteMuxBoards:
             actual_start_date = actual_end_date
         if actual_end_date == "":
             actual_end_date = actual_start_date
-        expected_trade_dates = []
+        expected_trade_dates = [item.trade_date for item in _datalake_ref.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)]
         existing_dates = {item.trade_date for item in items}
         missing_ranges = _build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
@@ -187,6 +202,10 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.members", store_identity, BoardMemberItem)
         if store_read.hit:
             return store_items
+        datalake_items = _datalake_reference.get_board_members(board_code, trade_date)
+        if datalake_items:
+            store_result("boards.members", store_identity, _board_member_store_payloads(datalake_items, trade_date), ContractReport(contract_name="boards.members"))
+            return datalake_items
         handlers = {
             "get_board_members": lambda instance: lambda: {
                 "tushare": _tushare_provider,
@@ -201,7 +220,7 @@ class QuoteMuxBoards:
             SourceInstanceExecutor(self._settings).build_steps("boards.members", handlers, ("tushare", "akshare")),
             self._settings.get_contract_source_order("boards.members", ("tushare", "akshare")),
         )
-        store_result("boards.members", store_identity, items, ContractReport(contract_name="boards.members"))
+        store_result("boards.members", store_identity, _board_member_store_payloads(items, trade_date), ContractReport(contract_name="boards.members"))
         return items
 
     def get_member_history(self, board_code: str, start_date: str, end_date: str) -> list[BoardMemberHistoryItem]:
@@ -209,6 +228,10 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.members.history", store_identity, BoardMemberHistoryItem)
         if store_read.hit:
             return store_items
+        datalake_items = _datalake_reference.get_board_member_history(board_code, start_date, end_date)
+        if datalake_items:
+            store_result("boards.members.history", store_identity, datalake_items, ContractReport(contract_name="boards.members.history"))
+            return datalake_items
         if not self._settings.is_source_enabled("tushare"):
             return []
         items = _tushare_provider.get_board_member_history(board_code, start_date, end_date)
@@ -216,6 +239,11 @@ class QuoteMuxBoards:
         return items
 
     def get_money_flow(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
+        store_identity = {"board_code": board_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "scope": scope}
+        store_items, store_read = load_store_result("boards.indicators.money_flow", store_identity, BoardMoneyFlowItem)
+        if store_read.hit:
+            return sorted(store_items, key=lambda item: (item.board_code, item.trade_date))
+        datalake_items = _datalake.get_board_money_flow(board_code, trade_date, start_date, end_date, scope)
         handlers = {
             "get_board_money_flow": lambda instance: lambda missing_start, missing_end: {
                 "tushare": _tushare_provider,
@@ -224,15 +252,22 @@ class QuoteMuxBoards:
         }
         merged_items, _ = run_fallback_chain_with_report(
             "boards.indicators.money_flow",
-            [],
+            store_items if store_read.partial_hit else datalake_items,
             ("board_code", "trade_date", "scope"),
             lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
             SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare")),
             self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare")),
         )
-        return sorted(merged_items, key=lambda item: (item.board_code, item.trade_date))
+        sorted_items = sorted(merged_items, key=lambda item: (item.board_code, item.trade_date))
+        store_result("boards.indicators.money_flow", store_identity, sorted_items, ContractReport(contract_name="boards.indicators.money_flow"))
+        return sorted_items
 
     def get_market_money_flow(self, trade_date: str, scope: str, limit: int, offset: int) -> list[BoardMoneyFlowItem]:
+        store_identity = {"board_code": "", "trade_date": trade_date, "scope": scope, "limit": limit, "offset": offset}
+        store_items, store_read = load_store_result("boards.indicators.money_flow.snapshot", store_identity, BoardMoneyFlowItem)
+        if store_read.hit:
+            return sorted(store_items, key=lambda item: (item.board_code, item.trade_date))
+        datalake_items = _datalake_source.get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset)
         handlers = {
             "get_board_daily_money_flow_snapshot": lambda instance: lambda: {
                 "tushare": _tushare_provider,
@@ -241,13 +276,15 @@ class QuoteMuxBoards:
         }
         items, _ = run_fallback_chain_with_report(
             "boards.indicators.money_flow.snapshot",
-            [],
+            store_items if store_read.partial_hit else datalake_items,
             ("board_code", "trade_date", "scope"),
             lambda current_items: [()] if current_items == [] else [],
             SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow.snapshot", handlers, ("tushare", "akshare")),
             self._settings.get_contract_source_order("boards.indicators.money_flow.snapshot", ("tushare", "akshare")),
         )
-        return sorted(items, key=lambda item: (item.board_code, item.trade_date))
+        sorted_items = sorted(items, key=lambda item: (item.board_code, item.trade_date))
+        store_result("boards.indicators.money_flow.snapshot", store_identity, sorted_items, ContractReport(contract_name="boards.indicators.money_flow.snapshot"))
+        return sorted_items
 
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}

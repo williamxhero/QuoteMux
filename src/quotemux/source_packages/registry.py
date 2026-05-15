@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 
 from quotemux.config_runtime.store import read_import_roots
+from quotemux.source_packages.environment import package_uses_isolated_environment
+from quotemux.source_packages.isolated import IsolatedPackageHandler
 from quotemux.source_packages.loader import load_builtin_manifests, load_external_manifests
 from quotemux.source_packages.manifest import SourcePackageManifest
 
@@ -35,14 +37,14 @@ class SourcePackageHealth:
 
 
 class SourcePackageRegistry:
-    def __init__(self, manifests: tuple[SourcePackageManifest, ...]) -> None:
+    def __init__(self, manifests: tuple[SourcePackageManifest, ...], import_roots: tuple[str, ...] = ()) -> None:
         self._manifests = {manifest.package_id: manifest for manifest in manifests}
         self._handlers: dict[str, dict[str, object]] = {}
         for manifest in manifests:
             handlers: dict[str, object] = {}
             for handler_name in manifest.list_handler_names():
                 try:
-                    handlers[handler_name] = _load_handler(manifest.get_handler_target(handler_name))
+                    handlers[handler_name] = _load_handler(manifest, handler_name, import_roots)
                 except (AttributeError, ImportError):
                     continue
             self._handlers[manifest.package_id] = handlers
@@ -99,7 +101,10 @@ class SourcePackageRegistry:
         return tuple(self.check_package_health(package_id) for package_id in self.list_package_ids())
 
 
-def _load_handler(target: str):
+def _load_handler(manifest: SourcePackageManifest, handler_name: str, import_roots: tuple[str, ...]):
+    target = manifest.get_handler_target(handler_name)
+    if package_uses_isolated_environment(manifest):
+        return IsolatedPackageHandler(manifest, target, import_roots)
     module_name, _, attr_name = target.partition(":")
     if module_name == "" or attr_name == "":
         raise ValueError(f"非法 handler 目标: {target}")
@@ -115,7 +120,12 @@ def _activate_import_roots(import_roots: tuple[str, ...]) -> None:
         import_path = root_path.parent if root_path.name == "quotemux_packages" else root_path
         import_text = str(import_path)
         if import_text not in sys.path:
-            sys.path.insert(0, import_text)
+            sys.path.append(import_text)
+        if root_path.name == "quotemux_packages":
+            namespace_package = import_module("quotemux_packages")
+            namespace_path = str(root_path)
+            if namespace_path not in namespace_package.__path__:
+                namespace_package.__path__.insert(0, namespace_path)
     invalidate_caches()
 
 
@@ -134,7 +144,7 @@ def build_source_package_registry(import_roots: tuple[str, ...]) -> SourcePackag
     from quotemux.config_runtime.validation import validate_manifests
 
     validate_manifests(tuple(manifests))
-    return SourcePackageRegistry(tuple(manifests))
+    return SourcePackageRegistry(tuple(manifests), import_roots)
 
 
 @lru_cache(maxsize=1)
@@ -143,5 +153,6 @@ def get_default_source_package_registry() -> SourcePackageRegistry:
 
 
 def refresh_default_source_package_registry() -> SourcePackageRegistry:
+    clear_loaded_source_package_modules()
     get_default_source_package_registry.cache_clear()
     return get_default_source_package_registry()

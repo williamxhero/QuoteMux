@@ -10,6 +10,7 @@ from quotemux.reports import ContractReport
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
 from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
+from quotemux.sources.datalake import reference as _datalake_ref
 from quotemux.store import load_store_result, store_result
 
 
@@ -140,6 +141,7 @@ class QuoteMuxMarkets:
                 profile_id=active_snapshot.profile_id,
                 profile_version=active_snapshot.version,
             ).with_store_stats(hit=True)
+        datalake_items = _datalake_ref.get_trading_calendar(request.exchange, actual_start, actual_end, request.is_open)
         handlers = {
             "get_trading_calendar": lambda instance: lambda missing_start, missing_end: {
                 "tushare": _tushare_provider,
@@ -148,7 +150,7 @@ class QuoteMuxMarkets:
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "markets.calendar.trading",
-            store_items if store_read.partial_hit else [],
+            store_items if store_read.partial_hit else datalake_items,
             ("exchange", "trade_date"),
             lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
             SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("tushare", "akshare")),
@@ -259,6 +261,9 @@ class QuoteMuxMarkets:
             ("trade_date", "market", "rank", "code"),
             lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit)),
         )
+        if len(items) < ensure_limit(limit) and self._settings.is_source_enabled("tushare"):
+            items = _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit))
+            store_result("markets.connect.active_top10", store_identity, items, ContractReport(contract_name="markets.connect.active_top10"))
         return items[: ensure_limit(limit)]
 
     def get_block_trades(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[BlockTradeItem]:
@@ -344,9 +349,15 @@ class QuoteMuxMarkets:
         return items[offset: offset + ensure_limit(limit)]
 
     def get_open_auctions(self, codes: str, trade_date: str) -> list[AuctionItem]:
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        return _tushare_provider.get_market_open_auctions(codes, trade_date)
+        store_identity = {"code": codes, "trade_date": trade_date}
+        return self._store_list(
+            "markets.trading.open_auctions",
+            store_identity,
+            AuctionItem,
+            ("code", "trade_date", "auction_time", "session"),
+            ("trade_date", "code", "auction_time"),
+            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_market_open_auctions(codes, trade_date),
+        )
 
     def get_sessions(self, codes: str) -> list[TradingSessionItem]:
         store_identity = {"codes": codes}

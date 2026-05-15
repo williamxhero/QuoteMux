@@ -25,6 +25,7 @@ SUPPORT_LEVEL_DERIVED = "derived"
 SUPPORT_LEVEL_STATIC = "static"
 SUPPORT_LEVEL_LOCAL_DB = "local_db"
 SUPPORT_LEVEL_IMPORT_ONLY = "import_only"
+DEFAULT_FRESHNESS_SECONDS = 365 * 86400
 
 
 @dataclass(frozen=True)
@@ -269,16 +270,19 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "stocks.ownership.hk_connect_holdings",
         "stocks.ownership.pledges.details",
         "stocks.ownership.pledges.stats",
-        "stocks.ownership.shareholders.changes",
         "stocks.ownership.shareholders.top10",
         "stocks.ownership.shareholders.top10_float",
     }:
         return ("tushare", "akshare")
+    if capability_id == "stocks.ownership.shareholders.changes":
+        return ("derived_core", "tushare", "akshare")
     if capability_id == "stocks.ownership.shareholders.count":
         return ("tushare", "akshare", "efinance")
     if capability_id == "stocks.signals.hl":
-        return ("opentdx", "efinance", "mootdx", "akshare")
-    if capability_id in {"stocks.factors.technical", "markets.connect.quotas"}:
+        return ("derived_core", "tushare", "opentdx", "efinance", "mootdx", "akshare")
+    if capability_id == "stocks.factors.technical":
+        return ("derived_core", "tushare")
+    if capability_id == "markets.connect.quotas":
         return ("tushare",)
     if capability_id == "markets.events.news":
         return ()
@@ -303,6 +307,8 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_source_order(capability_id: str) -> tuple[str, ...]:
+    if capability_id in {"stocks.factors.technical", "stocks.ownership.shareholders.changes", "stocks.signals.hl"}:
+        return ("derived_core",)
     return _infer_allowed_packages(capability_id)
 
 
@@ -315,17 +321,7 @@ def _infer_policy_mode(capability_id: str) -> str:
 
 
 def _infer_freshness_seconds(capability_id: str) -> int:
-    if capability_id == "stocks.quotes.intraday":
-        return 120
-    if capability_id in {"stocks.quotes.daily", "stocks.quotes.daily_snapshot", "indexes.quotes.daily"}:
-        return 1800
-    if capability_id.startswith("markets.calendar."):
-        return 86400
-    if capability_id == "markets.events.news":
-        return 300
-    if capability_id.endswith(".catalog") or capability_id.endswith(".profile") or capability_id.endswith(".basic"):
-        return 86400
-    return 7200
+    return DEFAULT_FRESHNESS_SECONDS
 
 
 def _build_capability_definitions() -> tuple[CapabilityDefinition, ...]:

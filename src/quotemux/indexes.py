@@ -7,11 +7,13 @@ import pandas as pd
 from platform_models import IndexCatalogItem, IndexMemberItem, IndexQuoteItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_datetime_value, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
-from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, sort_items, trim_items_per_key
+from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
 from quotemux.runtime_core.registry import SourceProxy
 from quotemux.settings import QuoteMuxSettings
+from quotemux.sources.datalake import reference as _datalake_ref
+from quotemux.sources.datalake import source as _datalake
 from quotemux.store import load_store_result, store_result
 
 
@@ -142,7 +144,7 @@ def _build_missing_quote_requests(
         actual_start_date = actual_end_date
     if actual_end_date == "":
         actual_end_date = actual_start_date
-    expected_trade_dates = []
+    expected_trade_dates = [item.trade_date for item in _datalake_ref.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)]
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for index_code in index_codes:
         existing_dates = {item.trade_time for item in items if item.index_code == index_code and item.freq == "1d"}
@@ -169,6 +171,13 @@ def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
         name = current.name if current.name else item.name
         merged[key] = IndexMemberItem(index_code=current.index_code, code=current.code, name=name, weight=weight, trade_date=trade_date)
     return sorted(merged.values(), key=lambda item: (item.code, item.trade_date))
+
+
+def _apply_index_member_names(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
+    names = _datalake_ref.get_stock_names([item.code for item in items])
+    if names == {}:
+        return items
+    return [item.model_copy(update={"name": names.get(item.code, item.name)}) for item in items]
 
 
 def _build_quote_steps(request_freq: str, request_count: int | None, settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexQuoteItem], ...]:
@@ -259,9 +268,11 @@ class QuoteMuxIndexes:
                     profile_id=active_snapshot.profile_id,
                     profile_version=active_snapshot.version,
                 ).with_store_stats(hit=True)
+        datalake_items = _datalake.get_index_quotes(request.index_codes, request_freq, request.trade_date, request.start_date, request.end_date, request_count)
+        base_items = merge_model_lists(store_items if store_status == "partial_hit" else [], datalake_items, ("index_code", "trade_time", "freq"))
         merged_items, fallback_report = run_fallback_chain_with_report(
             "indexes.quotes.daily",
-            store_items if store_status == "partial_hit" else [],
+            base_items,
             ("index_code", "trade_time", "freq"),
             lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count),
             _build_quote_steps(request_freq, request_count, self._settings),
@@ -304,7 +315,8 @@ class QuoteMuxIndexes:
         normalized_items = _merge_index_members(merged_items)
         if normalized_items == []:
             return [], ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
-        result = normalized_items
+        named_items = _apply_index_member_names(normalized_items)
+        result = [item.model_copy(update={"trade_date": request.trade_date}) if item.trade_date == "" and request.trade_date != "" else item for item in named_items]
         report = ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
         store_write = store_result("indexes.members", store_identity, result, report, report.quarantine_count)
         report = report.with_store_stats(partial_hit=store_read.partial_hit, miss=store_read.status in {"miss", "skip"}, stale=store_read.status == "stale", write=store_write.status == "write")

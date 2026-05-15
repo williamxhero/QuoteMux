@@ -39,9 +39,14 @@ class QuoteMuxNews:
             "include_content_text": include_content_text,
         }
         store_items, store_read = load_store_result("markets.events.news", store_identity, NewsEventItem)
-        if store_read.hit or store_read.partial_hit:
+        if (store_read.hit or store_read.partial_hit) and store_items != []:
             return NewsEventQueryResult(events=list(store_items))
-        return NewsEventQueryResult(events=[])
+        items = get_news_events(trade_date, announcement_date, crawl_date, stock_code, event_type, min_importance_score, sort_by, limit, offset, include_content_text)
+        if include_sources and items != []:
+            sources = get_news_event_sources([item.event_id for item in items])
+            items = [item.model_copy(update={"sources": sources.get(item.event_id, [])}) for item in items]
+        store_result("markets.events.news", store_identity, items, ContractReport(contract_name="markets.events.news"))
+        return NewsEventQueryResult(events=items)
 
     def update_events_capture(
         self,

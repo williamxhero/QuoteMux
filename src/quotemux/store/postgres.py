@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from quotemux.capabilities import get_capability_definition, list_capability_definitions
 from quotemux.reports import ContractReport
 from quotemux.store.cache_db import execute_many, execute_sql, query_dataframe
+from quotemux.store.default_update_policy import cache_enabled_from_ttl_days, get_capability_update_policy_default, ttl_seconds_from_days
 from quotemux.store.payload_store import CachePayloadRef, get_payload, put_payload
 
 
@@ -93,10 +94,16 @@ class DefaultCachePolicySpec:
 
 
 def _time_field_for_capability(capability_id: str) -> str:
+    if capability_id in {"markets.trading.open_auctions", "stocks.quotes.auctions"}:
+        return "trade_date"
     if capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday", "stocks.quotes.daily_snapshot", "indexes.quotes.daily"}:
         return "trade_time"
     if capability_id.startswith("boards.quotes.") or capability_id.startswith("markets.trading.open_auctions"):
         return "trade_time"
+    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow"}:
+        return "trade_date"
+    if capability_id == "stocks.indicators.risk_flags":
+        return "start_date"
     if capability_id.startswith("markets.calendar.") or capability_id.startswith("markets.indicators.") or capability_id.startswith("markets.connect.capital_flow") or capability_id.startswith("markets.connect.active_top10") or capability_id.startswith("markets.events.block_trades") or capability_id.startswith("markets.participants.dragon_tiger") or capability_id == "markets.participants.hot_money.details":
         return "trade_date"
     if capability_id.startswith("stocks.finance."):
@@ -111,6 +118,20 @@ def _time_field_for_capability(capability_id: str) -> str:
         return "list_date"
     if capability_id == "stocks.catalog.archive" or capability_id == "stocks.factors.adj":
         return "trade_date"
+    if capability_id == "stocks.factors.technical":
+        return "trade_date"
+    if capability_id in {"stocks.indicators.ah_comparisons", "stocks.indicators.chip_distribution", "stocks.indicators.chip_performance", "stocks.indicators.premarket"}:
+        return "trade_date"
+    if capability_id == "stocks.ownership.shareholders.changes":
+        return "trade_date"
+    if capability_id == "stocks.profile.managers":
+        return "as_of_date"
+    if capability_id == "stocks.profile.management_rewards":
+        return "ann_date"
+    if capability_id == "stocks.signals.hl":
+        return "trade_date"
+    if capability_id == "stocks.signals.nine_turn":
+        return "trade_time"
     if capability_id == "stocks.profile.name_history":
         return "start_date"
     if capability_id == "indexes.members" or capability_id.startswith("stocks.ownership.ccass_") or capability_id == "stocks.ownership.hk_connect_holdings" or capability_id == "stocks.ownership.pledges.stats" or capability_id == "stocks.ownership.shareholders.count":
@@ -183,6 +204,28 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "change_date", "reason")
     if capability_id == "stocks.corporate_actions.unlock_schedules":
         return ("code", "unlock_date", "holder_type", "share_type")
+    if capability_id in {"markets.trading.open_auctions", "stocks.quotes.auctions"}:
+        return ("code", "trade_date", "auction_time", "session")
+    if capability_id == "stocks.catalog.archive":
+        return ("code", "trade_date")
+    if capability_id == "stocks.factors.technical":
+        return ("code", "trade_date", "adjust")
+    if capability_id == "stocks.indicators.ah_comparisons":
+        return ("code", "trade_date")
+    if capability_id == "stocks.indicators.chip_distribution":
+        return ("code", "trade_date", "price")
+    if capability_id in {"stocks.indicators.chip_performance", "stocks.indicators.premarket"}:
+        return ("code", "trade_date")
+    if capability_id == "stocks.ownership.shareholders.changes":
+        return ("code", "trade_date")
+    if capability_id == "stocks.profile.managers":
+        return ("code", "name", "title", "begin_date")
+    if capability_id == "stocks.profile.management_rewards":
+        return ("code", "ann_date", "name", "title")
+    if capability_id == "stocks.signals.hl":
+        return ("code", "trade_date", "signal", "first_extreme")
+    if capability_id == "stocks.signals.nine_turn":
+        return ("code", "trade_time", "freq")
     if capability_id == "stocks.ownership.ccass_holdings":
         return ("code", "trade_date")
     if capability_id == "stocks.ownership.ccass_holding_details":
@@ -195,6 +238,12 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "holder_name", "start_date", "end_date", "status")
     if capability_id == "stocks.ownership.shareholders.count":
         return ("code", "trade_date")
+    if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow"}:
+        return ("code", "trade_date")
+    if capability_id == "stocks.indicators.risk_flags":
+        return ("code", "flag_type", "start_date", "end_date", "status")
+    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot"}:
+        return ("board_code", "trade_date", "scope")
     if capability_id.startswith("stocks.ownership.shareholders.top10"):
         return ("code", "report_period", "rank", "shareholder_name")
     if capability_id == "stocks.research.reports":
@@ -257,6 +306,18 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("exchange", "start_year", "end_year")
     if capability_id == "markets.events.news":
         return ("event_type", "stock_code", "sort_by", "limit", "offset", "include_sources", "include_content_text")
+    if capability_id in {"markets.trading.open_auctions", "stocks.catalog.archive", "stocks.factors.technical", "stocks.indicators.ah_comparisons", "stocks.indicators.chip_distribution", "stocks.indicators.chip_performance", "stocks.indicators.premarket", "stocks.ownership.shareholders.changes", "stocks.profile.management_rewards", "stocks.profile.managers", "stocks.quotes.auctions", "stocks.signals.hl"}:
+        return ("code",)
+    if capability_id == "stocks.signals.nine_turn":
+        return ("code", "freq")
+    if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation"}:
+        return ("code",)
+    if capability_id == "stocks.indicators.money_flow":
+        return ("code", "view")
+    if capability_id == "stocks.indicators.risk_flags":
+        return ("flag_type", "status", "limit", "offset")
+    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot"}:
+        return ("board_code", "scope")
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_type")
     if capability_id == "stocks.finance.main_business":
@@ -304,6 +365,8 @@ def _build_default_policy_specs() -> tuple[DefaultCachePolicySpec, ...]:
     specs: list[DefaultCachePolicySpec] = []
     for definition in list_capability_definitions():
         capability_id = definition.capability_id
+        policy_default = get_capability_update_policy_default(capability_id)
+        cache_enabled = cache_enabled_from_ttl_days(policy_default.cache_ttl_days)
         specs.append(
             DefaultCachePolicySpec(
                 capability_id=capability_id,
@@ -311,8 +374,10 @@ def _build_default_policy_specs() -> tuple[DefaultCachePolicySpec, ...]:
                 key_fields=_key_fields_for_capability(capability_id),
                 request_scope_fields=_request_scope_fields_for_capability(capability_id),
                 coverage_mode=_coverage_mode_for_capability(capability_id),
-                ttl_seconds=definition.freshness_seconds,
-                enabled=True,
+                ttl_seconds=ttl_seconds_from_days(policy_default.cache_ttl_days),
+                enabled=cache_enabled,
+                read_enabled=cache_enabled,
+                write_enabled=cache_enabled,
             )
         )
     return tuple(specs)
@@ -441,10 +506,10 @@ def _parse_time_key(value: object) -> datetime:
     text = _normalize_text(value)
     if text == "":
         raise ValueError("缓存时间字段不能为空")
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y%m", "%Y-%m"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y%m%d", "%Y%m", "%Y-%m"):
         try:
             parsed = datetime.strptime(text, fmt)
-            if fmt == "%Y-%m-%d":
+            if fmt in {"%Y-%m-%d", "%Y%m%d"}:
                 return datetime.combine(parsed.date(), time.min)
             if fmt in {"%Y%m", "%Y-%m"}:
                 return datetime.combine(parsed.date().replace(day=1), time.min)
@@ -456,7 +521,7 @@ def _parse_time_key(value: object) -> datetime:
 
 
 def _datetime_from_date_text(text: str) -> datetime:
-    return datetime.combine(datetime.strptime(text, "%Y-%m-%d").date(), time.min)
+    return datetime.combine(_parse_time_key(text).date(), time.min)
 
 
 def _month_range_from_text(text: str) -> tuple[datetime, datetime]:
@@ -487,7 +552,11 @@ def _fresh_until_from_ttl(written_at: datetime, ttl_seconds: int) -> datetime:
 
 
 def _is_fresh(policy: CachePolicy, fresh_until: datetime, now: datetime) -> bool:
-    return policy.ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS or fresh_until > now
+    return _policy_ignores_ttl(policy) or fresh_until > now
+
+
+def _policy_ignores_ttl(policy: CachePolicy) -> bool:
+    return policy.ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS or (policy.ttl_seconds == 0 and policy.enabled and policy.read_enabled and policy.write_enabled)
 
 
 def _policy_from_row(row: dict[str, object]) -> CachePolicy:
@@ -545,7 +614,6 @@ def _ensure_schema() -> bool:
             key_fields = excluded.key_fields,
             request_scope_fields = excluded.request_scope_fields,
             coverage_mode = excluded.coverage_mode,
-            ttl_seconds = excluded.ttl_seconds,
             updated_at = now()
         """,
         params,
@@ -1092,7 +1160,7 @@ class UnifiedPostgresCacheStore:
     def _read_covered_payloads(self, policy: CachePolicy, capability_id: str, coverages: Sequence[tuple[CacheScope, CacheCoverage]]) -> tuple[dict[str, object], ...]:
         payloads: list[dict[str, object]] = []
         seen: set[str] = set()
-        never_expires = policy.ttl_seconds == CACHE_NEVER_EXPIRE_TTL_SECONDS
+        never_expires = _policy_ignores_ttl(policy)
         for scope, coverage in coverages:
             start, end = _coverage_read_range(policy, coverage, scope)
             for payload in self.rows.read(capability_id, start, end, never_expires):

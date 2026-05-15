@@ -8,6 +8,7 @@ from quotemux.capabilities import is_known_capability_id, normalize_capability_i
 from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfile, SourceInstanceConfig
 from quotemux.contracts.registry import get_contract_allowed_merge_strategies
 from quotemux.contracts.policies import CONTRACT_POLICIES
+from quotemux.source_packages.environment import package_uses_isolated_environment
 from quotemux.source_packages.manifest import SourcePackageManifest
 from quotemux.source_packages.registry import SourcePackageRegistry
 
@@ -143,6 +144,8 @@ def _validate_handler_targets(manifest: SourcePackageManifest) -> tuple[Validati
         seen_handler_names.add(handler_name)
         if not _handler_matches_capabilities(handler_name, manifest):
             issues.append(ValidationIssue("handler_targets", f"{handler_name} 不属于 manifest 声明的 capability 能力"))
+        if package_uses_isolated_environment(manifest):
+            continue
         try:
             handler = getattr(import_module(module_name), attr_name)
         except (AttributeError, ImportError) as exc:

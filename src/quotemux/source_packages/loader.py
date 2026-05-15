@@ -9,15 +9,24 @@ from quotemux.source_packages.manifest import SourcePackageManifest
 
 
 MANIFEST_FILE_NAME = "quotemux_package.json"
-BUILTIN_PACKAGE_IDS = ("tushare", "efinance", "mootdx", "opentdx", "akshare")
+BUILTIN_PACKAGE_IDS = ("tushare", "efinance", "mootdx", "opentdx", "akshare", "derived_core")
 BUILTIN_PACKAGE_MODULE = "quotemux_packages"
 
 
 def _load_builtin_manifest(package_id: str) -> SourcePackageManifest:
     package_name = f"{BUILTIN_PACKAGE_MODULE}.{package_id}"
-    manifest_path = resources.files(package_name).joinpath(MANIFEST_FILE_NAME)
+    package_files = resources.files(package_name)
+    manifest_path = package_files.joinpath(MANIFEST_FILE_NAME)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return SourcePackageManifest.from_dict(payload)
+    package_root = _resource_package_root(package_files)
+    return SourcePackageManifest.from_dict(payload, package_root=package_root)
+
+
+def _resource_package_root(package_files) -> str:
+    package_path = Path(str(package_files))
+    if package_path.is_dir():
+        return str(package_path)
+    return ""
 
 
 def load_builtin_manifests() -> tuple[SourcePackageManifest, ...]:

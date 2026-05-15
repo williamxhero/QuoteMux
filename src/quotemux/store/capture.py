@@ -20,6 +20,7 @@ from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
 from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
+from quotemux.store.default_update_policy import get_capability_update_policy_default
 from quotemux.store.postgres import _ensure_schema, get_postgres_cache_store
 from quotemux.store.runtime import store_result
 
@@ -121,6 +122,7 @@ class CapturePolicyUpdate:
 @dataclass(frozen=True)
 class DefaultCapturePolicySpec:
     capability_id: str
+    enabled: bool
     cadence: str
     run_time: time
     timezone: str
@@ -222,10 +224,12 @@ def _build_default_capture_policy_specs() -> tuple[DefaultCapturePolicySpec, ...
     specs: list[DefaultCapturePolicySpec] = []
     for capability_id in list_capability_ids():
         scope_profile = _default_profile_for_capability(capability_id)
+        policy_default = get_capability_update_policy_default(capability_id)
         specs.append(
             DefaultCapturePolicySpec(
                 capability_id,
-                _default_cadence_for_profile(scope_profile),
+                policy_default.capture_enabled,
+                policy_default.capture_cadence,
                 time(18, 0),
                 "Asia/Shanghai",
                 scope_profile,
@@ -259,6 +263,7 @@ CAPTURE_SCHEMA_SQL = (
     )
     """,
     "alter table capability_capture_policy add column if not exists month integer",
+    "create unique index if not exists idx_capture_policy_capability_id_unique on capability_capture_policy (capability_id)",
     """
     create table if not exists capability_capture_runs (
         id bigserial primary key,
@@ -298,7 +303,7 @@ def _ensure_capture_schema() -> bool:
     params = [
         (
             spec.capability_id,
-            False,
+            spec.enabled,
             spec.cadence,
             spec.run_time,
             spec.timezone,

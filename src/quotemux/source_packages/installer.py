@@ -62,4 +62,4 @@ def _copy_directory_contents(source_root: Path, target_root: Path) -> None:
 
 
 def _copy_ignore():
-    return ignore_patterns("__pycache__", "*.pyc", ".git", "build", "dist", "*.egg-info")
+    return ignore_patterns("__pycache__", "*.pyc", ".git", ".venv", "venv", "build", "dist", "*.egg-info")
