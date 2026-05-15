@@ -14,7 +14,7 @@ MARKET_DAILY_SNAPSHOT_LIMIT = 10000
 def ensure_limit(limit: int) -> int:
     if limit < 1:
         raise ValueError("limit 必须大于 0")
-    return min(limit, MAX_LIMIT)
+    return limit
 
 
 def merge_model_lists[T: BaseModel](high_priority: Sequence[T], low_priority: Sequence[T], key_fields: tuple[str, ...]) -> list[T]:

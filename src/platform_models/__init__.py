@@ -50,6 +50,29 @@ class StockQuoteItem(ApiModel):
     adjust: str = "none"
 
 
+class StockQuoteCodeSummary(ApiModel):
+    code: str
+    row_count: int
+    first_trade_time: str = ""
+    last_trade_time: str = ""
+    complete: bool
+    truncated: bool
+    missing_trade_dates: list[str] = Field(default_factory=list)
+
+
+class StockQuotesMeta(ApiModel):
+    total_rows: int
+    returned_rows: int
+    complete: bool
+    truncated: bool
+    codes: list[StockQuoteCodeSummary] = Field(default_factory=list)
+
+
+class StockQuotesQueryResult(ApiModel):
+    items: list[StockQuoteItem] = Field(default_factory=list)
+    meta: StockQuotesMeta
+
+
 class BoardQuoteItem(ApiModel):
     board_code: str
     trade_time: str

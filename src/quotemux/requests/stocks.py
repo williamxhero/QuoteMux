@@ -15,7 +15,7 @@ class StockQuotesRequest(BaseModel):
     end_time: str = ""
     count: int | None = None
     adjust: str = "none"
-    limit: int = 200
+    limit: int | None = None
 
     @field_validator("codes", mode="before")
     @classmethod

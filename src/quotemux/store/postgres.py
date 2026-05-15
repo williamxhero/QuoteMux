@@ -1071,6 +1071,26 @@ def _filter_payloads(payloads: Sequence[dict[str, object]], scopes: Sequence[Cac
     return tuple(result)
 
 
+def _build_actual_coverage_rows(
+    policy: CachePolicy,
+    scopes: Sequence[CacheScope],
+    payloads: Sequence[dict[str, object]],
+    fresh_until: datetime,
+    source_json: dict[str, object],
+) -> list[tuple[CacheScope, int, datetime, dict[str, object]]]:
+    if payloads == [] or not policy.capability_id.startswith("stocks.quotes."):
+        return [(scope, sum(1 for payload in payloads if _payload_matches_scope(payload, scope)), fresh_until, source_json) for scope in scopes]
+    rows: list[tuple[CacheScope, int, datetime, dict[str, object]]] = []
+    for scope in scopes:
+        matched_payloads = [payload for payload in payloads if _payload_matches_scope(payload, scope)]
+        if matched_payloads == []:
+            continue
+        time_keys = [build_time_key(payload, policy.time_field) for payload in matched_payloads]
+        actual_scope = CacheScope(scope.scope_identity, scope.criteria, min(time_keys), max(time_keys))
+        rows.append((actual_scope, len(matched_payloads), fresh_until, source_json))
+    return rows
+
+
 def _coverage_covers(policy: CachePolicy, coverage: CacheCoverage, scope: CacheScope, now: datetime) -> bool:
     if not _is_fresh(policy, coverage.fresh_until, now):
         return False
@@ -1187,7 +1207,7 @@ class UnifiedPostgresCacheStore:
         ]
         rows_ok = self.rows.upsert_many(capability_id, rows)
         scopes = _request_scopes(policy, request_identity)
-        coverages = [(scope, sum(1 for payload in typed_payloads if _payload_matches_scope(payload, scope)), fresh_until, source_json) for scope in scopes]
+        coverages = _build_actual_coverage_rows(policy, scopes, typed_payloads, fresh_until, source_json)
         coverage_ok = self.coverage.upsert_many(capability_id, coverages)
         status = "write" if rows_ok and coverage_ok else CACHE_SKIP
         first_scope = scopes[0]
