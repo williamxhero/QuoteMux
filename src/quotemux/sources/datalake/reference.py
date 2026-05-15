@@ -276,23 +276,39 @@ def get_board_members(board_code: str, trade_date: str) -> list[BoardMemberItem]
     return items
 
 
+def _weekday_trading_calendar(exchange: str, start_date: str, end_date: str, is_open: bool | None) -> list[TradingCalendarItem]:
+    if is_open is False:
+        return []
+    start_day = parse_date_text(start_date)
+    end_day = parse_date_text(end_date)
+    if start_day is None or end_day is None or start_day > end_day:
+        return []
+    items: list[TradingCalendarItem] = []
+    current_day = start_day
+    while current_day <= end_day:
+        if current_day.weekday() < 5:
+            items.append(TradingCalendarItem(exchange=exchange, trade_date=current_day.strftime("%Y-%m-%d"), is_open=True))
+        current_day += timedelta(days=1)
+    return items
+
+
 def get_trading_calendar(exchange: str, start_date: str, end_date: str, is_open: bool | None) -> list[TradingCalendarItem]:
     actual_exchange = exchange or "SSE"
     actual_start_date = format_date_value(start_date)
     actual_end_date = format_date_value(end_date)
     df = load_trade_calendar_frame(actual_start_date, actual_end_date, is_open)
-    if df.empty:
-        return []
     items: list[TradingCalendarItem] = []
-    for _, row in df.iterrows():
-        items.append(
-            TradingCalendarItem(
-                exchange=actual_exchange,
-                trade_date=format_date_value(row["trade_date"]),
-                is_open=bool(row["is_open"]),
+    if not df.empty:
+        for _, row in df.iterrows():
+            items.append(
+                TradingCalendarItem(
+                    exchange=actual_exchange,
+                    trade_date=format_date_value(row["trade_date"]),
+                    is_open=bool(row["is_open"]),
+                )
             )
-        )
-    return items
+        return items
+    return _weekday_trading_calendar(actual_exchange, actual_start_date, actual_end_date, is_open)
 
 
 def get_board_member_history(board_code: str, start_date: str, end_date: str) -> list[BoardMemberHistoryItem]:

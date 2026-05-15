@@ -9,6 +9,9 @@ from pydantic import BaseModel
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 5000
 MARKET_DAILY_SNAPSHOT_LIMIT = 10000
+EXPECTED_INTRADAY_BAR_TIMES = {
+    "30m": ("09:30:00", "10:00:00", "10:30:00", "11:00:00", "11:30:00", "13:00:00", "13:30:00", "14:00:00", "14:30:00", "15:00:00"),
+}
 
 
 def ensure_limit(limit: int) -> int:
@@ -60,6 +63,17 @@ def build_missing_expected_date_ranges(expected_dates: list[str], existing_dates
     if current_start != "":
         missing_ranges.append((current_start, current_end))
     return missing_ranges
+
+
+def expected_intraday_trade_times(freq: str, expected_dates: list[str]) -> list[str]:
+    expected_bar_times = EXPECTED_INTRADAY_BAR_TIMES.get(freq, ())
+    if expected_bar_times == ():
+        return []
+    return [f"{trade_date} {bar_time}" for trade_date in expected_dates for bar_time in expected_bar_times]
+
+
+def missing_expected_keys(expected_keys: Sequence[tuple[object, ...]], existing_keys: set[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    return [key for key in expected_keys if key not in existing_keys]
 
 
 def has_enough_stock_quote_rows(items: Sequence[BaseModel], codes: list[str], count: int | None, field_name: str) -> bool:

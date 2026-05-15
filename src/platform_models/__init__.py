@@ -53,11 +53,14 @@ class StockQuoteItem(ApiModel):
 class StockQuoteCodeSummary(ApiModel):
     code: str
     row_count: int
+    expected_bar_count: int = 0
+    actual_bar_count: int = 0
     first_trade_time: str = ""
     last_trade_time: str = ""
     complete: bool
     truncated: bool
     missing_trade_dates: list[str] = Field(default_factory=list)
+    missing_trade_times: list[str] = Field(default_factory=list)
 
 
 class StockQuotesMeta(ApiModel):

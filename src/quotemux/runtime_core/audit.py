@@ -76,7 +76,10 @@ def read_fallback_summary(day_text: str = "") -> dict[str, object]:
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         if raw_line == "":
             continue
-        payload = json.loads(raw_line)
+        try:
+            payload = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
         status = str(payload.get("status", ""))
         provider = str(payload.get("provider", ""))
         contract_name = str(payload.get("contract_name", ""))

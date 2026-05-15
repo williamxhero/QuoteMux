@@ -3,12 +3,40 @@
 import numpy as np
 import pandas as pd
 
-from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_stock_daily_frame, load_stock_daily_snapshot_frame, load_stock_daily_snapshot_full_frame, load_stock_intraday_frame
+from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_stock_daily_frame, load_stock_daily_snapshot_frame, load_stock_daily_snapshot_full_frame, load_stock_intraday_frame, upsert_stock_bar_30m_rows
 from platform_models import AdjFactorItem, BoardMoneyFlowItem, BoardQuoteItem, IndexQuoteItem, StockMoneyFlowItem, StockQuoteItem
+from quotemux.common import build_missing_expected_date_ranges, expected_intraday_trade_times, missing_expected_keys
 from quotemux.infra.common import PRICE_COLUMNS, INTRADAY_RULES, add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, index_code_to_gm, normalize_stock_code
 from quotemux.sources.datalake.news import get_news_event_sources, get_news_events
 from quotemux.sources.datalake.reference import get_board_catalog, get_board_categories, get_board_member_history, get_board_members, get_board_profile, get_hl_signal, get_index_catalog, get_index_profile, get_stock_active_codes, get_stock_basic, get_stock_catalog, get_stock_name_history, get_stock_names, get_trading_calendar
 from quotemux.sources.datalake.topics import get_market_sessions
+
+
+def _expected_dates(start_dt: object, end_dt: object) -> list[str]:
+    if start_dt is None or end_dt is None:
+        return []
+    start_text = pd.Timestamp(start_dt).strftime("%Y-%m-%d")
+    end_text = pd.Timestamp(end_dt).strftime("%Y-%m-%d")
+    return [item.trade_date for item in get_trading_calendar("SSE", start_text, end_text, True)]
+
+
+def _missing_local_30m_requests(codes: list[str], frame: pd.DataFrame, start_dt: object, end_dt: object) -> list[tuple[list[str], str, str]]:
+    expected_dates = _expected_dates(start_dt, end_dt)
+    expected_times = expected_intraday_trade_times("30m", expected_dates)
+    if expected_times == []:
+        return []
+    grouped_ranges: dict[tuple[str, str], list[str]] = {}
+    for code in codes:
+        code_frame = frame[frame["code"] == code] if not frame.empty and "code" in frame.columns else pd.DataFrame()
+        existing_times = set(pd.to_datetime(code_frame["trade_time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")) if not code_frame.empty else set()
+        expected_keys = [(code, trade_time, "30m") for trade_time in expected_times]
+        existing_keys = {(code, trade_time, "30m") for trade_time in existing_times}
+        missing_times = [str(key[1]) for key in missing_expected_keys(expected_keys, existing_keys)]
+        missing_dates = {trade_time[:10] for trade_time in missing_times}
+        covered_dates = {trade_date for trade_date in expected_dates if trade_date not in missing_dates}
+        for missing_start, missing_end in build_missing_expected_date_ranges(expected_dates, covered_dates):
+            grouped_ranges.setdefault((missing_start, missing_end), []).append(code)
+    return [(range_codes, range_start, range_end) for (range_start, range_end), range_codes in grouped_ranges.items()]
 
 
 def repair_adj_factor_frame(frame: pd.DataFrame) -> pd.Series:
@@ -88,7 +116,17 @@ def get_stock_quotes(
     if not normalized_codes:
         return []
     if freq in INTRADAY_RULES:
-        raw_df = load_stock_intraday_frame(normalized_codes, start_dt, end_dt)
+        raw_df = load_stock_intraday_frame(normalized_codes, start_dt, end_dt, freq)
+        if freq == "30m":
+            missing_local_requests = _missing_local_30m_requests(normalized_codes, raw_df, start_dt, end_dt)
+            if missing_local_requests != []:
+                frames = [raw_df] if not raw_df.empty else []
+                for missing_codes, missing_start, missing_end in missing_local_requests:
+                    missing_start_dt, missing_end_dt = build_time_bounds("", missing_start, missing_end, "", "", None, True)
+                    missing_frame = load_stock_intraday_frame(missing_codes, missing_start_dt, missing_end_dt, "1m")
+                    if not missing_frame.empty:
+                        frames.append(missing_frame)
+                raw_df = pd.concat(frames, ignore_index=True) if frames else raw_df
     else:
         start_date_text = start_dt.strftime("%Y-%m-%d") if start_dt is not None else ""
         end_date_text = end_dt.strftime("%Y-%m-%d") if end_dt is not None else ""
@@ -191,6 +229,30 @@ def get_stock_daily_snapshot_full(trade_date: str) -> list[StockQuoteItem]:
             )
         )
     return items
+
+
+def save_stock_30m_quotes(items: list[StockQuoteItem]) -> bool:
+    rows: list[dict[str, object]] = []
+    for item in items:
+        if item.freq != "30m":
+            continue
+        if item.open is None or item.high is None or item.low is None or item.close is None or item.volume is None:
+            continue
+        rows.append(
+            {
+                "code": item.code,
+                "trade_time": item.trade_time,
+                "open": item.open,
+                "high": item.high,
+                "low": item.low,
+                "close": item.close,
+                "volume": item.volume,
+                "amount": item.amount,
+            }
+        )
+    if rows == []:
+        return True
+    return upsert_stock_bar_30m_rows(rows)
 
 
 def get_board_quotes(

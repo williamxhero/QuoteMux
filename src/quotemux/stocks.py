@@ -8,7 +8,7 @@ from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappin
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
-from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
+from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, merge_model_lists, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
 from quotemux.store import load_store_result, store_result
@@ -126,6 +126,22 @@ def _build_quote_range_requests(grouped_ranges: dict[tuple[str, str], list[str]]
     return requests
 
 
+def _expected_quote_trade_times(freq: str, expected_dates: list[str]) -> list[str]:
+    return expected_intraday_trade_times(freq, expected_dates)
+
+
+def _build_missing_time_date_ranges(expected_dates: list[str], missing_trade_times: list[str]) -> list[tuple[str, str]]:
+    missing_dates = {trade_time[:10] for trade_time in missing_trade_times}
+    covered_dates = {trade_date for trade_date in expected_dates if trade_date not in missing_dates}
+    return build_missing_expected_date_ranges(expected_dates, covered_dates)
+
+
+def _missing_quote_time_keys(code: str, freq: str, expected_trade_times: list[str], code_items: list[StockQuoteItem]) -> list[tuple[object, ...]]:
+    expected_keys = [(code, trade_time, freq) for trade_time in expected_trade_times]
+    existing_keys = {(item.code, item.trade_time, item.freq) for item in code_items}
+    return missing_expected_keys(expected_keys, existing_keys)
+
+
 def _quote_expected_dates(
     trade_date: str,
     start_date: str,
@@ -162,28 +178,36 @@ def _build_quote_code_summaries(
     codes: list[str],
     total_items: list[StockQuoteItem],
     returned_items: list[StockQuoteItem],
+    freq: str,
     expected_dates: list[str],
     count: int | None,
 ) -> list[StockQuoteCodeSummary]:
     summaries: list[StockQuoteCodeSummary] = []
+    expected_trade_times = _expected_quote_trade_times(freq, expected_dates)
+    expected_trade_time_set = set(expected_trade_times)
     for code in codes:
         code_total_items = [item for item in total_items if item.code == code]
         code_returned_items = [item for item in returned_items if item.code == code]
         trade_times = [item.trade_time for item in code_returned_items]
         actual_dates = {item.trade_time[:10] for item in code_total_items}
+        missing_time_keys = _missing_quote_time_keys(code, freq, expected_trade_times, code_total_items)
         missing_trade_dates = [trade_date for trade_date in expected_dates if trade_date not in actual_dates]
+        missing_trade_times = [str(key[1]) for key in missing_time_keys]
         truncated = len(code_returned_items) < len(code_total_items)
         enough_count = count is None or len(code_total_items) >= count
-        complete = missing_trade_dates == [] and enough_count and not truncated
+        complete = missing_trade_dates == [] and missing_trade_times == [] and enough_count and not truncated
         summaries.append(
             StockQuoteCodeSummary(
                 code=code,
                 row_count=len(code_returned_items),
+                expected_bar_count=len(expected_trade_times),
+                actual_bar_count=sum(1 for item in code_total_items if item.trade_time in expected_trade_time_set) if expected_trade_times else 0,
                 first_trade_time=min(trade_times) if trade_times else "",
                 last_trade_time=max(trade_times) if trade_times else "",
                 complete=complete,
                 truncated=truncated,
                 missing_trade_dates=missing_trade_dates,
+                missing_trade_times=missing_trade_times,
             )
         )
     return summaries
@@ -192,12 +216,13 @@ def _build_quote_code_summaries(
 def _build_stock_quotes_query_result(
     codes: list[str],
     items: list[StockQuoteItem],
+    freq: str,
     limit: int | None,
     expected_dates: list[str],
     count: int | None,
 ) -> StockQuotesQueryResult:
     returned_items = _limit_quote_items(items, limit)
-    summaries = _build_quote_code_summaries(codes, items, returned_items, expected_dates, count)
+    summaries = _build_quote_code_summaries(codes, items, returned_items, freq, expected_dates, count)
     truncated = len(returned_items) < len(items)
     complete = all(item.complete for item in summaries) and not truncated
     return StockQuotesQueryResult(
@@ -242,9 +267,15 @@ def _build_missing_quote_requests(
             actual_end_date = actual_start_date
         grouped_ranges: dict[tuple[str, str], list[str]] = {}
         expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date)
+        expected_trade_times = _expected_quote_trade_times(freq, expected_trade_dates)
         for code in codes:
-            existing_dates = {item.trade_time[:10] for item in current_items if item.code == code and item.freq == freq}
-            missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
+            code_items = [item for item in current_items if item.code == code and item.freq == freq]
+            existing_dates = {item.trade_time[:10] for item in code_items}
+            if expected_trade_times:
+                missing_times = [str(key[1]) for key in _missing_quote_time_keys(code, freq, expected_trade_times, code_items)]
+                missing_ranges = _build_missing_time_date_ranges(expected_trade_dates, missing_times)
+            else:
+                missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
             if missing_ranges == [] and expected_trade_dates == []:
                 missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
             for missing_start, missing_end in missing_ranges:
@@ -419,7 +450,7 @@ class QuoteMuxStocks:
         request_freq = _fallback_quote_freq(actual_freq)
         request_count = _fallback_quote_count(actual_freq, request.count)
         contract_name = "stocks.quotes.daily" if request_freq == "1d" else "stocks.quotes.intraday"
-        store_enabled = actual_freq not in {"1w", "1mo"}
+        store_enabled = actual_freq not in {"1w", "1mo", "30m"}
         store_identity = {
             "codes": list(request.codes),
             "freq": actual_freq,
@@ -452,7 +483,7 @@ class QuoteMuxStocks:
                         profile_id=active_snapshot.profile_id,
                         profile_version=active_snapshot.version,
                     ).with_store_stats(hit=True)
-                    return _build_stock_quotes_query_result(request.codes, sorted_items, actual_limit, expected_dates, request.count), report
+                    return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
                 store_status = "partial_hit"
         datalake_items = _datalake.get_stock_quotes(request.codes, actual_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request.count, actual_adjust)
         base_items = merge_model_lists(store_items if store_status == "partial_hit" else [], datalake_items, ("code", "trade_time", "freq"))
@@ -464,6 +495,8 @@ class QuoteMuxStocks:
             _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
             self._settings.get_contract_source_order(contract_name, ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
         )
+        if actual_freq == "30m":
+            _datalake.save_stock_30m_quotes(merged_items)
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_stock_quotes(merged_items, actual_freq, actual_adjust)
         trimmed_items = trim_items_per_key(merged_items, "code", "trade_time", request.count)
@@ -473,7 +506,7 @@ class QuoteMuxStocks:
             store_write = store_result(contract_name, store_identity, merged_items, report, report.quarantine_count)
             report = report.with_store_stats(partial_hit=store_status == "partial_hit", miss=store_status in {"miss", "skip"}, stale=store_status == "stale", write=store_write.status == "write")
         expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d")
-        return _build_stock_quotes_query_result(request.codes, sorted_items, actual_limit, expected_dates, request.count), report
+        return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
 
     def get_daily_snapshot(self, request: StockDailySnapshotRequest) -> list[StockQuoteItem]:
         items, _ = self.get_daily_snapshot_with_report(request)

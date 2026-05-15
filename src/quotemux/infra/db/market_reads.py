@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from quotemux.infra.db.client import query_dataframe
+from quotemux.infra.db.client import execute_many, query_dataframe
 
 
 def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
@@ -96,9 +96,13 @@ def load_stock_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
     return query_dataframe(query, (trade_date, limit, offset))
 
 
-def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: object) -> pd.DataFrame:
+def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: object, freq: str = "1m") -> pd.DataFrame:
     if not codes:
         return pd.DataFrame()
+    if freq == "30m":
+        frame = load_stock_bar_30m_frame(codes, start_time, end_time)
+        if not frame.empty:
+            return frame
     where_clauses = ["code = any(%s)"]
     params: list[object] = [codes]
     if start_time is not None:
@@ -122,6 +126,76 @@ def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: ob
         order by code, bar_time
     """
     return query_dataframe(query, tuple(params))
+
+
+def load_stock_bar_30m_frame(codes: list[str], start_time: object, end_time: object) -> pd.DataFrame:
+    if not codes:
+        return pd.DataFrame()
+    where_clauses = ["code = any(%s)"]
+    params: list[object] = [codes]
+    if start_time is not None:
+        where_clauses.append("bar_time >= %s")
+        params.append(start_time)
+    if end_time is not None:
+        where_clauses.append("bar_time <= %s")
+        params.append(end_time)
+    query = f"""
+        select
+            code,
+            bar_time as trade_time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            amount
+        from fact.stock_bar_30m
+        where {' and '.join(where_clauses)}
+        order by code, bar_time
+    """
+    return query_dataframe(query, tuple(params))
+
+
+def _stock_market(code: str) -> str:
+    if code.startswith("6"):
+        return "SHSE"
+    if code.startswith(("4", "8")):
+        return "BJSE"
+    return "SZSE"
+
+
+def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:
+    params: list[tuple[object, ...]] = []
+    for row in rows:
+        code = str(row["code"])
+        params.append(
+            (
+                _stock_market(code),
+                code,
+                row["trade_time"],
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+                int(float(row["volume"])),
+                row["amount"],
+            )
+        )
+    return execute_many(
+        """
+        insert into fact.stock_bar_30m (market, code, bar_time, open, high, low, close, volume, amount)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        on conflict (market, code, bar_time) do update set
+            open = excluded.open,
+            high = excluded.high,
+            low = excluded.low,
+            close = excluded.close,
+            volume = excluded.volume,
+            amount = excluded.amount,
+            loaded_at = now()
+        """,
+        params,
+    )
 
 
 def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
