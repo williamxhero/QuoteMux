@@ -14,6 +14,7 @@ from quotemux.runtime_core.audit import record_provider_event
 from quotemux.contracts.policies import get_contract_policy
 from quotemux.contracts.strategies import MERGE_STRATEGY_APPEND_DEDUPE, MERGE_STRATEGY_FIELD_CONSENSUS, MERGE_STRATEGY_FIRST_SUCCESS, MERGE_STRATEGY_FRESHEST_WINS, MERGE_STRATEGY_PRIORITY_FALLBACK, MERGE_STRATEGY_RAW_PASSTHROUGH, normalize_merge_strategy
 from quotemux.settings import QuoteMuxSettings
+from quotemux.source_packages.instance_context import use_source_instance
 from quotemux.source_packages.registry import get_default_source_package_registry
 
 
@@ -261,10 +262,15 @@ def _fetch_step_requests(contract_name: str, step: ProviderStep[T], requests: li
     fetched_items: list[T] = []
     error_count = 0
     elapsed_ms = 0.0
+    source_instance = next((item for item in snapshot.source_instances if item.instance_id == step.step_id), None)
     for request in requests:
         started_at = time.perf_counter()
         try:
-            fetched_items.extend(step.fetcher(*request))
+            if source_instance is None:
+                fetched_items.extend(step.fetcher(*request))
+            else:
+                with use_source_instance(source_instance):
+                    fetched_items.extend(step.fetcher(*request))
         except Exception as exc:
             elapsed_ms += (time.perf_counter() - started_at) * 1000
             error_count += 1
@@ -408,6 +414,7 @@ def _run_fallback_chain_internal(
     ordered_steps = _order_steps(steps, ordered_names)
     merged_items = [item.model_copy(deep=True) for item in base_items]
     reports: list[ProviderMergeStats] = []
+    source_instances = {item.instance_id: item for item in snapshot.source_instances}
     for step in ordered_steps:
         requests = request_builder(merged_items)
         if requests == []:
@@ -450,7 +457,12 @@ def _run_fallback_chain_internal(
         for request in requests:
             started_at = time.perf_counter()
             try:
-                fetched_items = step.fetcher(*request)
+                source_instance = source_instances.get(step.step_id)
+                if source_instance is None:
+                    fetched_items = step.fetcher(*request)
+                else:
+                    with use_source_instance(source_instance):
+                        fetched_items = step.fetcher(*request)
             except Exception as exc:
                 elapsed_ms += (time.perf_counter() - started_at) * 1000
                 error_count += 1

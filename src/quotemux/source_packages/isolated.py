@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import json
 import os
 import pickle
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 
 from quotemux.source_packages.environment import ensure_package_environment
+from quotemux.source_packages.instance_context import current_source_instance
 from quotemux.source_packages.manifest import SourcePackageManifest
 
 
@@ -26,6 +28,7 @@ class IsolatedPackageHandler:
             "kwargs": kwargs,
             "import_roots": self.import_roots,
             "package_root": self.manifest.package_root,
+            "source_instance": _source_instance_payload(),
             "sys_paths": _portable_sys_paths(),
         }
         completed = subprocess.run(
@@ -56,6 +59,9 @@ def _worker_env(import_roots: tuple[str, ...], package_root: str) -> dict[str, s
     if existing_path != "":
         python_paths.append(existing_path)
     env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    source_instance = current_source_instance()
+    if source_instance is not None:
+        env["QUOTEMUX_SOURCE_INSTANCE"] = json.dumps(source_instance.to_dict(), ensure_ascii=False)
     return env
 
 
@@ -70,3 +76,10 @@ def _worker_bootstrap_paths() -> tuple[str, ...]:
 
 def _is_runtime_source_path(path: Path) -> bool:
     return (path / "quotemux" / "source_packages" / "worker.py").is_file() or (path / "platform_models" / "__init__.py").is_file()
+
+
+def _source_instance_payload() -> dict[str, object]:
+    source_instance = current_source_instance()
+    if source_instance is None:
+        return {}
+    return source_instance.to_dict()

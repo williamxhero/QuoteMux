@@ -5,10 +5,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from importlib import import_module
 from importlib import invalidate_caches
 from io import StringIO
+import json
+import os
 from pathlib import Path
 import pickle
 import sys
 import traceback
+
+from quotemux.config_runtime.models import SourceInstanceConfig
+from quotemux.source_packages.instance_context import use_source_instance
 
 
 def main() -> None:
@@ -31,8 +36,13 @@ def _run_request(request: dict[str, object]) -> dict[str, object]:
             args = request["args"]
             kwargs = request["kwargs"]
             if not isinstance(args, tuple) or not isinstance(kwargs, dict):
-                raise TypeError("handler 参数不是合法调用参数")
-            result = _call_handler(target, args, kwargs)
+                raise TypeError("handler 鍙傛暟涓嶆槸鍚堟硶璋冪敤鍙傛暟")
+            source_instance = _load_source_instance(request)
+            if source_instance is None:
+                result = _call_handler(target, args, kwargs)
+            else:
+                with use_source_instance(source_instance):
+                    result = _call_handler(target, args, kwargs)
     except Exception as exc:
         return {
             "status": "error",
@@ -83,12 +93,28 @@ def _append_sys_path(path: str) -> None:
 def _call_handler(target: str, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
     module_name, _, attr_name = target.partition(":")
     if module_name == "" or attr_name == "":
-        raise ValueError(f"非法 handler 目标: {target}")
+        raise ValueError(f"闈炴硶 handler 鐩爣: {target}")
     module = import_module(module_name)
     handler = getattr(module, attr_name)
     if not callable(handler):
-        raise TypeError(f"{target} 不是可调用对象")
+        raise TypeError(f"{target} 涓嶆槸鍙皟鐢ㄥ璞?")
     return handler(*args, **kwargs)
+
+
+def _load_source_instance(request: dict[str, object]) -> SourceInstanceConfig | None:
+    source_instance = request.get("source_instance", {})
+    if isinstance(source_instance, dict) and source_instance != {}:
+        return SourceInstanceConfig.from_dict(source_instance)
+    source_instance_text = os.getenv("QUOTEMUX_SOURCE_INSTANCE", "")
+    if source_instance_text == "":
+        return None
+    try:
+        payload = json.loads(source_instance_text)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return SourceInstanceConfig.from_dict(payload)
 
 
 if __name__ == "__main__":

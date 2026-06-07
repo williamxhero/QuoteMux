@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from quotemux.config_runtime.runtime import get_config_runtime
 from quotemux.source_packages.registry import get_default_source_package_registry
+from quotemux.source_packages.instance_context import use_source_instance
 from quotemux.sources.base import SourceDefinition
 
 
@@ -35,9 +37,18 @@ class SourceProxy:
 
     def __getattr__(self, handler_name: str):
         try:
-            return get_default_source_registry().get_handler(self._source_name, handler_name)
+            handler = get_default_source_registry().get_handler(self._source_name, handler_name)
         except KeyError as exc:
             raise AttributeError(str(exc)) from exc
+
+        def _call_with_default_instance(*args: object, **kwargs: object):
+            source_instance = _default_source_instance(self._source_name)
+            if source_instance is None:
+                return handler(*args, **kwargs)
+            with use_source_instance(source_instance):
+                return handler(*args, **kwargs)
+
+        return _call_with_default_instance
 
 
 @lru_cache(maxsize=1)
@@ -51,3 +62,11 @@ def get_default_source_registry() -> SourceRegistry:
         }
         definitions.append(SourceDefinition(name=package_id, handlers=handlers))
     return SourceRegistry(tuple(definitions))
+
+
+def _default_source_instance(source_name: str):
+    snapshot = get_config_runtime().get_active_snapshot()
+    for instance in snapshot.list_enabled_source_instances():
+        if instance.package_id == source_name:
+            return instance
+    return None

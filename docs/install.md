@@ -5,19 +5,19 @@
 Windows:
 
 ```powershell
-py -3.13 -m pip install -e D:/WILL/STOCK/QuoteMux[all]
+py -3.13 -m pip install -e D:/path/to/QuoteMux[all]
 ```
 
 WSL:
 
 ```bash
-python3 -m pip install --user --break-system-packages -e /mnt/d/WILL/STOCK/QuoteMux[all]
+python3 -m pip install --user --break-system-packages -e /mnt/d/path/to/QuoteMux[all]
 ```
 
 ## wheel 构建
 
 ```powershell
-py -3.13 -m pip wheel D:/WILL/STOCK/QuoteMux -w D:/WILL/STOCK/QuoteMux/dist
+py -3.13 -m pip wheel D:/path/to/QuoteMux -w D:/path/to/QuoteMux/dist
 ```
 
 ## 回滚
