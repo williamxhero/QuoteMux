@@ -27,6 +27,8 @@
 3. 浏览器打开管理后台：`http://127.0.0.1:8803/admin`
 4. 点击界面上的 **`安装或更新全部 Packages`**
 
+*补充：如果你希望服务真正进入可运行状态，而不是只装起 Python 依赖，目标机器还需要预先准备 PostgreSQL + TimescaleDB，并确保目标数据库已启用 `timescaledb` 扩展。*
+
 搞定。你不需要再手动敲命令去装 `QuoteMux` 的 API，也不用自己管那一堆底层数据源的仓库。
 
 ## QuoteMux 到底是干嘛的？
@@ -56,6 +58,8 @@ print(result.installed_package_ids)
 这行代码会固定从官方的数据源仓库（[QuoteMux_Packages](https://github.com/williamxhero/QuoteMux_Packages)）把所需的所有底层库一并安装或更新。
 
 ## 安装 QuoteMux 主体
+
+*运行前提：默认运行口径依赖本地 PostgreSQL + TimescaleDB，且目标数据库已启用 `timescaledb` 扩展。*
 
 **Windows:**
 
