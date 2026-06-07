@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfile, RuntimeSnapshot, SourceInstanceConfig, build_runtime_snapshot
+from quotemux.package_install import PackageInstallResult, install_all_packages
 from quotemux.config_runtime.store import RuntimeConfigStore, RuntimeState, _runtime_root
 from quotemux.config_runtime.validation import ConfigValidationError, validate_instance, validate_profile
 from quotemux.contracts.policies import list_default_contract_policies
@@ -30,6 +31,9 @@ class QuoteMuxConfigRuntime:
         self.ensure_initialized()
         refresh_default_source_package_registry()
         return self.list_source_packages()
+
+    def install_all_packages(self) -> PackageInstallResult:
+        return install_all_packages()
 
     def list_package_health(self):
         self.ensure_initialized()

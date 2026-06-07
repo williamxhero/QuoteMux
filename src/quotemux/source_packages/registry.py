@@ -138,13 +138,14 @@ def clear_loaded_source_package_modules() -> None:
 
 def build_source_package_registry(import_roots: tuple[str, ...]) -> SourcePackageRegistry:
     _activate_import_roots(import_roots)
-    manifests = list(load_external_manifests(import_roots))
-    if manifests == []:
-        manifests.extend(load_builtin_manifests())
+    manifests_by_id: dict[str, SourcePackageManifest] = {manifest.package_id: manifest for manifest in load_builtin_manifests()}
+    for manifest in load_external_manifests(import_roots):
+        manifests_by_id[manifest.package_id] = manifest
     from quotemux.config_runtime.validation import validate_manifests
 
-    validate_manifests(tuple(manifests))
-    return SourcePackageRegistry(tuple(manifests), import_roots)
+    manifests = tuple(manifests_by_id.values())
+    validate_manifests(manifests)
+    return SourcePackageRegistry(manifests, import_roots)
 
 
 @lru_cache(maxsize=1)

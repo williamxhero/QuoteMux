@@ -9,7 +9,6 @@ from quotemux.source_packages.manifest import SourcePackageManifest
 
 
 MANIFEST_FILE_NAME = "quotemux_package.json"
-BUILTIN_PACKAGE_IDS = ("tushare", "efinance", "mootdx", "opentdx", "akshare", "derived_core")
 BUILTIN_PACKAGE_MODULE = "quotemux_packages"
 
 
@@ -32,7 +31,9 @@ def _resource_package_root(package_files) -> str:
 def load_builtin_manifests() -> tuple[SourcePackageManifest, ...]:
     if find_spec(BUILTIN_PACKAGE_MODULE) is None:
         return ()
-    return tuple(_load_builtin_manifest(package_id) for package_id in BUILTIN_PACKAGE_IDS)
+    package_files = resources.files(BUILTIN_PACKAGE_MODULE)
+    package_ids = sorted(path.name for path in package_files.iterdir() if path.is_dir() and path.joinpath(MANIFEST_FILE_NAME).is_file())
+    return tuple(_load_builtin_manifest(package_id) for package_id in package_ids)
 
 
 def _iter_manifest_candidates(import_root: Path) -> list[Path]:
