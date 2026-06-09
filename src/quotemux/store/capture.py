@@ -15,10 +15,11 @@ from quotemux.infra.common import format_date_value
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 from quotemux.infra.db.config import DL_DB_CONNECT_TIMEOUT, DL_DB_HOST, DL_DB_NAME, DL_DB_PASSWORD, DL_DB_PORT, DL_DB_USER
 from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
+from quotemux.capabilities import get_capability_config_root, is_independently_configurable_capability_id
 from quotemux.capabilities.inventory import list_capability_ids
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
-from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
+from quotemux.requests.markets import TradingCalendarRequest
 from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
 from quotemux.store.default_update_policy import get_capability_update_policy_default
 from quotemux.store.postgres import _ensure_schema, get_postgres_cache_store
@@ -161,8 +162,6 @@ def _default_profile_for_capability(capability_id: str) -> str:
         return PROFILE_BOARDS_RECENT_TRADING_DAYS
     if capability_id == "markets.calendar.trading":
         return PROFILE_TRADING_CALENDAR_YEAR_WINDOW
-    if capability_id in {"markets.calendar.trading.previous", "markets.calendar.trading.next", "markets.calendar.trading.yearly"}:
-        return PROFILE_TRADING_CALENDAR_YEAR_WINDOW
     if capability_id in {"stocks.catalog", "stocks.catalog.archive", "indexes.catalog", "boards.catalog", "boards.reference.categories", "markets.participants.hot_money"}:
         return PROFILE_CATALOG_SNAPSHOT
     if capability_id in {"stocks.profile.basic", "stocks.profile.company", "stocks.profile.managers", "stocks.profile.management_rewards", "stocks.profile.name_history", "indexes.profile", "boards.profile"}:
@@ -223,6 +222,8 @@ def _default_batch_size_for_profile(scope_profile: str) -> int:
 def _build_default_capture_policy_specs() -> tuple[DefaultCapturePolicySpec, ...]:
     specs: list[DefaultCapturePolicySpec] = []
     for capability_id in list_capability_ids():
+        if not is_independently_configurable_capability_id(capability_id):
+            continue
         scope_profile = _default_profile_for_capability(capability_id)
         policy_default = get_capability_update_policy_default(capability_id)
         specs.append(
@@ -436,11 +437,12 @@ class CapturePolicyRepository:
         )
         if _is_empty_dataframe(frame):
             return ()
-        return tuple(_policy_from_row(row) for row in frame.to_dict("records"))
+        return tuple(_policy_from_row(row) for row in frame.to_dict("records") if is_independently_configurable_capability_id(str(row["capability_id"])))
 
     def get(self, capability_id: str) -> CapturePolicy | None:
         if not _ensure_capture_schema():
             return None
+        root_capability_id = get_capability_config_root(capability_id)
         frame = query_dataframe(
             """
             select capability_id, enabled, cadence, run_time, timezone, weekday,
@@ -448,7 +450,7 @@ class CapturePolicyRepository:
             from capability_capture_policy
             where capability_id = %s
             """,
-            (capability_id,),
+            (root_capability_id,),
         )
         if _is_empty_dataframe(frame):
             return None
@@ -457,6 +459,7 @@ class CapturePolicyRepository:
     def update(self, policy: CapturePolicy) -> bool:
         if not _ensure_capture_schema():
             return False
+        root_capability_id = get_capability_config_root(policy.capability_id)
         return execute_sql(
             """
             update capability_capture_policy
@@ -486,7 +489,7 @@ class CapturePolicyRepository:
                 policy.window_count,
                 policy.batch_size,
                 policy.notes,
-                policy.capability_id,
+                root_capability_id,
             ),
         )
 
@@ -499,7 +502,7 @@ class CaptureRunRepository:
         params: list[object] = []
         if capability_id != "":
             clauses.append("capability_id = %s")
-            params.append(capability_id)
+            params.append(get_capability_config_root(capability_id))
         if status != "":
             clauses.append("status = %s")
             params.append(status)
@@ -523,6 +526,7 @@ class CaptureRunRepository:
     def latest_for_planned_time(self, capability_id: str, planned_time: datetime) -> CaptureRun | None:
         if not _ensure_capture_schema():
             return None
+        root_capability_id = get_capability_config_root(capability_id)
         frame = query_dataframe(
             """
             select id, capability_id, status, planned_time, started_at, finished_at,
@@ -532,7 +536,7 @@ class CaptureRunRepository:
             order by started_at desc
             limit 1
             """,
-            (capability_id, planned_time),
+            (root_capability_id, planned_time),
         )
         if _is_empty_dataframe(frame):
             return None
@@ -541,12 +545,13 @@ class CaptureRunRepository:
     def create(self, capability_id: str, status: str, planned_time: datetime, detail_json: dict[str, object]) -> CaptureRun:
         if not _ensure_capture_schema():
             raise RuntimeError("capture schema 初始化失败")
+        root_capability_id = get_capability_config_root(capability_id)
         ok = execute_sql(
             """
             insert into capability_capture_runs (capability_id, status, planned_time, detail_json)
             values (%s, %s, %s, %s)
             """,
-            (capability_id, status, planned_time, Jsonb(detail_json)),
+            (root_capability_id, status, planned_time, Jsonb(detail_json)),
         )
         if not ok:
             raise RuntimeError("capture run 创建失败")
@@ -559,7 +564,7 @@ class CaptureRunRepository:
             order by started_at desc
             limit 1
             """,
-            (capability_id, planned_time),
+            (root_capability_id, planned_time),
         )
         if _is_empty_dataframe(frame):
             raise RuntimeError("capture run 创建失败")
@@ -729,12 +734,6 @@ def _daily_snapshot_requests(policy: CapturePolicy, capability_id: str, now: dat
 def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_year = now.year
     end_year = start_year + max(1, policy.window_count) - 1
-    if capability_id == "markets.calendar.trading.yearly":
-        return (CaptureRequest(capability_id, {"exchange": "SSE", "start_year": start_year, "end_year": end_year}),)
-    if capability_id == "markets.calendar.trading.previous":
-        return (CaptureRequest(capability_id, {"exchange": "SSE", "trade_date": _date_range_end_text(now), "n": policy.window_count}),)
-    if capability_id == "markets.calendar.trading.next":
-        return (CaptureRequest(capability_id, {"exchange": "SSE", "trade_date": _date_range_end_text(now), "n": policy.window_count}),)
     return (
         CaptureRequest(
             capability_id,
@@ -1064,7 +1063,7 @@ def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[Captur
         return _index_quote_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS and policy.capability_id == "stocks.quotes.daily_snapshot":
         return _daily_snapshot_requests(policy, policy.capability_id, now)
-    if policy.scope_profile == PROFILE_TRADING_CALENDAR_YEAR_WINDOW and policy.capability_id.startswith("markets.calendar.trading"):
+    if policy.scope_profile == PROFILE_TRADING_CALENDAR_YEAR_WINDOW and policy.capability_id == "markets.calendar.trading":
         return _trading_calendar_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_BOARDS_RECENT_TRADING_DAYS and policy.capability_id == "boards.quotes.daily":
         return _board_quote_requests(policy, policy.capability_id, now)
@@ -1233,7 +1232,8 @@ class QuoteMuxCaptureJob:
         return tuple(self._policy_to_dict(policy) for policy in self._policies.list())
 
     def get_policy(self, capability_id: str) -> dict[str, object]:
-        policy = self._get_policy(capability_id)
+        root_capability_id = get_capability_config_root(capability_id)
+        policy = self._get_policy(root_capability_id)
         return self._policy_to_dict(policy)
 
     def update_policy(self, update: CapturePolicyUpdate) -> dict[str, object]:
@@ -1270,16 +1270,17 @@ class QuoteMuxCaptureJob:
         return tuple(runs)
 
     def run_capture(self, capability_id: str, planned_time: datetime | None = None) -> dict[str, object]:
-        policy = self._get_policy(capability_id)
+        root_capability_id = get_capability_config_root(capability_id)
+        policy = self._get_policy(root_capability_id)
         actual_planned_time = planned_time or self._now_provider().replace(tzinfo=None)
         skipped = self._precheck_skip(policy, actual_planned_time)
         if skipped is not None:
             return self._run_to_dict(skipped)
-        lock = self._locks.create(capability_id)
+        lock = self._locks.create(root_capability_id)
         if not lock.acquire():
             run = self._create_finished_run(policy, actual_planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "advisory_lock_busy"})
             return self._run_to_dict(run)
-        run = self._runs.create(capability_id, CAPTURE_RUNNING, actual_planned_time, {"phase": "预处理"})
+        run = self._runs.create(root_capability_id, CAPTURE_RUNNING, actual_planned_time, {"phase": "预处理"})
         try:
             result = self._execute(policy)
             status = CAPTURE_SUCCESS if result.failed_batches == () else CAPTURE_FAILED
@@ -1317,15 +1318,6 @@ class QuoteMuxCaptureJob:
             return self._runtime.indexes.get_quotes_with_report(IndexQuotesRequest(**request.request_identity))
         if request.capability_id == "markets.calendar.trading":
             return self._runtime.markets.get_trading_calendar_with_report(TradingCalendarRequest(**request.request_identity))
-        if request.capability_id == "markets.calendar.trading.previous":
-            items = self._runtime.markets.get_previous_trading_days(PreviousTradingDaysRequest(**request.request_identity))
-            return items, _CaptureRuntimeReport("markets.calendar.trading.previous")
-        if request.capability_id == "markets.calendar.trading.next":
-            items = self._runtime.markets.get_next_trading_days(NextTradingDaysRequest(**request.request_identity))
-            return items, _CaptureRuntimeReport("markets.calendar.trading.next")
-        if request.capability_id == "markets.calendar.trading.yearly":
-            items = self._runtime.markets.get_yearly_trading_calendar(YearlyTradingCalendarRequest(**request.request_identity))
-            return items, _CaptureRuntimeReport("markets.calendar.trading.yearly")
         if request.capability_id == "indexes.members":
             return self._runtime.indexes.get_members_with_report(IndexMembersRequest(**request.request_identity))
         if request.capability_id == "boards.quotes.daily":
@@ -1408,7 +1400,8 @@ class QuoteMuxCaptureJob:
         )
 
     def _get_policy(self, capability_id: str) -> CapturePolicy:
-        policy = self._policies.get(capability_id)
+        root_capability_id = get_capability_config_root(capability_id)
+        policy = self._policies.get(root_capability_id)
         if policy is None:
             raise KeyError(f"未知 capture 策略: {capability_id}")
         return policy

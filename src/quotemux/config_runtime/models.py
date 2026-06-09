@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from quotemux.capabilities import get_capability_config_root
+
 
 @dataclass(frozen=True)
 class SourceInstanceConfig:
@@ -136,9 +138,13 @@ class RuntimeSnapshot:
             if item.enabled
         )
 
+    def _contract_override(self, contract_name: str) -> ContractPolicyOverride | None:
+        config_root = get_capability_config_root(contract_name)
+        return next((item for item in self.contract_policy_overrides if get_capability_config_root(item.contract_name) == config_root), None)
+
     def get_contract_source_order(self, contract_name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
         del fallback
-        override = next((item for item in self.contract_policy_overrides if item.contract_name == contract_name), None)
+        override = self._contract_override(contract_name)
         if override is None:
             return ()
         enabled_instance_ids = {item.instance_id for item in self.list_enabled_source_instances()}
@@ -146,7 +152,7 @@ class RuntimeSnapshot:
 
     def get_contract_source_instances(self, contract_name: str, fallback: tuple[str, ...]) -> tuple[SourceInstanceConfig, ...]:
         del fallback
-        override = next((item for item in self.contract_policy_overrides if item.contract_name == contract_name), None)
+        override = self._contract_override(contract_name)
         enabled_instances = self.list_enabled_source_instances()
         if enabled_instances == () or override is None:
             return ()
@@ -158,13 +164,13 @@ class RuntimeSnapshot:
         return tuple(ordered)
 
     def get_contract_mode(self, contract_name: str, fallback: str) -> str:
-        override = next((item for item in self.contract_policy_overrides if item.contract_name == contract_name), None)
+        override = self._contract_override(contract_name)
         if override is None or override.mode == "":
             return fallback
         return override.mode
 
     def get_contract_merge_strategy(self, contract_name: str, fallback: str) -> str:
-        override = next((item for item in self.contract_policy_overrides if item.contract_name == contract_name), None)
+        override = self._contract_override(contract_name)
         if override is None or override.merge_strategy == "":
             return fallback
         return override.merge_strategy

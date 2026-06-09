@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import time
 
-from quotemux.capabilities import is_known_capability_id
+from quotemux.capabilities import get_capability_config_root, is_known_capability_id
 from quotemux.store.capture import CapturePolicyUpdate, QuoteMuxCaptureJob
 from quotemux.store.postgres import CACHE_NEVER_EXPIRE_TTL_SECONDS, CachePolicy, get_postgres_cache_store
 
@@ -41,7 +41,8 @@ class QuoteMuxCacheAdmin:
         return tuple(self._policy_to_dict(policy) for policy in get_postgres_cache_store().list_policies())
 
     def get_policy(self, capability_id: str) -> dict[str, object]:
-        policy = get_postgres_cache_store().get_policy(capability_id)
+        root_capability_id = get_capability_config_root(capability_id)
+        policy = get_postgres_cache_store().get_policy(root_capability_id)
         if policy is None:
             raise KeyError(f"未知缓存策略: {capability_id}")
         return self._policy_to_dict(policy)
@@ -49,11 +50,12 @@ class QuoteMuxCacheAdmin:
     def update_policy(self, update: CachePolicyUpdate) -> dict[str, object]:
         if not is_known_capability_id(update.capability_id):
             raise KeyError(f"未知 capability: {update.capability_id}")
-        current = get_postgres_cache_store().get_policy(update.capability_id)
+        root_capability_id = get_capability_config_root(update.capability_id)
+        current = get_postgres_cache_store().get_policy(root_capability_id)
         if current is None:
             raise KeyError(f"未知缓存策略: {update.capability_id}")
         policy = CachePolicy(
-            capability_id=current.capability_id,
+            capability_id=root_capability_id,
             enabled=update.enabled,
             read_enabled=update.enabled if update.read_enabled is None else update.read_enabled,
             write_enabled=update.enabled if update.write_enabled is None else update.write_enabled,
@@ -112,9 +114,10 @@ class QuoteMuxCaptureAdmin:
     def update_policy(self, payload: CapturePolicyPayload) -> dict[str, object]:
         if not is_known_capability_id(payload.capability_id):
             raise KeyError(f"未知 capability: {payload.capability_id}")
+        root_capability_id = get_capability_config_root(payload.capability_id)
         policy = self._job.update_policy(
             CapturePolicyUpdate(
-                capability_id=payload.capability_id,
+                capability_id=root_capability_id,
                 enabled=payload.enabled,
                 cadence=payload.cadence,
                 run_time=payload.run_time,
@@ -128,18 +131,19 @@ class QuoteMuxCaptureAdmin:
                 notes=payload.notes,
             )
         )
-        self._sync_cache_policy(payload.capability_id, payload.enabled)
+        self._sync_cache_policy(root_capability_id, payload.enabled)
         return policy
 
     def _sync_cache_policy(self, capability_id: str, capture_enabled: bool) -> None:
-        current = get_postgres_cache_store().get_policy(capability_id)
+        root_capability_id = get_capability_config_root(capability_id)
+        current = get_postgres_cache_store().get_policy(root_capability_id)
         if current is None:
             raise KeyError(f"未知缓存策略: {capability_id}")
         ttl_keeps_cache_enabled = _cache_enabled_by_ttl(current.ttl_seconds)
         cache_enabled = capture_enabled or ttl_keeps_cache_enabled
         QuoteMuxCacheAdmin(self).update_policy(
             CachePolicyUpdate(
-                capability_id=capability_id,
+                capability_id=root_capability_id,
                 enabled=cache_enabled,
                 ttl_seconds=current.ttl_seconds,
                 read_enabled=cache_enabled,
@@ -148,10 +152,11 @@ class QuoteMuxCaptureAdmin:
         )
 
     def list_runs(self, capability_id: str = "", status: str = "", limit: int = 100) -> tuple[dict[str, object], ...]:
-        return self._job.list_runs(capability_id, status, limit)
+        root_capability_id = "" if capability_id == "" else get_capability_config_root(capability_id)
+        return self._job.list_runs(root_capability_id, status, limit)
 
     def run_capture(self, capability_id: str) -> dict[str, object]:
-        return self._job.run_capture(capability_id)
+        return self._job.run_capture(get_capability_config_root(capability_id))
 
     def run_due_captures(self) -> tuple[dict[str, object], ...]:
         return self._job.run_due_captures()

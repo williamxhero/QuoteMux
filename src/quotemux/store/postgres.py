@@ -8,7 +8,7 @@ import pandas as pd
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
-from quotemux.capabilities import get_capability_definition, list_capability_definitions
+from quotemux.capabilities import get_capability_config_root, get_capability_definition, is_independently_configurable_capability_id, list_capability_definitions
 from quotemux.reports import ContractReport
 from quotemux.store.cache_db import execute_many, execute_sql, query_dataframe
 from quotemux.store.default_update_policy import cache_enabled_from_ttl_days, get_capability_update_policy_default, ttl_seconds_from_days
@@ -300,10 +300,6 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("index_code",)
     if capability_id == "markets.calendar.trading":
         return ("exchange", "is_open")
-    if capability_id in {"markets.calendar.trading.previous", "markets.calendar.trading.next"}:
-        return ("exchange", "trade_date", "n")
-    if capability_id == "markets.calendar.trading.yearly":
-        return ("exchange", "start_year", "end_year")
     if capability_id == "markets.events.news":
         return ("event_type", "stock_code", "sort_by", "limit", "offset", "include_sources", "include_content_text")
     if capability_id in {"markets.trading.open_auctions", "stocks.catalog.archive", "stocks.factors.technical", "stocks.indicators.ah_comparisons", "stocks.indicators.chip_distribution", "stocks.indicators.chip_performance", "stocks.indicators.premarket", "stocks.ownership.shareholders.changes", "stocks.profile.management_rewards", "stocks.profile.managers", "stocks.quotes.auctions", "stocks.signals.hl"}:
@@ -356,7 +352,7 @@ def _coverage_mode_for_capability(capability_id: str) -> str:
         return "period_range"
     if capability_id.startswith("markets.events.") or capability_id.startswith("stocks.research."):
         return "event_range"
-    if capability_id.endswith(".snapshot") or capability_id in {"stocks.quotes.daily_snapshot", "markets.calendar.trading.previous", "markets.calendar.trading.next"}:
+    if capability_id.endswith(".snapshot") or capability_id == "stocks.quotes.daily_snapshot":
         return "snapshot"
     return "date_range"
 
@@ -365,6 +361,8 @@ def _build_default_policy_specs() -> tuple[DefaultCachePolicySpec, ...]:
     specs: list[DefaultCachePolicySpec] = []
     for definition in list_capability_definitions():
         capability_id = definition.capability_id
+        if not is_independently_configurable_capability_id(capability_id):
+            continue
         policy_default = get_capability_update_policy_default(capability_id)
         cache_enabled = cache_enabled_from_ttl_days(policy_default.cache_ttl_days)
         specs.append(
@@ -638,11 +636,16 @@ class CachePolicyRepository:
         )
         if _is_empty_dataframe(frame):
             return ()
-        return tuple(_policy_from_row(row) for row in frame.to_dict("records"))
+        return tuple(
+            _policy_from_row(row)
+            for row in frame.to_dict("records")
+            if is_independently_configurable_capability_id(str(row["capability_id"]))
+        )
 
     def get(self, capability_id: str) -> CachePolicy | None:
         if not _ensure_schema():
             return None
+        actual_capability_id = get_capability_config_root(capability_id)
         frame = query_dataframe(
             """
             select capability_id, enabled, read_enabled, write_enabled, ttl_seconds,
@@ -650,7 +653,7 @@ class CachePolicyRepository:
             from capability_cache_policy
             where capability_id = %s
             """,
-            (capability_id,),
+            (actual_capability_id,),
         )
         if _is_empty_dataframe(frame):
             return None
@@ -659,6 +662,7 @@ class CachePolicyRepository:
     def update(self, policy: CachePolicy) -> bool:
         if not _ensure_schema():
             return False
+        actual_capability_id = get_capability_config_root(policy.capability_id)
         return execute_sql(
             """
             update capability_cache_policy
@@ -682,7 +686,7 @@ class CachePolicyRepository:
                 list(policy.key_fields),
                 list(policy.request_scope_fields),
                 policy.coverage_mode,
-                policy.capability_id,
+                actual_capability_id,
             ),
         )
 

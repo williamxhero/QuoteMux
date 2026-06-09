@@ -27,10 +27,6 @@ def _payloads_with_as_of_date(items: list[object]) -> list[dict[str, object]]:
     return [{**item.model_dump(), "as_of_date": _today_text()} for item in items if hasattr(item, "model_dump")]
 
 
-def _payloads_with_request_scope(items: list[object], request_trade_date: str, request_n: int) -> list[dict[str, object]]:
-    return [{**item.model_dump(), "request_trade_date": request_trade_date, "request_n": request_n} for item in items if hasattr(item, "model_dump")]
-
-
 def _resolve_calendar_range(start_date: str, end_date: str) -> tuple[str, str]:
     actual_end = end_date or datetime.now().strftime("%Y-%m-%d")
     actual_start = start_date or (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
@@ -165,33 +161,10 @@ class QuoteMuxMarkets:
         return sorted_items, report
 
     def get_previous_trading_days(self, request: PreviousTradingDaysRequest) -> list[TradingCalendarItem]:
-        store_identity = {
-            "exchange": request.exchange,
-            "trade_date": request.trade_date,
-            "n": request.n,
-        }
-        store_items, store_read = load_store_result("markets.calendar.trading.previous", store_identity, TradingCalendarItem)
-        if store_read.hit:
-            return list(store_items)
         items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date="", end_date=request.trade_date, is_open=True))
-        result = [item for item in items if item.trade_date < request.trade_date][-request.n:]
-        store_result(
-            "markets.calendar.trading.previous",
-            store_identity,
-            _payloads_with_request_scope(result, request.trade_date, request.n),
-            ContractReport(contract_name="markets.calendar.trading.previous"),
-        )
-        return result
+        return [item for item in items if item.trade_date < request.trade_date][-request.n:]
 
     def get_next_trading_days(self, request: NextTradingDaysRequest) -> list[TradingCalendarItem]:
-        store_identity = {
-            "exchange": request.exchange,
-            "trade_date": request.trade_date,
-            "n": request.n,
-        }
-        store_items, store_read = load_store_result("markets.calendar.trading.next", store_identity, TradingCalendarItem)
-        if store_read.hit:
-            return list(store_items)
         trade_day = parse_date_text(request.trade_date)
         end_date = ""
         if trade_day is not None:
@@ -201,27 +174,10 @@ class QuoteMuxMarkets:
                 next_year_day = date(trade_day.year + 1, 2, 28)
             end_date = next_year_day.strftime("%Y-%m-%d")
         items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=request.trade_date, end_date=end_date, is_open=True))
-        result = [item for item in items if item.trade_date > request.trade_date][: request.n]
-        store_result(
-            "markets.calendar.trading.next",
-            store_identity,
-            _payloads_with_request_scope(result, request.trade_date, request.n),
-            ContractReport(contract_name="markets.calendar.trading.next"),
-        )
-        return result
+        return [item for item in items if item.trade_date > request.trade_date][: request.n]
 
     def get_yearly_trading_calendar(self, request: YearlyTradingCalendarRequest) -> list[TradingCalendarItem]:
-        store_identity = {
-            "exchange": request.exchange,
-            "start_year": request.start_year,
-            "end_year": request.end_year,
-        }
-        store_items, store_read = load_store_result("markets.calendar.trading.yearly", store_identity, TradingCalendarItem)
-        if store_read.hit:
-            return list(store_items)
-        result = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=f"{request.start_year}-01-01", end_date=f"{request.end_year}-12-31", is_open=None))
-        store_result("markets.calendar.trading.yearly", store_identity, result, ContractReport(contract_name="markets.calendar.trading.yearly"))
-        return result
+        return self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=f"{request.start_year}-01-01", end_date=f"{request.end_year}-12-31", is_open=None))
 
     def get_connect_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[ConnectCapitalFlowItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from quotemux.capabilities import get_capability_config_root
 from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfile, SourceInstanceConfig
 from quotemux.source_packages.manifest import SourcePackageManifest
 
@@ -226,6 +227,7 @@ class RuntimeConfigStore:
             contract_name = LEGACY_CONTRACT_ALIASES.get(policy.contract_name, policy.contract_name)
             if contract_name == "":
                 continue
+            contract_name = get_capability_config_root(contract_name)
             updated = replace(
                 policy,
                 contract_name=contract_name,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from quotemux.capabilities import get_capability_config_root
+
 
 SECONDS_PER_DAY = 86400
 CACHE_NEVER_EXPIRE_TTL_DAYS = -1
@@ -33,9 +35,6 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("indexes.profile", False, "daily", 365),
     _policy("indexes.quotes.daily", True, "daily", 30),
     _policy("markets.calendar.trading", True, "monthly", CACHE_NEVER_EXPIRE_TTL_DAYS),
-    _policy("markets.calendar.trading.next", False, "daily", 30),
-    _policy("markets.calendar.trading.previous", False, "daily", 365),
-    _policy("markets.calendar.trading.yearly", False, "daily", 3650),
     _policy("markets.connect.active_top10", True, "daily", 180),
     _policy("markets.connect.capital_flow", True, "daily", 180),
     _policy("markets.connect.quotas", True, "daily", 180),
@@ -92,7 +91,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("stocks.quotes.auctions", True, "daily", 30),
     _policy("stocks.quotes.daily", True, "daily", 30),
     _policy("stocks.quotes.daily_snapshot", True, "daily", 30),
-    _policy("stocks.quotes.intraday", False, "daily", 1),
+    _policy("stocks.quotes.intraday", True, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("stocks.reference.bse_code_mappings", True, "monthly", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("stocks.reference.hk_connect_targets", True, "monthly", 365),
     _policy("stocks.research.reports", False, "daily", 180),
@@ -105,7 +104,7 @@ _CAPABILITY_UPDATE_POLICY_DEFAULT_BY_ID = {item.capability_id: item for item in 
 
 
 def get_capability_update_policy_default(capability_id: str) -> CapabilityUpdatePolicyDefault:
-    return _CAPABILITY_UPDATE_POLICY_DEFAULT_BY_ID[capability_id]
+    return _CAPABILITY_UPDATE_POLICY_DEFAULT_BY_ID[get_capability_config_root(capability_id)]
 
 
 def cache_enabled_from_ttl_days(ttl_days: int) -> bool:

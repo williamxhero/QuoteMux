@@ -142,15 +142,19 @@ LEGACY_CAPABILITY_ALIASES = {
     "stocks.money_flow": "stocks.indicators.money_flow",
 }
 
+# 只有显式登记在这里的 capability 才继承主能力配置；不要按名称或路径自动推断。
+DERIVED_CAPABILITY_BASE_IDS = {
+    "markets.calendar.trading.next": "markets.calendar.trading",
+    "markets.calendar.trading.previous": "markets.calendar.trading",
+    "markets.calendar.trading.yearly": "markets.calendar.trading",
+}
+
 STORE_TARGET_CAPABILITIES = {
     "stocks.quotes.intraday",
     "stocks.quotes.daily",
     "stocks.quotes.daily_snapshot",
     "indexes.quotes.daily",
     "markets.calendar.trading",
-    "markets.calendar.trading.previous",
-    "markets.calendar.trading.next",
-    "markets.calendar.trading.yearly",
     "markets.events.news",
 }
 
@@ -314,7 +318,7 @@ def _infer_source_order(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_policy_mode(capability_id: str) -> str:
-    if capability_id in {"indexes.members", "markets.calendar.trading", "markets.calendar.trading.previous", "markets.calendar.trading.next", "markets.calendar.trading.yearly"}:
+    if capability_id in {"indexes.members", "markets.calendar.trading"}:
         return MODE_DEGRADED
     if capability_id.startswith("stocks.finance.") or capability_id.startswith("stocks.ownership.") or capability_id.startswith("stocks.research.") or capability_id.startswith("stocks.corporate_actions.") or capability_id.startswith("stocks.reference.") or capability_id in {"rankings.research.reports", "rankings.research.broker_monthly_picks"}:
         return MODE_A2_ONLY
@@ -353,6 +357,19 @@ _PUBLIC_API_BY_PATH = {binding.api_path: binding for binding in PUBLIC_API_CAPAB
 
 def normalize_capability_id(capability_id: str) -> str:
     return LEGACY_CAPABILITY_ALIASES.get(capability_id, capability_id)
+
+
+def get_capability_config_root(capability_id: str) -> str:
+    normalized = normalize_capability_id(capability_id)
+    return DERIVED_CAPABILITY_BASE_IDS.get(normalized, normalized)
+
+
+def is_derived_capability_id(capability_id: str) -> bool:
+    return normalize_capability_id(capability_id) in DERIVED_CAPABILITY_BASE_IDS
+
+
+def is_independently_configurable_capability_id(capability_id: str) -> bool:
+    return not is_derived_capability_id(capability_id)
 
 
 def get_capability_definition(capability_id: str) -> CapabilityDefinition:

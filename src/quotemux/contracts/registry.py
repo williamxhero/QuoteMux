@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from platform_models import IndexMemberItem, IndexQuoteItem, StockQuoteItem, TradingCalendarItem
-from quotemux.capabilities import get_capability_definition, is_known_capability_id, list_capability_definitions, list_capability_ids, normalize_capability_id
+from quotemux.capabilities import get_capability_definition, is_independently_configurable_capability_id, is_known_capability_id, list_capability_definitions, list_capability_ids, normalize_capability_id
 from quotemux.contracts.strategies import allowed_merge_strategies
 from quotemux.requests import IndexMembersRequest, IndexQuotesRequest, StockDailySnapshotRequest, StockQuotesRequest, TradingCalendarRequest
 
@@ -102,7 +102,7 @@ def list_contract_definitions() -> tuple[ContractDefinition, ...]:
 
 
 def list_contract_names() -> tuple[str, ...]:
-    return list_capability_ids()
+    return tuple(capability_id for capability_id in list_capability_ids() if is_independently_configurable_capability_id(capability_id))
 
 
 def is_known_contract_name(contract_name: str) -> bool:

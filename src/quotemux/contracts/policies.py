@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from quotemux.capabilities import get_capability_definition, list_capability_definitions, normalize_capability_id
+from quotemux.capabilities import get_capability_config_root, get_capability_definition, is_independently_configurable_capability_id, list_capability_definitions
 from quotemux.config_runtime.models import ContractPolicyOverride
 from quotemux.contracts.strategies import normalize_merge_strategy
 
@@ -43,7 +43,7 @@ A2_ONLY_CONTRACTS = {name for name, policy in CONTRACT_POLICIES.items() if polic
 
 
 def get_contract_policy(contract_name: str) -> ContractPolicy:
-    normalized = normalize_capability_id(contract_name)
+    normalized = get_capability_config_root(contract_name)
     policy = CONTRACT_POLICIES.get(normalized)
     if policy is None:
         raise KeyError(f"未知 capability: {contract_name}")
@@ -51,7 +51,7 @@ def get_contract_policy(contract_name: str) -> ContractPolicy:
 
 
 def list_contract_policies() -> tuple[ContractPolicy, ...]:
-    return tuple(CONTRACT_POLICIES.values())
+    return tuple(policy for policy in CONTRACT_POLICIES.values() if is_independently_configurable_capability_id(policy.name))
 
 
 def list_default_contract_policies() -> tuple[ContractPolicyOverride, ...]:
@@ -63,6 +63,7 @@ def list_default_contract_policies() -> tuple[ContractPolicyOverride, ...]:
             merge_strategy=normalize_merge_strategy(policy.merge_strategy),
         )
         for policy in CONTRACT_POLICIES.values()
+        if is_independently_configurable_capability_id(policy.name)
     )
 
 

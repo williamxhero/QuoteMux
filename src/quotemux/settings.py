@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from quotemux.capabilities import get_capability_config_root
 from quotemux.config_runtime.models import SourceInstanceConfig
 from quotemux.config_runtime.runtime import get_config_runtime
 
@@ -31,7 +32,7 @@ class QuoteMuxSettings:
         return source_name in enabled_packages
 
     def get_contract_source_order(self, contract_name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
-        override = self.contract_source_orders.get(contract_name)
+        override = self.contract_source_orders.get(get_capability_config_root(contract_name))
         if override is not None:
             return override
         if self.enabled_sources != ():

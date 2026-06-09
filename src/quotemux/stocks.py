@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import timedelta
 
@@ -256,8 +256,9 @@ def _build_missing_quote_requests(
     if freq != "1d":
         if has_enough_stock_quote_rows(current_items, codes, count, "code"):
             return []
-        actual_start_date = trade_date or start_date
-        actual_end_date = trade_date or end_date
+        request_start_dt, request_end_dt = build_time_bounds(trade_date, start_date, end_date, start_time, end_time, count, True)
+        actual_start_date = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
+        actual_end_date = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
         if actual_start_date == "" and actual_end_date == "":
             missing_codes = [code for code in codes if sum(1 for item in current_items if item.code == code) < (count or 1)]
             return [(code_batch, "", "") for code_batch in _chunk_quote_codes(missing_codes)]

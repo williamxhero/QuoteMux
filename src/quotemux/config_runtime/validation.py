@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from re import fullmatch
 
-from quotemux.capabilities import is_known_capability_id, normalize_capability_id
+from quotemux.capabilities import is_derived_capability_id, is_known_capability_id, normalize_capability_id
 from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfile, SourceInstanceConfig
 from quotemux.contracts.registry import get_contract_allowed_merge_strategies
 from quotemux.contracts.policies import CONTRACT_POLICIES
@@ -124,6 +124,8 @@ def _validate_capabilities(manifest: SourcePackageManifest) -> tuple[ValidationI
         seen_names.add(capability_id)
         if not is_known_capability_id(capability_id):
             issues.append(ValidationIssue("capabilities", f"{manifest.package_id} 未知 capability: {capability_id}"))
+        if is_derived_capability_id(capability_id):
+            issues.append(ValidationIssue("capabilities", f"{manifest.package_id} 派生 capability 只能通过 DERIVED_CAPABILITY_BASE_IDS 配置: {capability_id}"))
         if capability.handler_name == "":
             issues.append(ValidationIssue("capabilities", f"{manifest.package_id} capability 未声明 handler_name: {capability_id}"))
         if capability.support_level == "":
