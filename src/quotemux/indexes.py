@@ -10,18 +10,24 @@ from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor,
 from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
-from quotemux.runtime_core.registry import SourceProxy
+from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
-from quotemux.sources.datalake import reference as _datalake_ref
-from quotemux.sources.datalake import source as _datalake
 from quotemux.store import load_store_result, store_result
 
 
-_akshare_provider = SourceProxy("akshare")
-_efinance_provider = SourceProxy("efinance")
-_mootdx_provider = SourceProxy("mootdx")
-_opentdx_provider = SourceProxy("opentdx")
-_tushare_provider = SourceProxy("tushare")
+def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
+    handler = get_default_source_package_registry().get_handler(package_id, handler_name)
+    return handler(*args)
+
+
+def _expected_trade_dates(start_date: str, end_date: str, settings: QuoteMuxSettings) -> list[str]:
+    from quotemux.markets import QuoteMuxMarkets
+    from quotemux.requests.markets import TradingCalendarRequest
+
+    items = QuoteMuxMarkets(settings).get_trading_calendar(
+        TradingCalendarRequest(exchange="SSE", start_date=start_date, end_date=end_date, is_open=True)
+    )
+    return [item.trade_date for item in items]
 
 
 def _normalize_catalog_market(market: str) -> str:
@@ -127,6 +133,7 @@ def _build_missing_quote_requests(
     start_date: str,
     end_date: str,
     count: int | None,
+    settings: QuoteMuxSettings,
 ) -> list[tuple[list[str], str, str]]:
     if trade_date == "" and start_date == "" and end_date == "" and count:
         if has_enough_stock_quote_rows(items, index_codes, count, "index_code"):
@@ -144,7 +151,7 @@ def _build_missing_quote_requests(
         actual_start_date = actual_end_date
     if actual_end_date == "":
         actual_end_date = actual_start_date
-    expected_trade_dates = [item.trade_date for item in _datalake_ref.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)]
+    expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings)
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for index_code in index_codes:
         existing_dates = {item.trade_time for item in items if item.index_code == index_code and item.freq == "1d"}
@@ -173,34 +180,16 @@ def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
     return sorted(merged.values(), key=lambda item: (item.code, item.trade_date))
 
 
-def _apply_index_member_names(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
-    names = _datalake_ref.get_stock_names([item.code for item in items])
-    if names == {}:
-        return items
-    return [item.model_copy(update={"name": names.get(item.code, item.name)}) for item in items]
-
-
 def _build_quote_steps(request_freq: str, request_count: int | None, settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexQuoteItem], ...]:
     handlers = {
-        "get_index_quotes": lambda instance: lambda index_codes, missing_start, missing_end: {
-            "tushare": _tushare_provider,
-            "opentdx": _opentdx_provider,
-            "efinance": _efinance_provider,
-            "mootdx": _mootdx_provider,
-            "akshare": _akshare_provider,
-        }[instance.package_id].get_index_quotes(index_codes, request_freq, "", missing_start, missing_end, request_count),
+        "get_index_quotes": lambda instance: lambda index_codes, missing_start, missing_end: _source_package_call(instance.package_id, "get_index_quotes", index_codes, request_freq, "", missing_start, missing_end, request_count),
     }
     return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("tushare", "efinance", "mootdx", "akshare", "opentdx"))
 
 
 def _build_member_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexMemberItem], ...]:
     handlers = {
-        "get_index_members": lambda instance: lambda request_index_code, request_trade_date: {
-            "tushare": _tushare_provider,
-            "efinance": _efinance_provider,
-            "mootdx": _mootdx_provider,
-            "akshare": _akshare_provider,
-        }[instance.package_id].get_index_members(request_index_code, request_trade_date),
+        "get_index_members": lambda instance: lambda request_index_code, request_trade_date: _source_package_call(instance.package_id, "get_index_members", request_index_code, request_trade_date),
     }
     return SourceInstanceExecutor(settings).build_steps("indexes.members", handlers, ("tushare", "efinance", "mootdx", "akshare"))
 
@@ -216,8 +205,18 @@ class QuoteMuxIndexes:
         store_items, store_read = load_store_result("indexes.catalog", store_identity, IndexCatalogItem)
         if store_read.hit:
             return store_items
-        ts_items = _tushare_provider.get_index_catalog("", category, actual_market, publisher, status) if self._settings.is_source_enabled("tushare") else []
-        filtered_items = _filter_catalog_items(ts_items, category, actual_market, publisher, status)
+        handlers = {
+            "get_index_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_index_catalog", "", category, actual_market, publisher, status),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "indexes.catalog",
+            store_items if store_read.partial_hit else [],
+            ("index_code",),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("indexes.catalog", handlers, ("tushare",)),
+            self._settings.get_contract_source_order("indexes.catalog", ("tushare",)),
+        )
+        filtered_items = _filter_catalog_items(items, category, actual_market, publisher, status)
         result = sorted(filtered_items, key=lambda item: item.index_code)[offset: offset + actual_limit]
         store_result("indexes.catalog", store_identity, result, ContractReport(contract_name="indexes.catalog"))
         return result
@@ -227,8 +226,18 @@ class QuoteMuxIndexes:
         store_items, store_read = load_store_result("indexes.profile", store_identity, IndexCatalogItem)
         if store_read.hit:
             return store_items[0] if store_items else None
-        ts_items = _tushare_provider.get_index_catalog(index_code, "", "", "", "") if self._settings.is_source_enabled("tushare") else []
-        item = ts_items[0] if ts_items else None
+        handlers = {
+            "get_index_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_index_catalog", index_code, "", "", "", ""),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "indexes.profile",
+            store_items if store_read.partial_hit else [],
+            ("index_code",),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("indexes.profile", handlers, ("tushare",)),
+            self._settings.get_contract_source_order("indexes.profile", ("tushare",)),
+        )
+        item = items[0] if items else None
         store_result("indexes.profile", store_identity, [item] if item is not None else [], ContractReport(contract_name="indexes.profile"))
         return item
 
@@ -268,13 +277,11 @@ class QuoteMuxIndexes:
                     profile_id=active_snapshot.profile_id,
                     profile_version=active_snapshot.version,
                 ).with_store_stats(hit=True)
-        datalake_items = _datalake.get_index_quotes(request.index_codes, request_freq, request.trade_date, request.start_date, request.end_date, request_count)
-        base_items = merge_model_lists(store_items if store_status == "partial_hit" else [], datalake_items, ("index_code", "trade_time", "freq"))
         merged_items, fallback_report = run_fallback_chain_with_report(
             "indexes.quotes.daily",
-            base_items,
+            store_items if store_status == "partial_hit" else [],
             ("index_code", "trade_time", "freq"),
-            lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count),
+            lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count, self._settings),
             _build_quote_steps(request_freq, request_count, self._settings),
             self._settings.get_contract_source_order("indexes.quotes.daily", ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
         )
@@ -315,8 +322,7 @@ class QuoteMuxIndexes:
         normalized_items = _merge_index_members(merged_items)
         if normalized_items == []:
             return [], ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
-        named_items = _apply_index_member_names(normalized_items)
-        result = [item.model_copy(update={"trade_date": request.trade_date}) if item.trade_date == "" and request.trade_date != "" else item for item in named_items]
+        result = [item.model_copy(update={"trade_date": request.trade_date}) if item.trade_date == "" and request.trade_date != "" else item for item in normalized_items]
         report = ContractReport.from_fallback_report("indexes.members", fallback_report, degraded=True)
         store_write = store_result("indexes.members", store_identity, result, report, report.quarantine_count)
         report = report.with_store_stats(partial_hit=store_read.partial_hit, miss=store_read.status in {"miss", "skip"}, stale=store_read.status == "stale", write=store_write.status == "write")

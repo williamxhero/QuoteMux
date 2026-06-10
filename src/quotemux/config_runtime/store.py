@@ -181,12 +181,19 @@ class RuntimeConfigStore:
         manifests: tuple[SourcePackageManifest, ...],
     ) -> tuple[SourceInstanceConfig, ...]:
         manifests_by_id = {manifest.package_id: manifest for manifest in manifests}
-        resolved = [instance for instance in instances if instance.package_id in manifests_by_id]
+        resolved = [self._reconcile_instance(instance, manifests_by_id[instance.package_id]) for instance in instances if instance.package_id in manifests_by_id]
         existing_packages = {instance.package_id for instance in resolved}
         for index, manifest in enumerate(manifests):
             if manifest.package_id not in existing_packages:
                 resolved.append(self._build_default_instance(index, manifest))
         return tuple(sorted(resolved, key=lambda item: (item.priority, item.instance_id)))
+
+    def _reconcile_instance(self, instance: SourceInstanceConfig, manifest: SourcePackageManifest) -> SourceInstanceConfig:
+        config_values = {field.name: instance.config_values.get(field.name, field.default_value) for field in manifest.config_schema}
+        secret_values = {field_name: instance.secret_values.get(field_name, "") for field_name in manifest.secret_fields}
+        if instance.package_id == "tushare" and "api_key" in secret_values and secret_values["api_key"] == "":
+            secret_values["api_key"] = instance.secret_values.get("token", "")
+        return replace(instance, config_values=config_values, secret_values=secret_values)
 
     def _build_default_profile(
         self,
@@ -268,8 +275,6 @@ class RuntimeConfigStore:
         return tuple(ordered)
 
     def _normalize_source_id(self, contract_name: str, source_id: str) -> str:
-        if source_id == "datalake":
-            return "tushare"
         return LEGACY_PACKAGE_ALIASES.get(source_id, source_id)
 
     def _read_json(self, path: Path, default: object):

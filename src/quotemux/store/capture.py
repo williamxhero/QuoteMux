@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 
 from quotemux.infra.common import format_date_value
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
-from quotemux.infra.db.config import DL_DB_CONNECT_TIMEOUT, DL_DB_HOST, DL_DB_NAME, DL_DB_PASSWORD, DL_DB_PORT, DL_DB_USER
+from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
 from quotemux.capabilities import get_capability_config_root, is_independently_configurable_capability_id
 from quotemux.capabilities.inventory import list_capability_ids
@@ -595,12 +595,12 @@ class PostgresAdvisoryLock:
 
     def acquire(self) -> bool:
         connection = psycopg.connect(
-            host=DL_DB_HOST,
-            port=DL_DB_PORT,
-            dbname=DL_DB_NAME,
-            user=DL_DB_USER,
-            password=DL_DB_PASSWORD,
-            connect_timeout=DL_DB_CONNECT_TIMEOUT,
+            host=DB_HOST,
+            port=DB_PORT,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            connect_timeout=DB_CONNECT_TIMEOUT,
             row_factory=dict_row,
         )
         with connection.cursor() as cursor:

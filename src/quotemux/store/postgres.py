@@ -286,6 +286,8 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
 
 
 def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "stocks.catalog":
+        return ("codes", "name", "exchange", "list_status", "include_delisted", "limit", "offset")
     if capability_id.startswith("stocks.quotes."):
         if capability_id == "stocks.quotes.daily_snapshot":
             return ("trade_date",)
@@ -344,6 +346,8 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
 
 
 def _coverage_mode_for_capability(capability_id: str) -> str:
+    if capability_id == "stocks.catalog":
+        return "snapshot"
     if capability_id == "stocks.quotes.intraday":
         return "minute_range"
     if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily", "boards.quotes.daily"}:
@@ -1034,11 +1038,13 @@ def _payload_matches_scope(payload: dict[str, object], scope: CacheScope) -> boo
     for field, value in scope.criteria.items():
         if _normalize_text(value) == "":
             continue
-        if field in {"start_year", "end_year", "is_open", "sort_by", "limit", "offset", "include_sources", "include_content_text"}:
+        if field in {"start_year", "end_year", "is_open", "sort_by", "limit", "offset", "include_delisted", "include_sources", "include_content_text"}:
             continue
         if field in {"event_type", "stock_code"} and _normalize_text(value) == "":
             continue
         payload_value = payload.get(field, "")
+        if field == "codes":
+            payload_value = payload.get("code", "")
         if field == "trade_date":
             if "request_trade_date" in payload:
                 payload_value = payload["request_trade_date"]

@@ -73,8 +73,16 @@ def _activate_import_paths(sys_paths: tuple[str, ...], import_roots: tuple[str, 
                 namespace_package.__path__.insert(0, namespace_path)
     if package_root != "":
         package_path = Path(package_root)
-        _append_sys_path(str(package_path.parent))
-        _append_sys_path(str(package_path))
+        package_parent = package_path.parent
+        source_package_root = package_parent.parent if package_parent.name == "packages" else package_parent
+        _prepend_sys_path(str(source_package_root))
+        if package_parent.name == "packages":
+            namespace_package = import_module("quotemux_packages")
+            namespace_path = str(package_parent)
+            if namespace_path in namespace_package.__path__:
+                namespace_package.__path__.remove(namespace_path)
+            namespace_package.__path__.insert(0, namespace_path)
+        _prepend_sys_path(str(package_path))
     invalidate_caches()
 
 

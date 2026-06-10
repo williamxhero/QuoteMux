@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from quotemux.infra.config import DATALAKE_ROOT
+from quotemux.infra.config import DATA_ROOT
 
 
-AUDIT_ROOT = DATALAKE_ROOT / "type=cache" / "service=fallback"
+AUDIT_ROOT = DATA_ROOT / "type=cache" / "service=fallback"
 
 
 def _serialize_value(value: object) -> object:

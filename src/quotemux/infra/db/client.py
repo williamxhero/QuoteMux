@@ -8,7 +8,7 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 
-from quotemux.infra.db.config import DL_DB_CONNECT_TIMEOUT, DL_DB_HOST, DL_DB_NAME, DL_DB_PASSWORD, DL_DB_PORT, DL_DB_USER
+from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from quotemux.infra.provider_runtime.core import call_provider_api
 
 
@@ -31,12 +31,12 @@ _POOL_DROPPED = 0
 
 def _connect() -> psycopg.Connection:
     return psycopg.connect(
-        host=DL_DB_HOST,
-        port=DL_DB_PORT,
-        dbname=DL_DB_NAME,
-        user=DL_DB_USER,
-        password=DL_DB_PASSWORD,
-        connect_timeout=DL_DB_CONNECT_TIMEOUT,
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=DB_CONNECT_TIMEOUT,
         row_factory=dict_row,
     )
 
@@ -120,9 +120,9 @@ def _query_dataframe_once(query: str, params: tuple[object, ...]) -> pd.DataFram
 
 def query_dataframe(query: str, params: tuple[object, ...] = ()) -> pd.DataFrame:
     try:
-        return call_provider_api("datalake_db", "query_dataframe", _query_dataframe_once, query, params)
+        return call_provider_api("store_db", "query_dataframe", _query_dataframe_once, query, params)
     except Exception as exc:
-        print(f"datalake db query failed: {exc}")
+        print(f"store db query failed: {exc}")
         return pd.DataFrame()
 
 
@@ -142,9 +142,9 @@ def _execute_sql_once(query: str, params: tuple[object, ...]) -> bool:
 
 def execute_sql(query: str, params: tuple[object, ...] = ()) -> bool:
     try:
-        return call_provider_api("datalake_db", "execute_sql", _execute_sql_once, query, params)
+        return call_provider_api("store_db", "execute_sql", _execute_sql_once, query, params)
     except Exception as exc:
-        print(f"datalake db execute failed: {exc}")
+        print(f"store db execute failed: {exc}")
         return False
 
 
@@ -166,9 +166,9 @@ def execute_many(query: str, params_list: list[tuple[object, ...]]) -> bool:
     if not params_list:
         return True
     try:
-        return call_provider_api("datalake_db", "execute_many", _execute_many_once, query, params_list)
+        return call_provider_api("store_db", "execute_many", _execute_many_once, query, params_list)
     except Exception as exc:
-        print(f"datalake db batch execute failed: {exc}")
+        print(f"store db batch execute failed: {exc}")
         return False
 
 

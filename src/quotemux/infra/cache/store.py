@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from quotemux.infra.config import DATALAKE_ROOT
+from quotemux.infra.config import DATA_ROOT
 from quotemux.infra.common import format_date_value, parse_date_text
 
 
-CACHE_ROOT = DATALAKE_ROOT / "type=cache" / "service=integration_api"
+CACHE_ROOT = DATA_ROOT / "type=cache" / "service=integration_api"
 
 
 def normalize_day_key(value: object) -> str:

@@ -11,13 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_QUOTEMUX_DOCS_ROOT = PROJECT_ROOT / "docs"
 
 
-def _get_datalake_root() -> Path:
-    path_text = os.getenv("DATALAKE_ROOT", "")
+def _get_data_root() -> Path:
+    path_text = os.getenv("MARKETHUB_DATA_ROOT", "")
     if path_text:
         return Path(path_text)
     if os.name != "nt":
-        return Path("/mnt/c/STOCKS/datalake")
-    return Path("C:/STOCKS/datalake")
+        return Path("/mnt/c/STOCKS/markethub")
+    return Path("C:/STOCKS/markethub")
 
 
 def _get_markethub_docs_root() -> Path:
@@ -27,6 +27,5 @@ def _get_markethub_docs_root() -> Path:
     return DEFAULT_QUOTEMUX_DOCS_ROOT
 
 
-DATALAKE_ROOT = _get_datalake_root()
+DATA_ROOT = _get_data_root()
 DOCS_ROOT = _get_markethub_docs_root()
-TS_TOKEN = os.getenv("TS_TOKEN", "") or os.getenv("DL_TS_TOKEN", "")

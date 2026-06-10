@@ -8,15 +8,14 @@ from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_
 from quotemux.common import ensure_limit
 from quotemux.reports import ContractReport
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
-from quotemux.runtime_core.registry import SourceProxy
+from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
-from quotemux.sources.datalake import reference as _datalake_ref
 from quotemux.store import load_store_result, store_result
 
 
-_akshare_provider = SourceProxy("akshare")
-_efinance_provider = SourceProxy("efinance")
-_tushare_provider = SourceProxy("tushare")
+def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
+    handler = get_default_source_package_registry().get_handler(package_id, handler_name)
+    return handler(*args)
 
 
 def _today_text() -> str:
@@ -99,10 +98,7 @@ class QuoteMuxMarkets:
     def get_main_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[MarketCapitalFlowItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}
         handlers = {
-            "get_market_capital_flow": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_market_capital_flow(trade_date, start_date, end_date),
+            "get_market_capital_flow": lambda instance: lambda: _source_package_call(instance.package_id, "get_market_capital_flow", trade_date, start_date, end_date),
         }
         return self._store_list(
             "markets.indicators.main_capital_flow",
@@ -137,16 +133,12 @@ class QuoteMuxMarkets:
                 profile_id=active_snapshot.profile_id,
                 profile_version=active_snapshot.version,
             ).with_store_stats(hit=True)
-        datalake_items = _datalake_ref.get_trading_calendar(request.exchange, actual_start, actual_end, request.is_open)
         handlers = {
-            "get_trading_calendar": lambda instance: lambda missing_start, missing_end: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_trading_calendar(request.exchange, missing_start, missing_end, None),
+            "get_trading_calendar": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_trading_calendar", request.exchange, missing_start, missing_end, None),
         }
         merged_items, fallback_report = run_fallback_chain_with_report(
             "markets.calendar.trading",
-            store_items if store_read.partial_hit else datalake_items,
+            store_items if store_read.partial_hit else [],
             ("exchange", "trade_date"),
             lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
             SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("tushare", "akshare")),
@@ -182,10 +174,7 @@ class QuoteMuxMarkets:
     def get_connect_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[ConnectCapitalFlowItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}
         handlers = {
-            "get_connect_capital_flow": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_connect_capital_flow(trade_date, start_date, end_date),
+            "get_connect_capital_flow": lambda instance: lambda: _source_package_call(instance.package_id, "get_connect_capital_flow", trade_date, start_date, end_date),
         }
         return self._store_list(
             "markets.connect.capital_flow",
@@ -198,37 +187,37 @@ class QuoteMuxMarkets:
 
     def get_connect_quotas(self, trade_date: str, start_date: str, end_date: str, market_type: str) -> list[ConnectQuotaItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "market_type": market_type}
+        handlers = {
+            "get_connect_quotas": lambda instance: lambda: _source_package_call(instance.package_id, "get_connect_quotas", trade_date, start_date, end_date, market_type),
+        }
         return self._store_list(
             "markets.connect.quotas",
             store_identity,
             ConnectQuotaItem,
             ("market", "trade_date"),
             ("trade_date", "market"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_connect_quotas(trade_date, start_date, end_date, market_type),
+            lambda: self._source_list("markets.connect.quotas", handlers, ("tushare",), ("market", "trade_date")),
         )
 
     def get_connect_active_top10(self, trade_date: str, start_date: str, end_date: str, market_type: str, limit: int) -> list[ConnectActiveTop10Item]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "market_type": market_type, "limit": limit}
+        handlers = {
+            "get_connect_active_top10": lambda instance: lambda: _source_package_call(instance.package_id, "get_connect_active_top10", trade_date, start_date, end_date, market_type, ensure_limit(limit)),
+        }
         items = self._store_list(
             "markets.connect.active_top10",
             store_identity,
             ConnectActiveTop10Item,
             ("market", "trade_date", "code", "rank"),
             ("trade_date", "market", "rank", "code"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit)),
+            lambda: self._source_list("markets.connect.active_top10", handlers, ("tushare",), ("market", "trade_date", "code", "rank")),
         )
-        if len(items) < ensure_limit(limit) and self._settings.is_source_enabled("tushare"):
-            items = _tushare_provider.get_connect_active_top10(trade_date, start_date, end_date, market_type, ensure_limit(limit))
-            store_result("markets.connect.active_top10", store_identity, items, ContractReport(contract_name="markets.connect.active_top10"))
         return items[: ensure_limit(limit)]
 
     def get_block_trades(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[BlockTradeItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
         handlers = {
-            "get_block_trades": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_block_trades(trade_date, start_date, end_date, code, ensure_limit(limit)),
+            "get_block_trades": lambda instance: lambda: _source_package_call(instance.package_id, "get_block_trades", trade_date, start_date, end_date, code, ensure_limit(limit)),
         }
         items = self._store_list(
             "markets.events.block_trades",
@@ -243,11 +232,7 @@ class QuoteMuxMarkets:
     def get_dragon_tiger(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
         handlers = {
-            "get_dragon_tiger": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-                "efinance": _efinance_provider,
-            }[instance.package_id].get_dragon_tiger(trade_date, start_date, end_date, code, ensure_limit(limit)),
+            "get_dragon_tiger": lambda instance: lambda: _source_package_call(instance.package_id, "get_dragon_tiger", trade_date, start_date, end_date, code, ensure_limit(limit)),
         }
         items = self._store_list(
             "markets.participants.dragon_tiger",
@@ -262,10 +247,7 @@ class QuoteMuxMarkets:
     def get_dragon_tiger_institutions(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerInstitutionItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
         handlers = {
-            "get_dragon_tiger_institutions": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_dragon_tiger_institutions(trade_date, start_date, end_date, code, ensure_limit(limit)),
+            "get_dragon_tiger_institutions": lambda instance: lambda: _source_package_call(instance.package_id, "get_dragon_tiger_institutions", trade_date, start_date, end_date, code, ensure_limit(limit)),
         }
         items = self._store_list(
             "markets.participants.dragon_tiger.institutions",
@@ -279,13 +261,16 @@ class QuoteMuxMarkets:
 
     def get_hot_money(self, name: str, tag: str, limit: int, offset: int) -> list[HotMoneyProfileItem]:
         store_identity = {"name": name, "tag": tag, "limit": limit, "offset": offset}
+        handlers = {
+            "get_hot_money_profiles": lambda instance: lambda: _source_package_call(instance.package_id, "get_hot_money_profiles", name),
+        }
         items = self._store_list(
             "markets.participants.hot_money",
             store_identity,
             HotMoneyProfileItem,
             ("name",),
             ("name",),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_hot_money_profiles(name),
+            lambda: self._source_list("markets.participants.hot_money", handlers, ("tushare",), ("name",)),
             _payloads_with_as_of_date,
         )
         if tag:
@@ -294,37 +279,47 @@ class QuoteMuxMarkets:
 
     def get_hot_money_details(self, trade_date: str, start_date: str, end_date: str, name: str, limit: int, offset: int) -> list[HotMoneyDetailItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "name": name, "limit": limit, "offset": offset}
+        handlers = {
+            "get_hot_money_details": lambda instance: lambda: _source_package_call(instance.package_id, "get_hot_money_details", trade_date, start_date, end_date, name, ensure_limit(limit)),
+        }
         items = self._store_list(
             "markets.participants.hot_money.details",
             store_identity,
             HotMoneyDetailItem,
             ("trade_date", "name", "code"),
             ("trade_date", "name", "code"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_hot_money_details(trade_date, start_date, end_date, name, ensure_limit(limit)),
+            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("tushare",), ("trade_date", "name", "code")),
         )
         return items[offset: offset + ensure_limit(limit)]
 
     def get_open_auctions(self, codes: str, trade_date: str) -> list[AuctionItem]:
         store_identity = {"code": codes, "trade_date": trade_date}
+        handlers = {
+            "get_market_open_auctions": lambda instance: lambda: _source_package_call(instance.package_id, "get_market_open_auctions", codes, trade_date),
+        }
         return self._store_list(
             "markets.trading.open_auctions",
             store_identity,
             AuctionItem,
             ("code", "trade_date", "auction_time", "session"),
             ("trade_date", "code", "auction_time"),
-            lambda: [] if not self._settings.is_source_enabled("tushare") else _tushare_provider.get_market_open_auctions(codes, trade_date),
+            lambda: self._source_list("markets.trading.open_auctions", handlers, ("tushare",), ("code", "trade_date", "auction_time", "session")),
         )
 
     def get_sessions(self, codes: str) -> list[TradingSessionItem]:
         store_identity = {"codes": codes}
-        store_items, store_read = load_store_result("markets.trading.sessions", store_identity, TradingSessionItem)
-        if store_read.hit:
-            return store_items
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_market_sessions(codes)
-        store_result("markets.trading.sessions", store_identity, _payloads_with_as_of_date(items), ContractReport(contract_name="markets.trading.sessions"))
-        return items
+        handlers = {
+            "get_market_sessions": lambda instance: lambda: _source_package_call(instance.package_id, "get_market_sessions", codes),
+        }
+        return self._store_list(
+            "markets.trading.sessions",
+            store_identity,
+            TradingSessionItem,
+            ("market", "session"),
+            ("market", "session"),
+            lambda: self._source_list("markets.trading.sessions", handlers, ("tushare",), ("market", "session")),
+            _payloads_with_as_of_date,
+        )
 
 
 

@@ -73,11 +73,11 @@ PROVIDER_POLICIES = {
         _int_env("MHK_AKSHARE_MAX_RETRIES", PROVIDER_MAX_RETRIES),
         _float_env("MHK_AKSHARE_QUEUE_TIMEOUT_SECONDS", PROVIDER_QUEUE_TIMEOUT_SECONDS),
     ),
-    "datalake_db": ProviderPolicy(
-        _int_env("MHK_DB_CONCURRENCY", 8),
-        _float_env("MHK_DB_RPS", 0.0),
-        _int_env("MHK_DB_MAX_RETRIES", 0),
-        _float_env("MHK_DB_QUEUE_TIMEOUT_SECONDS", PROVIDER_QUEUE_TIMEOUT_SECONDS),
+    "store_db": ProviderPolicy(
+        _int_env("MHK_STORE_DB_CONCURRENCY", 8),
+        _float_env("MHK_STORE_DB_RPS", 0.0),
+        _int_env("MHK_STORE_DB_MAX_RETRIES", 0),
+        _float_env("MHK_STORE_DB_QUEUE_TIMEOUT_SECONDS", PROVIDER_QUEUE_TIMEOUT_SECONDS),
     ),
 }
 

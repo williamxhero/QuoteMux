@@ -4,7 +4,7 @@ from functools import lru_cache
 
 from quotemux.config_runtime.runtime import get_config_runtime
 from quotemux.source_packages.registry import get_default_source_package_registry
-from quotemux.source_packages.instance_context import use_source_instance
+from quotemux.source_packages.instance_context import current_source_instance, use_source_instance
 from quotemux.sources.base import SourceDefinition
 
 
@@ -42,6 +42,8 @@ class SourceProxy:
             raise AttributeError(str(exc)) from exc
 
         def _call_with_default_instance(*args: object, **kwargs: object):
+            if current_source_instance() is not None:
+                return handler(*args, **kwargs)
             source_instance = _default_source_instance(self._source_name)
             if source_instance is None:
                 return handler(*args, **kwargs)

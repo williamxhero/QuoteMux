@@ -4,20 +4,17 @@ from datetime import timedelta
 
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem
 from quotemux.infra.common import format_date_value, parse_date_text
-from quotemux.sources.datalake import reference as _datalake_reference
-from quotemux.sources.datalake import source as _datalake_source
 from quotemux.common import ensure_limit
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
-from quotemux.runtime_core.registry import SourceProxy
+from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
 from quotemux.reports import ContractReport
 from quotemux.store import load_store_result, store_result
 
 
-_akshare_provider = SourceProxy("akshare")
-_tushare_provider = SourceProxy("tushare")
-_datalake = _datalake_source
-_datalake_ref = _datalake_reference
+def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
+    handler = get_default_source_package_registry().get_handler(package_id, handler_name)
+    return handler(*args)
 
 
 def _today_text() -> str:
@@ -100,7 +97,7 @@ class QuoteMuxBoards:
             actual_start_date = actual_end_date
         if actual_end_date == "":
             actual_end_date = actual_start_date
-        expected_trade_dates = [item.trade_date for item in _datalake_ref.get_trading_calendar("SSE", actual_start_date, actual_end_date, True)]
+        expected_trade_dates: list[str] = []
         existing_dates = {item.trade_date for item in items}
         missing_ranges = _build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
@@ -124,10 +121,7 @@ class QuoteMuxBoards:
         if store_read.hit:
             return store_items[: ensure_limit(limit)]
         handlers = {
-            "get_board_quotes": lambda instance: lambda request_board_codes: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_board_quotes(request_board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count),
+            "get_board_quotes": lambda instance: lambda request_board_codes: _source_package_call(instance.package_id, "get_board_quotes", request_board_codes, freq, trade_date, start_date, end_date, start_time, end_time, count),
         }
         items, _ = run_fallback_chain_with_report(
             "boards.quotes.daily",
@@ -156,10 +150,7 @@ class QuoteMuxBoards:
         if store_read.hit:
             return store_items
         handlers = {
-            "get_board_catalog": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_board_catalog(category, market, status, ensure_limit(limit), offset),
+            "get_board_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_catalog", category, market, status, ensure_limit(limit), offset),
         }
         items, _ = run_fallback_chain_with_report(
             "boards.catalog",
@@ -178,12 +169,7 @@ class QuoteMuxBoards:
         if store_read.hit:
             return store_items[0] if store_items else None
         handlers = {
-            "get_board_profile": lambda instance: lambda: [
-                item for item in [{
-                    "tushare": _tushare_provider,
-                    "akshare": _akshare_provider,
-                }[instance.package_id].get_board_profile(board_code)] if item is not None
-            ],
+            "get_board_profile": lambda instance: lambda: [item for item in [_source_package_call(instance.package_id, "get_board_profile", board_code)] if item is not None],
         }
         items, _ = run_fallback_chain_with_report(
             "boards.profile",
@@ -202,15 +188,8 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.members", store_identity, BoardMemberItem)
         if store_read.hit:
             return store_items
-        datalake_items = _datalake_reference.get_board_members(board_code, trade_date)
-        if datalake_items:
-            store_result("boards.members", store_identity, _board_member_store_payloads(datalake_items, trade_date), ContractReport(contract_name="boards.members"))
-            return datalake_items
         handlers = {
-            "get_board_members": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_board_members(board_code, trade_date),
+            "get_board_members": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_members", board_code, trade_date),
         }
         items, _ = run_fallback_chain_with_report(
             "boards.members",
@@ -228,13 +207,17 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.members.history", store_identity, BoardMemberHistoryItem)
         if store_read.hit:
             return store_items
-        datalake_items = _datalake_reference.get_board_member_history(board_code, start_date, end_date)
-        if datalake_items:
-            store_result("boards.members.history", store_identity, datalake_items, ContractReport(contract_name="boards.members.history"))
-            return datalake_items
-        if not self._settings.is_source_enabled("tushare"):
-            return []
-        items = _tushare_provider.get_board_member_history(board_code, start_date, end_date)
+        handlers = {
+            "get_board_member_history": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_member_history", board_code, start_date, end_date),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "boards.members.history",
+            store_items if store_read.partial_hit else [],
+            ("board_code", "code", "in_date", "out_date"),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("boards.members.history", handlers, ("tushare", "akshare")),
+            self._settings.get_contract_source_order("boards.members.history", ("tushare", "akshare")),
+        )
         store_result("boards.members.history", store_identity, items, ContractReport(contract_name="boards.members.history"))
         return items
 
@@ -243,16 +226,12 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.indicators.money_flow", store_identity, BoardMoneyFlowItem)
         if store_read.hit:
             return sorted(store_items, key=lambda item: (item.board_code, item.trade_date))
-        datalake_items = _datalake.get_board_money_flow(board_code, trade_date, start_date, end_date, scope)
         handlers = {
-            "get_board_money_flow": lambda instance: lambda missing_start, missing_end: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_board_money_flow(board_code, "", missing_start, missing_end, scope),
+            "get_board_money_flow": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_board_money_flow", board_code, trade_date, missing_start, missing_end, scope),
         }
         merged_items, _ = run_fallback_chain_with_report(
             "boards.indicators.money_flow",
-            store_items if store_read.partial_hit else datalake_items,
+            store_items if store_read.partial_hit else [],
             ("board_code", "trade_date", "scope"),
             lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
             SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare")),
@@ -267,16 +246,12 @@ class QuoteMuxBoards:
         store_items, store_read = load_store_result("boards.indicators.money_flow.snapshot", store_identity, BoardMoneyFlowItem)
         if store_read.hit:
             return sorted(store_items, key=lambda item: (item.board_code, item.trade_date))
-        datalake_items = _datalake_source.get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset)
         handlers = {
-            "get_board_daily_money_flow_snapshot": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_board_daily_money_flow_snapshot(trade_date, scope, limit, offset),
+            "get_board_daily_money_flow_snapshot": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_daily_money_flow_snapshot", trade_date, scope, limit, offset),
         }
         items, _ = run_fallback_chain_with_report(
             "boards.indicators.money_flow.snapshot",
-            store_items if store_read.partial_hit else datalake_items,
+            store_items if store_read.partial_hit else [],
             ("board_code", "trade_date", "scope"),
             lambda current_items: [()] if current_items == [] else [],
             SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow.snapshot", handlers, ("tushare", "akshare")),
@@ -292,10 +267,7 @@ class QuoteMuxBoards:
         if store_read.hit:
             return store_items
         handlers = {
-            "get_board_categories": lambda instance: lambda: {
-                "tushare": _tushare_provider,
-                "akshare": _akshare_provider,
-            }[instance.package_id].get_board_categories(parent_code, level),
+            "get_board_categories": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_categories", parent_code, level),
         }
         items, _ = run_fallback_chain_with_report(
             "boards.reference.categories",

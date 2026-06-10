@@ -27,11 +27,8 @@ def get_provider_secret_value(name: str) -> str:
     return source_instance.secret_values.get(name, "")
 
 
-def get_tushare_token() -> str:
-    token = get_provider_secret_value("token")
-    if token != "":
-        return token
-    return os.getenv("TS_TOKEN", "") or os.getenv("DL_TS_TOKEN", "")
+def get_provider_api_key() -> str:
+    return get_provider_secret_value("api_key")
 
 
 def get_current_source_instance_id() -> str:

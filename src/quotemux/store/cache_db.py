@@ -8,7 +8,7 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 
-from quotemux.infra.db.config import DL_DB_CONNECT_TIMEOUT, DL_DB_HOST, DL_DB_NAME, DL_DB_PASSWORD, DL_DB_PORT, DL_DB_USER
+from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from quotemux.infra.provider_runtime.core import call_provider_api
 
 
@@ -20,11 +20,11 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-CACHE_DB_HOST = os.getenv("QUOTEMUX_CACHE_DB_HOST", DL_DB_HOST)
-CACHE_DB_PORT = _int_env("QUOTEMUX_CACHE_DB_PORT", DL_DB_PORT)
-CACHE_DB_NAME = os.getenv("QUOTEMUX_CACHE_DB_NAME", os.getenv("DL_DB_NAME", DL_DB_NAME))
-CACHE_DB_USER = os.getenv("QUOTEMUX_CACHE_DB_USER", DL_DB_USER)
-CACHE_DB_PASSWORD = os.getenv("QUOTEMUX_CACHE_DB_PASSWORD", DL_DB_PASSWORD)
+CACHE_DB_HOST = os.getenv("QUOTEMUX_CACHE_DB_HOST", DB_HOST)
+CACHE_DB_PORT = _int_env("QUOTEMUX_CACHE_DB_PORT", DB_PORT)
+CACHE_DB_NAME = os.getenv("QUOTEMUX_CACHE_DB_NAME", os.getenv("MARKETHUB_DB_NAME", DB_NAME))
+CACHE_DB_USER = os.getenv("QUOTEMUX_CACHE_DB_USER", DB_USER)
+CACHE_DB_PASSWORD = os.getenv("QUOTEMUX_CACHE_DB_PASSWORD", DB_PASSWORD)
 CACHE_DB_POOL_SIZE = _int_env("QUOTEMUX_CACHE_DB_POOL_SIZE", 8)
 
 _POOL: Queue[psycopg.Connection] = Queue(maxsize=max(1, CACHE_DB_POOL_SIZE))
@@ -42,7 +42,7 @@ def _connect() -> psycopg.Connection:
         dbname=CACHE_DB_NAME,
         user=CACHE_DB_USER,
         password=CACHE_DB_PASSWORD,
-        connect_timeout=DL_DB_CONNECT_TIMEOUT,
+        connect_timeout=DB_CONNECT_TIMEOUT,
         row_factory=dict_row,
     )
 
