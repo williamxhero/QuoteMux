@@ -304,35 +304,24 @@ def _run_consensus_race_internal(
 ) -> tuple[list[T], FallbackReport]:
     snapshot = get_config_runtime().get_active_snapshot()
     ordered_steps = _order_steps(steps, source_order)
-    requests = request_builder([item.model_copy(deep=True) for item in base_items])
-    if requests == []:
-        reports = tuple(
-            ProviderMergeStats(
-                name=step.name,
-                package_id=step.name,
-                source_instance_id=step.step_id,
-                handler=step.handler,
-                request_count=0,
-                fetched_row_count=0,
-                added_count=0,
-                filled_field_count=0,
-                conflict_count=0,
-                skipped_count=1,
-                error_count=0,
-                elapsed_ms=0.0,
-            )
-            for step in ordered_steps
-        )
-        return [item.model_copy(deep=True) for item in base_items], FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=reports)
     results: list[ProviderFetchResult[T]] = []
-    if ordered_steps != ():
-        with ThreadPoolExecutor(max_workers=len(ordered_steps)) as executor:
-            futures = [executor.submit(_fetch_step_requests, contract_name, step, requests, snapshot) for step in ordered_steps]
-            for future in as_completed(futures):
-                results.append(future.result())
-    result_order = {step.step_id: index for index, step in enumerate(ordered_steps)}
-    results = sorted(results, key=lambda item: result_order[item.step.step_id])
     merge_strategy = normalize_merge_strategy(merge_strategy)
+    merged_probe_items = [item.model_copy(deep=True) for item in base_items]
+    for step in ordered_steps:
+        requests = request_builder(merged_probe_items)
+        if requests == []:
+            results.append(ProviderFetchResult(step=step, items=(), request_count=0, error_count=0, elapsed_ms=0.0))
+            break
+        result = _fetch_step_requests(contract_name, step, requests, snapshot)
+        results.append(result)
+        if merge_strategy in {MERGE_STRATEGY_FIRST_SUCCESS, MERGE_STRATEGY_RAW_PASSTHROUGH} and result.fetched_row_count > 0:
+            break
+        if merge_strategy == MERGE_STRATEGY_APPEND_DEDUPE:
+            merged_probe_items, _, _, _ = _merge_model_lists(merged_probe_items, list(result.items), key_fields)
+        if merge_strategy == MERGE_STRATEGY_FIELD_CONSENSUS:
+            merged_probe_items, _, _, _ = _merge_model_lists(merged_probe_items, list(result.items), key_fields)
+    if results == []:
+        return [item.model_copy(deep=True) for item in base_items], FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=())
     if merge_strategy in {MERGE_STRATEGY_FIRST_SUCCESS, MERGE_STRATEGY_FRESHEST_WINS, MERGE_STRATEGY_RAW_PASSTHROUGH}:
         best_result = _select_best_result(results, merge_strategy)
         merged_items = [item.model_copy(deep=True) for item in base_items]
@@ -361,11 +350,13 @@ def _run_consensus_race_internal(
     reports: list[ProviderMergeStats] = []
     for result in results:
         adopted = result.step.step_id in adopted_step_ids
+        skipped = result.request_count == 0
         record_provider_event(
             contract_name,
             result.step.name,
-            "success" if result.error_count < result.request_count else "error",
+            "skipped" if skipped else ("success" if result.error_count < result.request_count else "error"),
             {
+                "reason": "request_builder_empty" if skipped else "",
                 "request_count": result.request_count,
                 "fetched_row_count": result.fetched_row_count,
                 "provider_hit": adopted and result.fetched_row_count > 0,
@@ -389,7 +380,7 @@ def _run_consensus_race_internal(
                 added_count=result.fetched_row_count if adopted else 0,
                 filled_field_count=0,
                 conflict_count=conflict_count if adopted else 0,
-                skipped_count=0,
+                skipped_count=int(skipped),
                 error_count=result.error_count,
                 elapsed_ms=result.elapsed_ms,
             )

@@ -1,6 +1,6 @@
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
-from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
+from quotemux.requests.stocks import StockDailySnapshotRequest, StockDailyWindowRequest, StockQuotesRequest
 from quotemux.requests.datasets import IndexBar1dRequest, StockBar1mRequest, StockDailyOhlcvaRepairRequest
 
 __all__ = [
@@ -11,6 +11,7 @@ __all__ = [
     "StockBar1mRequest",
     "StockDailyOhlcvaRepairRequest",
     "StockDailySnapshotRequest",
+    "StockDailyWindowRequest",
     "StockQuotesRequest",
     "TradingCalendarRequest",
     "YearlyTradingCalendarRequest",

@@ -1,16 +1,18 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
 from platform_models import AuctionItem, BlockTradeItem, ConnectActiveTop10Item, ConnectCapitalFlowItem, ConnectQuotaItem, DragonTigerInstitutionItem, DragonTigerItem, HotMoneyDetailItem, HotMoneyProfileItem, MarketCapitalFlowItem, TradingCalendarItem, TradingSessionItem
 from quotemux.infra.common import parse_date_text
-from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
+from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.common import ensure_limit
+from quotemux.fact_ref_writes import get_fact_ref_writer
+from quotemux.local_store import get_local_trading_calendar
+from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
-from quotemux.store import load_store_result, store_result
 
 
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
@@ -68,21 +70,20 @@ class QuoteMuxMarkets:
         fetcher,
         payload_builder=None,
     ) -> list[object]:
-        store_items, store_read = load_store_result(capability_id, store_identity, model_type)
-        if store_read.hit:
-            return list(store_items)
-        fetched_items = list(fetcher())
-        merged_items = store_items if store_read.partial_hit else []
-        if merged_items != []:
-            from quotemux.common import merge_model_lists
-
-            merged_items = merge_model_lists(store_items, fetched_items, unique_fields)
-        else:
-            merged_items = fetched_items
-        sorted_items = sorted(merged_items, key=lambda item: tuple(getattr(item, field) for field in sort_fields)) if sort_fields else merged_items
-        payload_items = payload_builder(sorted_items) if payload_builder is not None else sorted_items
-        store_result(capability_id, store_identity, payload_items, ContractReport(contract_name=capability_id))
-        return sorted_items
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id=capability_id,
+                store_identity=store_identity,
+                model_type=model_type,
+                key_fields=unique_fields,
+                sort_fields=sort_fields,
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=(ProviderStep(name="provider", fetcher=lambda: list(fetcher())),),
+                source_order=("provider",),
+                payload_builder=payload_builder,
+            )
+        )
+        return list(items)
 
     def _source_list(self, capability_id: str, handlers: dict[str, object], source_order: tuple[str, ...], key_fields: tuple[str, ...]) -> list[object]:
         items, _ = run_fallback_chain_with_report(
@@ -119,38 +120,29 @@ class QuoteMuxMarkets:
             "exchange": request.exchange,
             "start_date": actual_start,
             "end_date": actual_end,
-            "is_open": request.is_open,
+            "is_open": None,
         }
-        store_items, store_read = load_store_result("markets.calendar.trading", store_identity, TradingCalendarItem)
-        if store_read.hit:
-            if request.is_open is not None:
-                store_items = [item for item in store_items if item.is_open == request.is_open]
-            from quotemux.config_runtime.runtime import get_config_runtime
-
-            active_snapshot = get_config_runtime().get_active_snapshot()
-            return sorted(store_items, key=lambda item: item.trade_date), ContractReport(
-                contract_name="markets.calendar.trading",
-                profile_id=active_snapshot.profile_id,
-                profile_version=active_snapshot.version,
-            ).with_store_stats(hit=True)
         handlers = {
             "get_trading_calendar": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_trading_calendar", request.exchange, missing_start, missing_end, None),
         }
-        merged_items, fallback_report = run_fallback_chain_with_report(
-            "markets.calendar.trading",
-            store_items if store_read.partial_hit else [],
-            ("exchange", "trade_date"),
-            lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
-            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("tushare", "akshare")),
-            self._settings.get_contract_source_order("markets.calendar.trading", ("tushare", "akshare")),
+        merged_items, report = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="markets.calendar.trading",
+                store_identity=store_identity,
+                model_type=TradingCalendarItem,
+                key_fields=("exchange", "trade_date"),
+                sort_fields=("trade_date",),
+                request_builder=lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("markets.calendar.trading", ("tushare", "akshare")),
+                base_items=get_local_trading_calendar(request.exchange, actual_start, actual_end, None),
+                base_source_name="ref.trade_calendar",
+                fact_ref_writer=get_fact_ref_writer("markets.calendar.trading"),
+            )
         )
         if request.is_open is not None:
             merged_items = [item for item in merged_items if item.is_open == request.is_open]
-        sorted_items = sorted(merged_items, key=lambda item: item.trade_date)
-        report = ContractReport.from_fallback_report("markets.calendar.trading", fallback_report, degraded=True)
-        store_write = store_result("markets.calendar.trading", store_identity, sorted_items, report, report.quarantine_count)
-        report = report.with_store_stats(partial_hit=store_read.partial_hit, miss=store_read.status in {"miss", "skip"}, stale=store_read.status == "stale", write=store_write.status == "write")
-        return sorted_items, report
+        return sorted(merged_items, key=lambda item: item.trade_date), report
 
     def get_previous_trading_days(self, request: PreviousTradingDaysRequest) -> list[TradingCalendarItem]:
         items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date="", end_date=request.trade_date, is_open=True))
@@ -320,7 +312,3 @@ class QuoteMuxMarkets:
             lambda: self._source_list("markets.trading.sessions", handlers, ("tushare",), ("market", "session")),
             _payloads_with_as_of_date,
         )
-
-
-
-

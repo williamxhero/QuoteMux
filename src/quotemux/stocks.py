@@ -9,8 +9,12 @@ from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, merge_model_lists, missing_expected_keys, sort_items, trim_items_per_key
+from quotemux.fact_ref_writes import get_fact_ref_writer
+from quotemux.local_daily import get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_daily_window as get_local_stock_daily_window, get_stock_quotes as get_local_stock_quotes
+from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_name_history, get_local_stock_profile
+from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
-from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
+from quotemux.requests.stocks import StockDailySnapshotRequest, StockDailyWindowRequest, StockQuotesRequest
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.store import load_store_result, store_result
 from quotemux.settings import QuoteMuxSettings
@@ -246,6 +250,62 @@ def _build_stock_quotes_query_result(
     )
 
 
+def _base_source_report(contract_name: str, base_source_name: str, base_hit: bool) -> ContractReport:
+    from quotemux.config_runtime.runtime import get_config_runtime
+
+    active_snapshot = get_config_runtime().get_active_snapshot()
+    return ContractReport(
+        contract_name=contract_name,
+        profile_id=active_snapshot.profile_id,
+        profile_version=active_snapshot.version,
+        source_hit_counts={base_source_name: int(base_hit)},
+        source_request_counts={base_source_name: 1},
+    )
+
+
+def _has_explicit_quote_window(request: StockQuotesRequest) -> bool:
+    return request.trade_date != "" or request.start_date != "" or request.end_date != "" or request.start_time != "" or request.end_time != ""
+
+
+def _missing_ranges_are_current_or_future(missing_requests: list[tuple[list[str], str, str]]) -> bool:
+    today_text = _today_text()
+    for _, missing_start, missing_end in missing_requests:
+        missing_date = missing_end or missing_start
+        if missing_date == "" or missing_date < today_text:
+            return False
+    return True
+
+
+def _should_return_local_daily(request: StockQuotesRequest, missing_requests: list[tuple[list[str], str, str]]) -> bool:
+    if missing_requests == []:
+        return True
+    if not _has_explicit_quote_window(request):
+        return False
+    # 盘中或未来日期尚无日线收盘数据时，不能为了补当天空缺进入慢 Store 或外部源链路。
+    return _missing_ranges_are_current_or_future(missing_requests)
+
+
+def _build_local_daily_query_result(
+    contract_name: str,
+    request: StockQuotesRequest,
+    local_items: list[StockQuoteItem],
+    actual_freq: str,
+    actual_limit: int | None,
+    actual_adjust: str,
+    request_freq: str,
+    request_count: int | None,
+    settings: QuoteMuxSettings,
+) -> tuple[StockQuotesQueryResult, ContractReport]:
+    result_items = local_items
+    if actual_freq in {"1w", "1mo"}:
+        result_items = _aggregate_stock_quotes(local_items, actual_freq, actual_adjust)
+    trimmed_items = trim_items_per_key(result_items, "code", "trade_time", request.count)
+    sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
+    expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", settings)
+    report = _base_source_report(contract_name, "fact.stock_daily_1d", local_items != [])
+    return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
+
+
 def _build_missing_quote_requests(
     codes: list[str],
     current_items: list[StockQuoteItem],
@@ -389,15 +449,20 @@ class QuoteMuxStocks:
         fetcher,
         payload_builder=None,
     ) -> list[object]:
-        store_items, store_read = load_store_result(capability_id, store_identity, model_type)
-        if store_read.hit:
-            return list(store_items)
-        fetched_items = list(fetcher())
-        merged_items = merge_model_lists(store_items if store_read.partial_hit else [], fetched_items, unique_fields)
-        sorted_items = sort_items(merged_items, sort_fields) if sort_fields else merged_items
-        payload_items = payload_builder(sorted_items) if payload_builder is not None else sorted_items
-        store_result(capability_id, store_identity, payload_items, ContractReport(contract_name=capability_id))
-        return sorted_items
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id=capability_id,
+                store_identity=store_identity,
+                model_type=model_type,
+                key_fields=unique_fields,
+                sort_fields=sort_fields,
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=(ProviderStep(name="provider", fetcher=lambda: list(fetcher())),),
+                source_order=("provider",),
+                payload_builder=payload_builder,
+            )
+        )
+        return list(items)
 
     def _source_list(self, capability_id: str, handlers: dict[str, object], source_order: tuple[str, ...], key_fields: tuple[str, ...]) -> list[object]:
         items, _ = run_fallback_chain_with_report(
@@ -411,15 +476,16 @@ class QuoteMuxStocks:
         return items
 
     def _store_single(self, capability_id: str, store_identity: dict[str, object], model_type: type[object], fetcher, payload_builder=None):
-        store_items, store_read = load_store_result(capability_id, store_identity, model_type)
-        if store_read.hit:
-            return store_items[0] if store_items else None
-        item = fetcher()
-        payload_items = [item] if item is not None else []
-        if payload_builder is not None:
-            payload_items = payload_builder(payload_items)
-        store_result(capability_id, store_identity, payload_items, ContractReport(contract_name=capability_id))
-        return item
+        items = self._store_list(
+            capability_id,
+            store_identity,
+            model_type,
+            ("code",),
+            ("code",),
+            lambda: [item for item in [fetcher()] if item is not None],
+            payload_builder,
+        )
+        return items[0] if items else None
 
     def get_quotes(self, request: StockQuotesRequest) -> list[StockQuoteItem]:
         items, _ = self.get_quotes_with_report(request)
@@ -443,6 +509,7 @@ class QuoteMuxStocks:
         request_count = _fallback_quote_count(actual_freq, request.count)
         contract_name = "stocks.quotes.daily" if request_freq == "1d" else "stocks.quotes.intraday"
         store_enabled = actual_freq not in {"1w", "1mo", "30m"}
+        fact_ref_writer = get_fact_ref_writer(contract_name) if request_freq in {"1d", "1m", "30m"} else None
         store_identity = {
             "codes": list(request.codes),
             "freq": actual_freq,
@@ -454,45 +521,35 @@ class QuoteMuxStocks:
             "count": request.count,
             "adjust": actual_adjust,
         }
-        store_items: list[StockQuoteItem] = []
-        store_status = "skip"
-        if store_enabled:
-            store_items, store_read = load_store_result(contract_name, store_identity, StockQuoteItem)
-            store_status = store_read.status
-            if store_read.hit:
-                if actual_freq in {"1w", "1mo"}:
-                    store_items = _aggregate_stock_quotes(store_items, actual_freq, actual_adjust)
-                missing_requests = _build_missing_quote_requests(request.codes, store_items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings)
-                if missing_requests == []:
-                    trimmed_items = trim_items_per_key(store_items, "code", "trade_time", request.count)
-                    sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
-                    expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", self._settings)
-                    from quotemux.config_runtime.runtime import get_config_runtime
-
-                    active_snapshot = get_config_runtime().get_active_snapshot()
-                    report = ContractReport(
-                        contract_name=contract_name,
-                        profile_id=active_snapshot.profile_id,
-                        profile_version=active_snapshot.version,
-                    ).with_store_stats(hit=True)
-                    return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
-                store_status = "partial_hit"
-        merged_items, fallback_report = run_fallback_chain_with_report(
-            contract_name,
-            store_items if store_status == "partial_hit" else [],
-            ("code", "trade_time", "freq"),
-            lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings),
-            _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
-            self._settings.get_contract_source_order(contract_name, ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
+        local_items: list[StockQuoteItem] = []
+        local_missing_requests: list[tuple[list[str], str, str]] = []
+        if request_freq == "1d":
+            local_items = get_local_stock_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, actual_adjust)
+            local_missing_requests = _build_missing_quote_requests(request.codes, local_items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings)
+            if _should_return_local_daily(request, local_missing_requests):
+                return _build_local_daily_query_result(contract_name, request, local_items, actual_freq, actual_limit, actual_adjust, request_freq, request_count, self._settings)
+        else:
+            local_items = get_local_stock_intraday_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count)
+        merged_items, report = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id=contract_name,
+                store_identity=store_identity,
+                model_type=StockQuoteItem,
+                key_fields=("code", "trade_time", "freq"),
+                sort_fields=("code", "trade_time"),
+                request_builder=lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings),
+                provider_steps=lambda: _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
+                source_order=self._settings.get_contract_source_order(contract_name, ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
+                base_items=local_items,
+                base_source_name="fact.stock_daily_1d" if request_freq == "1d" else ("fact.stock_bar_30m" if request_freq == "30m" else "fact.stock_bar_1m"),
+                store_enabled=store_enabled,
+                fact_ref_writer=fact_ref_writer,
+            )
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_stock_quotes(merged_items, actual_freq, actual_adjust)
         trimmed_items = trim_items_per_key(merged_items, "code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
-        report = ContractReport.from_fallback_report(contract_name, fallback_report)
-        if store_enabled:
-            store_write = store_result(contract_name, store_identity, merged_items, report, report.quarantine_count)
-            report = report.with_store_stats(partial_hit=store_status == "partial_hit", miss=store_status in {"miss", "skip"}, stale=store_status == "stale", write=store_write.status == "write")
         expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", self._settings)
         return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
 
@@ -511,33 +568,33 @@ class QuoteMuxStocks:
         store_identity = {
             "trade_date": actual_trade_date,
         }
-        store_items, store_read = load_store_result("stocks.quotes.daily_snapshot", store_identity, StockQuoteItem)
-        if store_read.hit:
-            sorted_items = sort_items(store_items, ("code", "trade_time"))
-            from quotemux.config_runtime.runtime import get_config_runtime
-
-            active_snapshot = get_config_runtime().get_active_snapshot()
-            return (
-                sorted_items[request.offset: request.offset + request.limit],
-                ContractReport(
-                    contract_name="stocks.quotes.daily_snapshot",
-                    profile_id=active_snapshot.profile_id,
-                    profile_version=active_snapshot.version,
-                ).with_store_stats(hit=True),
+        local_items = get_local_stock_daily_snapshot_full(actual_trade_date)
+        sorted_items, report = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.quotes.daily_snapshot",
+                store_identity=store_identity,
+                model_type=StockQuoteItem,
+                key_fields=("code", "trade_time", "freq"),
+                sort_fields=("code", "trade_time"),
+                request_builder=lambda items: _build_snapshot_requests(actual_trade_date, items),
+                provider_steps=lambda: _build_daily_snapshot_steps(self._settings),
+                source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
+                base_items=local_items,
+                base_source_name="fact.stock_daily_1d",
+                fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
             )
-        merged_items, fallback_report = run_fallback_chain_with_report(
-            "stocks.quotes.daily_snapshot",
-            store_items if store_read.partial_hit else [],
-            ("code", "trade_time", "freq"),
-            lambda items: _build_snapshot_requests(actual_trade_date, items),
-            _build_daily_snapshot_steps(self._settings),
-            self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
         )
-        sorted_items = sort_items(merged_items, ("code", "trade_time"))
-        report = ContractReport.from_fallback_report("stocks.quotes.daily_snapshot", fallback_report)
-        store_write = store_result("stocks.quotes.daily_snapshot", store_identity, sorted_items, report, report.quarantine_count)
-        report = report.with_store_stats(partial_hit=store_read.partial_hit, miss=store_read.status in {"miss", "skip"}, stale=store_read.status == "stale", write=store_write.status == "write")
         return sorted_items[request.offset: request.offset + request.limit], report
+    def get_daily_window(self, request: StockDailyWindowRequest) -> list[StockQuoteItem]:
+        actual_start_date = format_date_value(request.start_date)
+        actual_end_date = format_date_value(request.end_date)
+        if actual_start_date == "" or actual_end_date == "" or actual_start_date > actual_end_date:
+            raise ValueError("start_date 和 end_date 必须是有效日期，且 start_date 不能晚于 end_date")
+        if request.limit < 1:
+            raise ValueError("limit 必须大于 0")
+        if request.offset < 0:
+            raise ValueError("offset 不能小于 0")
+        return get_local_stock_daily_window(actual_start_date, actual_end_date, request.limit, request.offset)
 
     def _build_missing_money_flow_requests(self, items: list[StockMoneyFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[str, str]]:
         actual_trade_date = format_date_value(trade_date)
@@ -560,22 +617,21 @@ class QuoteMuxStocks:
 
     def get_money_flow(self, code: str, trade_date: str, start_date: str, end_date: str, view: str) -> list[StockMoneyFlowItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "view": view}
-        store_items, store_read = load_store_result("stocks.indicators.money_flow", store_identity, StockMoneyFlowItem)
-        if store_read.hit:
-            return sorted(store_items, key=lambda item: (item.code, item.trade_date))
         handlers = {
             "get_stock_money_flow": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_stock_money_flow", code, trade_date, missing_start, missing_end, view),
         }
-        merged_items, _ = run_fallback_chain_with_report(
-            "stocks.indicators.money_flow",
-            store_items if store_read.partial_hit else [],
-            ("code", "trade_date", "view"),
-            lambda items: self._build_missing_money_flow_requests(items, trade_date, start_date, end_date),
-            SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow", handlers, ("tushare", "akshare")),
-            self._settings.get_contract_source_order("stocks.indicators.money_flow", ("tushare", "akshare")),
+        sorted_items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.indicators.money_flow",
+                store_identity=store_identity,
+                model_type=StockMoneyFlowItem,
+                key_fields=("code", "trade_date", "view"),
+                sort_fields=("code", "trade_date"),
+                request_builder=lambda items: self._build_missing_money_flow_requests(items, trade_date, start_date, end_date),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("stocks.indicators.money_flow", ("tushare", "akshare")),
+            )
         )
-        sorted_items = sorted(merged_items, key=lambda item: (item.code, item.trade_date))
-        store_result("stocks.indicators.money_flow", store_identity, sorted_items, ContractReport(contract_name="stocks.indicators.money_flow"))
         return sorted_items
 
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
@@ -619,23 +675,26 @@ class QuoteMuxStocks:
         )
 
     def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int) -> list[StockBasicInfo]:
-        store_identity = {"codes": list(codes), "name": name, "exchange": exchange, "list_status": list_status, "include_delisted": include_delisted, "limit": limit, "offset": offset}
-        store_items, store_read = load_store_result("stocks.catalog", store_identity, StockBasicInfo)
-        if store_read.hit:
-            return store_items
+        store_identity = {"codes": list(codes), "name": name, "exchange": exchange, "list_status": list_status, "include_delisted": include_delisted}
         handlers = {
             "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset),
         }
-        items, _ = run_fallback_chain_with_report(
-            "stocks.catalog",
-            store_items if store_read.partial_hit else [],
-            ("code",),
-            lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(self._settings).build_steps("stocks.catalog", handlers, ("tushare",)),
-            self._settings.get_contract_source_order("stocks.catalog", ("tushare",)),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.catalog",
+                store_identity=store_identity,
+                model_type=StockBasicInfo,
+                key_fields=("code",),
+                sort_fields=("code",),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.catalog", handlers, ("tushare",)),
+                source_order=self._settings.get_contract_source_order("stocks.catalog", ("tushare",)),
+                base_items=get_local_stock_catalog(codes, name, exchange, list_status, include_delisted),
+                base_source_name="ref.stock",
+                fact_ref_writer=get_fact_ref_writer("stocks.catalog"),
+            )
         )
-        store_result("stocks.catalog", store_identity, items, ContractReport(contract_name="stocks.catalog"))
-        return items
+        return items[offset: offset + ensure_limit(limit)]
 
     def get_archive(self, trade_date: str, code: str, name: str, industry: str, area: str, limit: int, offset: int) -> list[StockArchiveItem]:
         store_identity = {"trade_date": trade_date, "code": code, "name": name, "industry": industry, "area": area, "limit": ensure_limit(limit), "offset": offset}
@@ -656,13 +715,20 @@ class QuoteMuxStocks:
         handlers = {
             "get_stock_basic": lambda instance: lambda: _source_package_singleton(instance.package_id, "get_stock_basic", code),
         }
-        items = self._store_list(
-            "stocks.profile.basic",
-            store_identity,
-            StockBasicInfo,
-            ("code",),
-            ("code",),
-            lambda: self._source_list("stocks.profile.basic", handlers, ("tushare",), ("code",)),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.profile.basic",
+                store_identity=store_identity,
+                model_type=StockBasicInfo,
+                key_fields=("code",),
+                sort_fields=("code",),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.profile.basic", handlers, ("tushare",)),
+                source_order=self._settings.get_contract_source_order("stocks.profile.basic", ("tushare",)),
+                base_items=get_local_stock_catalog([code], "", "", "", True),
+                base_source_name="ref.stock",
+                fact_ref_writer=get_fact_ref_writer("stocks.profile.basic"),
+            )
         )
         return items[0] if items else None
 
@@ -671,14 +737,20 @@ class QuoteMuxStocks:
         handlers = {
             "get_company_profile": lambda instance: lambda: _source_package_singleton(instance.package_id, "get_company_profile", code),
         }
-        items = self._store_list(
-            "stocks.profile.company",
-            store_identity,
-            StockProfileItem,
-            ("code",),
-            ("code",),
-            lambda: self._source_list("stocks.profile.company", handlers, ("tushare", "akshare"), ("code",)),
-            _payloads_with_as_of_date,
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.profile.company",
+                store_identity=store_identity,
+                model_type=StockProfileItem,
+                key_fields=("code",),
+                sort_fields=("code",),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.profile.company", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("stocks.profile.company", ("tushare", "akshare")),
+                base_items=get_local_stock_profile(code),
+                base_source_name="ref.stock",
+                payload_builder=_payloads_with_as_of_date,
+            )
         )
         return items[0] if items else None
 
@@ -687,14 +759,22 @@ class QuoteMuxStocks:
         handlers = {
             "get_stock_name_history": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_name_history", code, start_date, end_date),
         }
-        return self._store_list(
-            "stocks.profile.name_history",
-            store_identity,
-            NameHistoryItem,
-            ("code", "start_date", "end_date", "name"),
-            ("code", "start_date", "end_date", "name"),
-            lambda: self._source_list("stocks.profile.name_history", handlers, ("tushare",), ("code", "start_date", "end_date", "name")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.profile.name_history",
+                store_identity=store_identity,
+                model_type=NameHistoryItem,
+                key_fields=("code", "start_date", "end_date", "name"),
+                sort_fields=("code", "start_date", "end_date", "name"),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.profile.name_history", handlers, ("tushare",)),
+                source_order=self._settings.get_contract_source_order("stocks.profile.name_history", ("tushare",)),
+                base_items=get_local_stock_name_history(code, start_date, end_date),
+                base_source_name="ref.stock_name_history",
+                fact_ref_writer=get_fact_ref_writer("stocks.profile.name_history"),
+            )
         )
+        return items
 
     def get_managers(self, code: str) -> list[StockManagerItem]:
         store_identity = {"code": code}
@@ -827,9 +907,6 @@ class QuoteMuxStocks:
     def _get_daily_indicator(self, capability_id: str, model_type: type[object], source_method_name: str, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[object]:
         actual_codes, actual_trade_date, actual_start, actual_end = self._resolve_indicator_request(code, codes, trade_date, start_date, end_date)
         store_identity = {"code": ",".join(actual_codes), "trade_date": actual_trade_date, "start_date": actual_start, "end_date": actual_end}
-        store_items, store_read = load_store_result(capability_id, store_identity, model_type)
-        if store_read.hit:
-            return sort_items(store_items, ("code", "trade_date"))
         handlers = {
             source_method_name: lambda instance: lambda: _source_package_call(
                 instance.package_id,
@@ -841,10 +918,18 @@ class QuoteMuxStocks:
                 "" if actual_codes == [] else actual_end,
             ),
         }
-        fetched_items = self._source_list(capability_id, handlers, ("tushare",), ("code", "trade_date"))
-        merged_items = merge_model_lists(store_items if store_read.partial_hit else [], fetched_items, ("code", "trade_date"))
-        sorted_items = sort_items(merged_items, ("code", "trade_date"))
-        store_result(capability_id, store_identity, sorted_items, ContractReport(contract_name=capability_id))
+        sorted_items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id=capability_id,
+                store_identity=store_identity,
+                model_type=model_type,
+                key_fields=("code", "trade_date"),
+                sort_fields=("code", "trade_date"),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps(capability_id, handlers, ("tushare",)),
+                source_order=self._settings.get_contract_source_order(capability_id, ("tushare",)),
+            )
+        )
         return sorted_items
 
     def get_risk_flags(self, trade_date: str, start_date: str, end_date: str, flag_type: str, status: str, limit: int, offset: int) -> list[StockRiskFlagItem]:
@@ -1248,9 +1333,3 @@ class QuoteMuxStocks:
             ("trade_date", "code", "auction_time"),
             lambda: self._source_list("stocks.quotes.auctions", handlers, ("tushare",), ("code", "trade_date", "auction_time", "session")),
         )
-
-
-
-
-
-

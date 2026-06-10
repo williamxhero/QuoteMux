@@ -5,6 +5,17 @@ import pandas as pd
 from quotemux.infra.db.client import query_dataframe
 
 
+def _normalize_exchange(value: str) -> str:
+    text = value.upper()
+    if text in {"SSE", "SH", "SHSE"}:
+        return "SHSE"
+    if text in {"SZSE", "SZ"}:
+        return "SZSE"
+    if text in {"BSE", "BJ", "BJSE"}:
+        return "BJSE"
+    return value
+
+
 def load_stock_catalog_frame(codes: list[str], name: str, market: str, listed_filter: str) -> pd.DataFrame:
     where_clauses = ["code <> '000000'"]
     params: list[object] = []
@@ -140,41 +151,28 @@ def load_index_catalog_frame(index_codes: list[str]) -> pd.DataFrame:
     where_clauses = []
     params: list[object] = []
     if index_codes:
-        where_clauses.append("s.index_code = any(%s)")
+        where_clauses.append("index_code = any(%s)")
         params.append(index_codes)
     where_sql = f"where {' and '.join(where_clauses)}" if where_clauses else ""
     query = f"""
-        with summary as (
-            select
-                index_code,
-                min(trade_date) as first_trade_date,
-                max(trade_date) as last_trade_date
-            from fact.index_bar_1d
-            group by index_code
-        ),
-        latest as (
-            select distinct on (index_code)
-                index_code,
-                name
-            from fact.index_bar_1d
-            order by index_code, trade_date desc
-        )
         select
-            s.index_code,
-            coalesce(l.name, s.index_code) as index_name,
-            s.first_trade_date::text as list_date,
-            s.last_trade_date::text as last_trade_date
-        from summary s
-        left join latest l on l.index_code = s.index_code
+            index_code,
+            index_name,
+            category,
+            market,
+            publisher,
+            list_date::text as list_date,
+            status
+        from ref.index
         {where_sql}
-        order by s.index_code
+        order by index_code
     """
     return query_dataframe(query, tuple(params))
 
 
-def load_trade_calendar_frame(start_date: str, end_date: str, is_open: bool | None) -> pd.DataFrame:
-    where_clauses = ["exchange = 'SHSE'"]
-    params: list[object] = []
+def load_trade_calendar_frame(exchange: str, start_date: str, end_date: str, is_open: bool | None) -> pd.DataFrame:
+    where_clauses = ["exchange = %s"]
+    params: list[object] = [_normalize_exchange(exchange or "SSE")]
     if start_date:
         where_clauses.append("trade_date >= %s")
         params.append(start_date)

@@ -287,7 +287,7 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
 
 def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
     if capability_id == "stocks.catalog":
-        return ("codes", "name", "exchange", "list_status", "include_delisted", "limit", "offset")
+        return ("codes", "name", "exchange", "list_status", "include_delisted")
     if capability_id.startswith("stocks.quotes."):
         if capability_id == "stocks.quotes.daily_snapshot":
             return ("trade_date",)
@@ -303,7 +303,7 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
     if capability_id == "markets.calendar.trading":
         return ("exchange", "is_open")
     if capability_id == "markets.events.news":
-        return ("event_type", "stock_code", "sort_by", "limit", "offset", "include_sources", "include_content_text")
+        return ("event_type", "stock_code", "sort_by", "include_sources", "include_content_text")
     if capability_id in {"markets.trading.open_auctions", "stocks.catalog.archive", "stocks.factors.technical", "stocks.indicators.ah_comparisons", "stocks.indicators.chip_distribution", "stocks.indicators.chip_performance", "stocks.indicators.premarket", "stocks.ownership.shareholders.changes", "stocks.profile.management_rewards", "stocks.profile.managers", "stocks.quotes.auctions", "stocks.signals.hl"}:
         return ("code",)
     if capability_id == "stocks.signals.nine_turn":
@@ -313,7 +313,7 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
     if capability_id == "stocks.indicators.money_flow":
         return ("code", "view")
     if capability_id == "stocks.indicators.risk_flags":
-        return ("flag_type", "status", "limit", "offset")
+        return ("flag_type", "status")
     if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot"}:
         return ("board_code", "scope")
     if capability_id.startswith("stocks.finance.statements"):

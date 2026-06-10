@@ -36,3 +36,10 @@ class StockDailySnapshotRequest(BaseModel):
     limit: int = 200
     offset: int = 0
 
+
+class StockDailyWindowRequest(BaseModel):
+    start_date: str
+    end_date: str
+    limit: int = 50000
+    offset: int = 0
+

@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from quotemux.capabilities import get_capability_config_root
 from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfile, SourceInstanceConfig
@@ -80,22 +81,28 @@ class RuntimeConfigStore:
             instances = self._build_default_instances(manifests)
             self.write_instances(instances)
         else:
-            instances = self._reconcile_instances(instances, manifests)
-            self.write_instances(instances)
+            reconciled_instances = self._reconcile_instances(instances, manifests)
+            if reconciled_instances != instances:
+                self.write_instances(reconciled_instances)
+            instances = reconciled_instances
         default_policies = self._resolve_policy_source_orders(instances, default_policies)
-        if self.read_draft_policies() == ():
+        draft_policies = self.read_draft_policies()
+        if draft_policies == ():
             self.write_draft_policies(default_policies)
         else:
-            draft_policies = self._resolve_policy_source_orders(instances, self.read_draft_policies())
-            self.write_draft_policies(self._merge_missing_default_policies(draft_policies, default_policies))
+            next_draft_policies = self._merge_missing_default_policies(self._resolve_policy_source_orders(instances, draft_policies), default_policies)
+            if next_draft_policies != draft_policies:
+                self.write_draft_policies(next_draft_policies)
         profiles = self.read_profiles()
         if profiles == ():
             default_profile = self._build_default_profile(instances, default_policies)
             self.write_profiles((default_profile,))
             self.write_state(RuntimeState(active_profile_id=default_profile.profile_id, previous_profile_ids=()))
         else:
-            profiles = tuple(self._resolve_profile_source_order(profile, instances, default_policies) for profile in profiles)
-            self.write_profiles(profiles)
+            resolved_profiles = tuple(self._resolve_profile_source_order(profile, instances, default_policies) for profile in profiles)
+            if resolved_profiles != profiles:
+                self.write_profiles(resolved_profiles)
+            profiles = resolved_profiles
             if self.read_state().active_profile_id == "":
                 self.write_state(RuntimeState(active_profile_id=profiles[-1].profile_id, previous_profile_ids=()))
 
@@ -287,6 +294,10 @@ class RuntimeConfigStore:
 
     def _write_json(self, path: Path, payload: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(f"{path.suffix}.tmp")
-        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(path)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()

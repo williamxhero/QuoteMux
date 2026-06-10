@@ -52,6 +52,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/quotes", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/query", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-snapshot", ("stocks.quotes.daily_snapshot",)),
+    PublicApiCapabilityBinding("/api/stocks/quotes/daily-window", ("stocks.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/catalog", ("stocks.catalog",)),
     PublicApiCapabilityBinding("/api/stocks/catalog/archive", ("stocks.catalog.archive",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/profile/basic", ("stocks.profile.basic",)),

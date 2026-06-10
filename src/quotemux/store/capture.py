@@ -642,7 +642,7 @@ def _date_range_end_text(now: datetime) -> str:
 def _recent_trading_days(window_count: int, now: datetime) -> tuple[str, ...]:
     end_text = _date_range_end_text(now)
     start_day = now.date() - timedelta(days=max(10, window_count * 3))
-    frame = load_trade_calendar_frame(start_day.strftime("%Y-%m-%d"), end_text, True)
+    frame = load_trade_calendar_frame("SSE", start_day.strftime("%Y-%m-%d"), end_text, True)
     if _is_empty_dataframe(frame):
         return ()
     values = [format_date_value(row["trade_date"]) for row in frame.to_dict("records")]
