@@ -679,6 +679,16 @@ class QuoteMuxStocks:
         handlers = {
             "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset),
         }
+        
+        def build_request(current_items: list[StockBasicInfo]) -> list[tuple[()]]:
+            if codes:
+                return [()] if len(current_items) < len(set(codes)) else []
+            if not name and not exchange and list_status in {"", "L", "listed"}:
+                return [()] if len(current_items) < 4000 else []
+            return [()] if current_items == [] else []
+
+        is_full_snapshot = not codes and not name and not exchange and ensure_limit(limit) >= 4000
+
         items, _ = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="stocks.catalog",
@@ -686,12 +696,12 @@ class QuoteMuxStocks:
                 model_type=StockBasicInfo,
                 key_fields=("code",),
                 sort_fields=("code",),
-                request_builder=lambda current_items: [()] if current_items == [] else [],
+                request_builder=build_request,
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.catalog", handlers, ("tushare",)),
                 source_order=self._settings.get_contract_source_order("stocks.catalog", ("tushare",)),
                 base_items=get_local_stock_catalog(codes, name, exchange, list_status, include_delisted),
                 base_source_name="ref.stock",
-                fact_ref_writer=get_fact_ref_writer("stocks.catalog"),
+                fact_ref_writer=get_fact_ref_writer("stocks.catalog") if is_full_snapshot else None,
             )
         )
         return items[offset: offset + ensure_limit(limit)]
