@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import pandas as pd
 
@@ -149,7 +149,7 @@ def load_stock_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
     return query_dataframe(query, (trade_date, limit, offset))
 
 
-def load_stock_daily_window_frame(start_date: str, end_date: str, limit: int | None, offset: int) -> pd.DataFrame:
+def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: int | None, offset: int) -> pd.DataFrame:
     """????????????"""
     if not start_date or not end_date:
         return pd.DataFrame()

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -42,7 +42,7 @@ class StockDailySnapshotRequest(BaseModel):
     skip_st: bool = False
 
 
-class StockDailyWindowRequest(BaseModel):
+class StockDailyLocalWindowRequest(BaseModel):
     start_date: str
     end_date: str
     limit: int = 50000

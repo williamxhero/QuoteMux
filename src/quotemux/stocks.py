@@ -6,15 +6,16 @@ import pandas as pd
 
 from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
+from quotemux.infra.db.reference_reads import load_stock_active_codes_frame
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, merge_model_lists, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_daily import get_stock_daily_previous as get_local_stock_daily_previous, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_daily_window as get_local_stock_daily_window, get_stock_quotes as get_local_stock_quotes
+from quotemux.local_daily import get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_previous as get_local_stock_daily_previous, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
 from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_name_history, get_local_stock_profile
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
-from quotemux.requests.stocks import StockDailySnapshotRequest, StockDailyWindowRequest, StockQuotesRequest
+from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.store import load_store_result, store_result
 from quotemux.settings import QuoteMuxSettings
@@ -548,7 +549,12 @@ def _fill_suspended_daily_gaps(request: StockQuotesRequest, items: list[StockQuo
 
 
 def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> list[str]:
-    return []
+    active_frame = load_stock_active_codes_frame(trade_date)
+    if active_frame.empty:
+        return []
+    active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
+    existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date}
+    return [code for code in dict.fromkeys(active_codes) if code != "" and code not in existing_codes]
 
 
 def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem]) -> list[tuple[list[str], str]]:
@@ -762,7 +768,7 @@ class QuoteMuxStocks:
         filtered_items = _apply_snapshot_filters(list(sorted_items), request.skip_suspended, request.skip_st)
         return filtered_items[request.offset: request.offset + request.limit], report
 
-    def get_daily_window(self, request: StockDailyWindowRequest) -> list[StockQuoteItem]:
+    def get_daily_local_window(self, request: StockDailyLocalWindowRequest) -> list[StockQuoteItem]:
         actual_start_date = format_date_value(request.start_date)
         actual_end_date = format_date_value(request.end_date)
         if actual_start_date == "" or actual_end_date == "" or actual_start_date > actual_end_date:
@@ -771,7 +777,7 @@ class QuoteMuxStocks:
             raise ValueError("limit ???? 0")
         if request.offset < 0:
             raise ValueError("offset ???? 0")
-        items = get_local_stock_daily_window(actual_start_date, actual_end_date, None, 0)
+        items = get_local_stock_daily_local_window(actual_start_date, actual_end_date, None, 0)
         filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
         return filtered_items[request.offset: request.offset + request.limit]
 

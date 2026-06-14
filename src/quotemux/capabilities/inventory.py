@@ -52,7 +52,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/quotes", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/query", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-snapshot", ("stocks.quotes.daily_snapshot",)),
-    PublicApiCapabilityBinding("/api/stocks/quotes/daily-window", ("stocks.quotes.daily",)),
+    PublicApiCapabilityBinding("/api/stocks/quotes/daily-local-window", ("stocks.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/catalog", ("stocks.catalog",)),
     PublicApiCapabilityBinding("/api/stocks/catalog/archive", ("stocks.catalog.archive",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/profile/basic", ("stocks.profile.basic",)),
@@ -143,7 +143,7 @@ LEGACY_CAPABILITY_ALIASES = {
     "stocks.money_flow": "stocks.indicators.money_flow",
 }
 
-# 只有显式登记在这里的 capability 才继承主能力配置；不要按名称或路径自动推断。
+# ?????????? capability ??????????????????????
 DERIVED_CAPABILITY_BASE_IDS = {
     "markets.calendar.trading.next": "markets.calendar.trading",
     "markets.calendar.trading.previous": "markets.calendar.trading",
@@ -377,7 +377,7 @@ def get_capability_definition(capability_id: str) -> CapabilityDefinition:
     normalized = normalize_capability_id(capability_id)
     definition = _CAPABILITY_BY_ID.get(normalized)
     if definition is None:
-        raise KeyError(f"未知 capability: {capability_id}")
+        raise KeyError(f"?? capability: {capability_id}")
     return definition
 
 
@@ -396,7 +396,7 @@ def is_known_capability_id(capability_id: str) -> bool:
 def get_public_api_binding(api_path: str) -> PublicApiCapabilityBinding:
     binding = _PUBLIC_API_BY_PATH.get(api_path)
     if binding is None:
-        raise KeyError(f"未知 Public API: {api_path}")
+        raise KeyError(f"?? Public API: {api_path}")
     return binding
 
 
