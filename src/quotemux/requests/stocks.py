@@ -16,6 +16,9 @@ class StockQuotesRequest(BaseModel):
     count: int | None = None
     adjust: str = "none"
     limit: int | None = None
+    skip_suspended: bool = True
+    skip_st: bool = False
+    fill_missing: bool = False
 
     @field_validator("codes", mode="before")
     @classmethod
@@ -35,6 +38,8 @@ class StockDailySnapshotRequest(BaseModel):
     trade_date: str
     limit: int = 200
     offset: int = 0
+    skip_suspended: bool = True
+    skip_st: bool = False
 
 
 class StockDailyWindowRequest(BaseModel):
@@ -42,4 +47,6 @@ class StockDailyWindowRequest(BaseModel):
     end_date: str
     limit: int = 50000
     offset: int = 0
+    skip_suspended: bool = True
+    skip_st: bool = False
 

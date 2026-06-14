@@ -4,7 +4,7 @@ import pandas as pd
 
 from platform_models import StockQuoteItem
 from quotemux.infra.common import INTRADAY_RULES, PRICE_COLUMNS, add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code
-from quotemux.infra.db.market_reads import load_stock_daily_frame, load_stock_daily_snapshot_full_frame, load_stock_daily_window_frame
+from quotemux.infra.db.market_reads import load_stock_daily_frame, load_stock_daily_previous_frame, load_stock_daily_snapshot_full_frame, load_stock_daily_window_frame
 
 
 def _repair_adj_factor_frame(frame: pd.DataFrame) -> pd.Series:
@@ -83,6 +83,8 @@ def _quote_item_from_row(code: str, row: pd.Series, freq: str, adjust: str) -> S
         volume=float(row["volume"]) if pd.notna(row["volume"]) else None,
         amount=float(row["amount"]) if pd.notna(row["amount"]) else None,
         adjust=adjust,
+        is_suspended=bool(row["is_suspended"]) if "is_suspended" in row and pd.notna(row["is_suspended"]) else False,
+        is_st=bool(row["is_st"]) if "is_st" in row and pd.notna(row["is_st"]) else False,
     )
 
 
@@ -131,8 +133,16 @@ def get_stock_daily_snapshot_full(trade_date: str) -> list[StockQuoteItem]:
     return _daily_frame_to_items(raw_frame, "none", "1d")
 
 
-def get_stock_daily_window(start_date: str, end_date: str, limit: int, offset: int) -> list[StockQuoteItem]:
+def get_stock_daily_window(start_date: str, end_date: str, limit: int | None, offset: int) -> list[StockQuoteItem]:
     actual_start_date = format_date_value(start_date)
     actual_end_date = format_date_value(end_date)
     raw_frame = load_stock_daily_window_frame(actual_start_date, actual_end_date, limit, offset)
     return _daily_frame_to_items(raw_frame, "none", "1d")
+
+
+def get_stock_daily_previous(codes: list[str], before_date: str, adjust: str) -> list[StockQuoteItem]:
+    actual_before_date = format_date_value(before_date)
+    normalized_codes = [normalize_stock_code(code) for code in codes]
+    normalized_codes = [code for code in dict.fromkeys(normalized_codes) if code]
+    raw_frame = load_stock_daily_previous_frame(normalized_codes, actual_before_date)
+    return _daily_frame_to_items(raw_frame, adjust, "1d")

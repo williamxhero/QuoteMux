@@ -28,6 +28,8 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
             previous_rows.close as pre_close,
             day_rows.volume,
             day_rows.amount,
+            day_rows.is_suspended,
+            day_rows.is_st,
             day_rows.adj_factor,
             day_rows.labi_buy,
             day_rows.labi_sell,
@@ -48,6 +50,44 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
     return query_dataframe(query, tuple(params))
 
 
+def load_stock_daily_previous_frame(codes: list[str], before_date: str) -> pd.DataFrame:
+    """读取每只股票在指定日期前最近的一条日线。"""
+    if not codes or not before_date:
+        return pd.DataFrame()
+    query = """
+        select distinct on (day_rows.code)
+            day_rows.code,
+            day_rows.trade_date::text as trade_time,
+            day_rows.open,
+            day_rows.high,
+            day_rows.low,
+            day_rows.close,
+            previous_rows.close as pre_close,
+            day_rows.volume,
+            day_rows.amount,
+            day_rows.is_suspended,
+            day_rows.is_st,
+            day_rows.adj_factor,
+            day_rows.labi_buy,
+            day_rows.labi_sell,
+            day_rows.mism_buy,
+            day_rows.mism_sell
+        from fact.stock_daily_1d day_rows
+        left join lateral (
+            select close
+            from fact.stock_daily_1d previous_rows
+            where previous_rows.code = day_rows.code
+              and previous_rows.trade_date < day_rows.trade_date
+            order by previous_rows.trade_date desc
+            limit 1
+        ) previous_rows on true
+        where day_rows.code = any(%s)
+          and day_rows.trade_date < %s
+        order by day_rows.code, day_rows.trade_date desc
+    """
+    return query_dataframe(query, (codes, before_date))
+
+
 def _stock_daily_snapshot_query() -> str:
     return """
         with day_rows as (
@@ -59,7 +99,9 @@ def _stock_daily_snapshot_query() -> str:
                 low,
                 close,
                 volume,
-                amount
+                amount,
+                is_suspended,
+                is_st
             from fact.stock_daily_1d
             where trade_date = %s
         )
@@ -72,7 +114,9 @@ def _stock_daily_snapshot_query() -> str:
             day_rows.close,
             previous_rows.close as pre_close,
             day_rows.volume,
-            day_rows.amount
+            day_rows.amount,
+            day_rows.is_suspended,
+            day_rows.is_st
         from day_rows
         left join lateral (
             select close
@@ -105,8 +149,8 @@ def load_stock_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
     return query_dataframe(query, (trade_date, limit, offset))
 
 
-def load_stock_daily_window_frame(start_date: str, end_date: str, limit: int, offset: int) -> pd.DataFrame:
-    """读取全市场股票日线区间。"""
+def load_stock_daily_window_frame(start_date: str, end_date: str, limit: int | None, offset: int) -> pd.DataFrame:
+    """????????????"""
     if not start_date or not end_date:
         return pd.DataFrame()
     query = """
@@ -119,7 +163,9 @@ def load_stock_daily_window_frame(start_date: str, end_date: str, limit: int, of
             day_rows.close,
             previous_rows.close as pre_close,
             day_rows.volume,
-            day_rows.amount
+            day_rows.amount,
+            day_rows.is_suspended,
+            day_rows.is_st
         from fact.stock_daily_1d day_rows
         left join lateral (
             select close
@@ -132,10 +178,11 @@ def load_stock_daily_window_frame(start_date: str, end_date: str, limit: int, of
         where day_rows.trade_date >= %s
           and day_rows.trade_date <= %s
         order by day_rows.trade_date, day_rows.code
-        limit %s
-        offset %s
     """
-    return query_dataframe(query, (start_date, end_date, limit, offset))
+    if limit is None:
+        return query_dataframe(query, (start_date, end_date))
+    paged_query = query + "\n        limit %s\n        offset %s"
+    return query_dataframe(paged_query, (start_date, end_date, limit, offset))
 
 
 def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: object, freq: str = "1m") -> pd.DataFrame:

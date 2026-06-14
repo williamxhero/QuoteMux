@@ -546,6 +546,17 @@ class CaptureRunRepository:
         if not _ensure_capture_schema():
             raise RuntimeError("capture schema 初始化失败")
         root_capability_id = get_capability_config_root(capability_id)
+        if status == CAPTURE_RUNNING:
+            execute_sql(
+                """
+                update capability_capture_runs
+                set status = 'failed',
+                    finished_at = now(),
+                    error_message = 'auto-superseded: 新 capture run 启动，自动作废残留 running 行'
+                where capability_id = %s and status = 'running'
+                """,
+                (root_capability_id,),
+            )
         ok = execute_sql(
             """
             insert into capability_capture_runs (capability_id, status, planned_time, detail_json)
@@ -1265,8 +1276,12 @@ class QuoteMuxCaptureJob:
         runs: list[dict[str, object]] = []
         for policy in self._policies.list():
             planned_time = _scheduled_time(policy, now)
-            if planned_time is not None and is_capture_due(policy, self._runs, now):
+            if planned_time is None or not is_capture_due(policy, self._runs, now):
+                continue
+            try:
                 runs.append(self.run_capture(policy.capability_id, planned_time))
+            except BaseException as exc:
+                runs.append({"capability_id": policy.capability_id, "status": "failed", "error": str(exc), "error_type": type(exc).__name__})
         return tuple(runs)
 
     def run_capture(self, capability_id: str, planned_time: datetime | None = None) -> dict[str, object]:
@@ -1288,10 +1303,13 @@ class QuoteMuxCaptureJob:
             detail_json = {"phase": "后处理", "failed_batches": list(result.failed_batches)}
             self._runs.finish(run.id, status, result.row_count, result.coverage_count, error_message, detail_json)
             return self._run_to_dict(self._merge_finished_run(run, status, result.row_count, result.coverage_count, error_message, detail_json))
-        except Exception as exc:
-            detail_json = {"phase": "后处理", "error": str(exc)}
-            self._runs.finish(run.id, CAPTURE_FAILED, 0, 0, str(exc), detail_json)
-            return self._run_to_dict(self._merge_finished_run(run, CAPTURE_FAILED, 0, 0, str(exc), detail_json))
+        except BaseException as exc:
+            is_base = not isinstance(exc, Exception)
+            prefix = "interrupted" if is_base else "exception"
+            error_message = f"{prefix}({type(exc).__name__}): {exc}"[:1000]
+            detail_json = {"phase": "后处理", "error": str(exc), "error_type": type(exc).__name__, "is_base_exception": is_base}
+            self._runs.finish(run.id, CAPTURE_FAILED, 0, 0, error_message, detail_json)
+            return self._run_to_dict(self._merge_finished_run(run, CAPTURE_FAILED, 0, 0, error_message, detail_json))
         finally:
             lock.release()
 

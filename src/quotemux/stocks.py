@@ -10,7 +10,7 @@ from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor,
 from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, merge_model_lists, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_daily import get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_daily_window as get_local_stock_daily_window, get_stock_quotes as get_local_stock_quotes
+from quotemux.local_daily import get_stock_daily_previous as get_local_stock_daily_previous, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_daily_window as get_local_stock_daily_window, get_stock_quotes as get_local_stock_quotes
 from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_name_history, get_local_stock_profile
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
@@ -63,16 +63,38 @@ def _fallback_quote_count(freq: str, count: int | None) -> int | None:
 def _aggregate_stock_quotes(items: list[StockQuoteItem], freq: str, adjust: str) -> list[StockQuoteItem]:
     if freq not in {"1w", "1mo"} or items == []:
         return items
+    rule = "W-FRI" if freq == "1w" else "ME"
     frame = pd.DataFrame([item.model_dump() for item in items])
     frame["trade_time"] = pd.to_datetime(frame["trade_time"], errors="coerce")
     for column in ["open", "high", "low", "close", "volume", "amount"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["is_suspended"] = frame["is_suspended"].fillna(False).astype(bool) if "is_suspended" in frame.columns else False
+    frame["is_st"] = frame["is_st"].fillna(False).astype(bool) if "is_st" in frame.columns else False
     frame = frame.dropna(subset=["trade_time"])
     if frame.empty:
         return []
     result: list[StockQuoteItem] = []
     for stock_code, group in frame.groupby("code", sort=False):
-        aggregated = add_quote_metrics(aggregate_ohlc(group[["trade_time", "open", "high", "low", "close", "volume", "amount"]], freq))
+        aggregated = (
+            group.sort_values("trade_time")
+            .set_index("trade_time")
+            .resample(rule, label="left", closed="left")
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                    "amount": "sum",
+                    "is_suspended": "all",
+                    "is_st": "any",
+                }
+            )
+            .reset_index()
+        )
+        aggregated = aggregated[aggregated["close"].notna()]
+        aggregated = add_quote_metrics(aggregated)
         for _, row in aggregated.iterrows():
             result.append(
                 StockQuoteItem(
@@ -89,6 +111,8 @@ def _aggregate_stock_quotes(items: list[StockQuoteItem], freq: str, adjust: str)
                     volume=float(row["volume"]) if pd.notna(row["volume"]) else None,
                     amount=float(row["amount"]) if pd.notna(row["amount"]) else None,
                     adjust=adjust,
+                    is_suspended=bool(row["is_suspended"]),
+                    is_st=bool(row["is_st"]),
                 )
             )
     return result
@@ -191,9 +215,11 @@ def _build_quote_code_summaries(
     codes: list[str],
     total_items: list[StockQuoteItem],
     returned_items: list[StockQuoteItem],
+    coverage_items: list[StockQuoteItem],
     freq: str,
     expected_dates: list[str],
     count: int | None,
+    excluded_st_codes: set[str],
 ) -> list[StockQuoteCodeSummary]:
     summaries: list[StockQuoteCodeSummary] = []
     expected_trade_times = _expected_quote_trade_times(freq, expected_dates)
@@ -201,9 +227,27 @@ def _build_quote_code_summaries(
     for code in codes:
         code_total_items = [item for item in total_items if item.code == code]
         code_returned_items = [item for item in returned_items if item.code == code]
+        code_coverage_items = [item for item in coverage_items if item.code == code]
         trade_times = [item.trade_time for item in code_returned_items]
-        actual_dates = {item.trade_time[:10] for item in code_total_items}
-        missing_time_keys = _missing_quote_time_keys(code, freq, expected_trade_times, code_total_items)
+        excluded_by_st = code in excluded_st_codes
+        if excluded_by_st:
+            summaries.append(
+                StockQuoteCodeSummary(
+                    code=code,
+                    row_count=0,
+                    expected_bar_count=len(expected_trade_times),
+                    actual_bar_count=0,
+                    first_trade_time="",
+                    last_trade_time="",
+                    complete=False,
+                    truncated=False,
+                    missing_trade_dates=[],
+                    missing_trade_times=[],
+                )
+            )
+            continue
+        actual_dates = {item.trade_time[:10] for item in code_coverage_items}
+        missing_time_keys = _missing_quote_time_keys(code, freq, expected_trade_times, code_coverage_items)
         missing_trade_dates = [trade_date for trade_date in expected_dates if trade_date not in actual_dates]
         missing_trade_times = [str(key[1]) for key in missing_time_keys]
         truncated = len(code_returned_items) < len(code_total_items)
@@ -214,7 +258,7 @@ def _build_quote_code_summaries(
                 code=code,
                 row_count=len(code_returned_items),
                 expected_bar_count=len(expected_trade_times),
-                actual_bar_count=sum(1 for item in code_total_items if item.trade_time in expected_trade_time_set) if expected_trade_times else 0,
+                actual_bar_count=sum(1 for item in code_coverage_items if item.trade_time in expected_trade_time_set) if expected_trade_times else 0,
                 first_trade_time=min(trade_times) if trade_times else "",
                 last_trade_time=max(trade_times) if trade_times else "",
                 complete=complete,
@@ -228,20 +272,23 @@ def _build_quote_code_summaries(
 
 def _build_stock_quotes_query_result(
     codes: list[str],
-    items: list[StockQuoteItem],
+    total_items: list[StockQuoteItem],
+    returned_source_items: list[StockQuoteItem],
+    coverage_items: list[StockQuoteItem],
     freq: str,
     limit: int | None,
     expected_dates: list[str],
     count: int | None,
+    excluded_st_codes: set[str],
 ) -> StockQuotesQueryResult:
-    returned_items = _limit_quote_items(items, limit)
-    summaries = _build_quote_code_summaries(codes, items, returned_items, freq, expected_dates, count)
-    truncated = len(returned_items) < len(items)
+    returned_items = _limit_quote_items(returned_source_items, limit)
+    summaries = _build_quote_code_summaries(codes, total_items, returned_items, coverage_items, freq, expected_dates, count, excluded_st_codes)
+    truncated = len(returned_items) < len(returned_source_items)
     complete = all(item.complete for item in summaries) and not truncated
     return StockQuotesQueryResult(
         items=returned_items,
         meta=StockQuotesMeta(
-            total_rows=len(items),
+            total_rows=len(total_items),
             returned_rows=len(returned_items),
             complete=complete,
             truncated=truncated,
@@ -285,6 +332,37 @@ def _should_return_local_daily(request: StockQuotesRequest, missing_requests: li
     return _missing_ranges_are_current_or_future(missing_requests)
 
 
+def _filter_suspended_quote_items(items: list[StockQuoteItem], skip_suspended: bool, fill_missing: bool, freq: str) -> list[StockQuoteItem]:
+    if freq not in {"1d", "1w", "1mo"}:
+        return items
+    if fill_missing and not skip_suspended:
+        return items
+    return [item for item in items if not item.is_suspended]
+
+
+def _find_st_codes(items: list[StockQuoteItem]) -> set[str]:
+    return {item.code for item in items if item.is_st}
+
+
+def _filter_st_quote_items(items: list[StockQuoteItem], skip_st: bool, freq: str) -> tuple[list[StockQuoteItem], set[str]]:
+    if not skip_st or freq not in {"1d", "1w", "1mo"}:
+        return items, set()
+    excluded_codes = _find_st_codes(items)
+    if not excluded_codes:
+        return items, set()
+    return [item for item in items if item.code not in excluded_codes], excluded_codes
+
+
+def _apply_quote_filters(items: list[StockQuoteItem], skip_suspended: bool, skip_st: bool, fill_missing: bool, freq: str) -> tuple[list[StockQuoteItem], set[str]]:
+    filtered_items, excluded_st_codes = _filter_st_quote_items(items, skip_st, freq)
+    return _filter_suspended_quote_items(filtered_items, skip_suspended, fill_missing, freq), excluded_st_codes
+
+
+def _apply_snapshot_filters(items: list[StockQuoteItem], skip_suspended: bool, skip_st: bool) -> list[StockQuoteItem]:
+    filtered_items, _ = _apply_quote_filters(items, skip_suspended, skip_st, True, "1d")
+    return filtered_items
+
+
 def _build_local_daily_query_result(
     contract_name: str,
     request: StockQuotesRequest,
@@ -299,11 +377,13 @@ def _build_local_daily_query_result(
     result_items = local_items
     if actual_freq in {"1w", "1mo"}:
         result_items = _aggregate_stock_quotes(local_items, actual_freq, actual_adjust)
-    trimmed_items = trim_items_per_key(result_items, "code", "trade_time", request.count)
+    st_filtered_items, excluded_st_codes = _filter_st_quote_items(result_items, request.skip_st, actual_freq)
+    filtered_items = _filter_suspended_quote_items(st_filtered_items, request.skip_suspended, request.fill_missing, actual_freq)
+    trimmed_items = trim_items_per_key(filtered_items, "code", "trade_time", request.count)
     sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
     expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", settings)
     report = _base_source_report(contract_name, "fact.stock_daily_1d", local_items != [])
-    return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
+    return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes), report
 
 
 def _build_missing_quote_requests(
@@ -374,6 +454,97 @@ def _build_missing_quote_requests(
         for missing_start, missing_end in missing_ranges:
             grouped_ranges.setdefault((missing_start, missing_end), []).append(code)
     return _build_quote_range_requests(grouped_ranges)
+
+
+def _request_daily_bounds(request: StockQuotesRequest, request_count: int | None) -> tuple[str, str]:
+    if not _has_explicit_quote_window(request):
+        return "", ""
+    try:
+        request_start_dt, request_end_dt = build_time_bounds(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, False)
+    except ValueError:
+        return "", ""
+    start_date = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
+    end_date = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
+    if start_date == "" and end_date == "":
+        return "", ""
+    if start_date == "":
+        start_date = end_date
+    if end_date == "":
+        end_date = start_date
+    return start_date, end_date
+
+
+def _previous_daily_item(code: str, trade_date: str, items: list[StockQuoteItem], previous_items: list[StockQuoteItem]) -> StockQuoteItem | None:
+    candidates = [item for item in items if item.code == code and item.freq == "1d" and item.trade_time < trade_date and item.close is not None]
+    candidates.extend(item for item in previous_items if item.code == code and item.freq == "1d" and item.trade_time < trade_date and item.close is not None)
+    if candidates == []:
+        return None
+    return max(candidates, key=lambda item: item.trade_time)
+
+
+def _build_suspended_fill_items(request: StockQuotesRequest, items: list[StockQuoteItem], request_count: int | None, adjust: str, settings: QuoteMuxSettings) -> list[StockQuoteItem]:
+    start_date, end_date = _request_daily_bounds(request, request_count)
+    if start_date == "" or end_date == "":
+        return []
+    today_text = _today_text()
+    expected_dates = [trade_date for trade_date in _expected_trade_dates(start_date, end_date, settings) if trade_date < today_text]
+    if expected_dates == []:
+        return []
+    earliest_missing_by_code: dict[str, str] = {}
+    missing_dates_by_code: dict[str, list[str]] = {}
+    for code in request.codes:
+        existing_dates = {item.trade_time for item in items if item.code == code and item.freq == "1d"}
+        missing_dates = [trade_date for trade_date in expected_dates if trade_date not in existing_dates]
+        if missing_dates == []:
+            continue
+        missing_dates_by_code[code] = missing_dates
+        earliest_missing_by_code[code] = min(missing_dates)
+    if missing_dates_by_code == {}:
+        return []
+    previous_items: list[StockQuoteItem] = []
+    codes_by_earliest_missing: dict[str, list[str]] = {}
+    for code, earliest_missing in earliest_missing_by_code.items():
+        codes_by_earliest_missing.setdefault(earliest_missing, []).append(code)
+    for earliest_missing, codes in codes_by_earliest_missing.items():
+        previous_items.extend(get_local_stock_daily_previous(codes, earliest_missing, adjust))
+    filled_items: list[StockQuoteItem] = []
+    current_items = list(items)
+    for code, missing_dates in missing_dates_by_code.items():
+        for trade_date in missing_dates:
+            previous_item = _previous_daily_item(code, trade_date, current_items, previous_items)
+            if previous_item is None or previous_item.close is None:
+                continue
+            # 停牌占位只补时间轴，不代表真实成交。
+            filled_item = StockQuoteItem(
+                code=code,
+                trade_time=trade_date,
+                freq="1d",
+                open=previous_item.close,
+                high=previous_item.close,
+                low=previous_item.close,
+                close=previous_item.close,
+                pre_close=previous_item.close,
+                change=0.0,
+                pct_chg=0.0,
+                volume=0.0,
+                amount=0.0,
+                adjust=adjust,
+                is_suspended=True,
+                is_st=previous_item.is_st,
+            )
+            filled_items.append(filled_item)
+            current_items.append(filled_item)
+    return filled_items
+
+
+def _fill_suspended_daily_gaps(request: StockQuotesRequest, items: list[StockQuoteItem], request_count: int | None, adjust: str, settings: QuoteMuxSettings) -> list[StockQuoteItem]:
+    filled_items = _build_suspended_fill_items(request, items, request_count, adjust, settings)
+    if filled_items == []:
+        return items
+    writer = get_fact_ref_writer("stocks.quotes.daily")
+    if writer is not None:
+        writer(filled_items)
+    return merge_model_lists(items, filled_items, ("code", "trade_time", "freq"))
 
 
 def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> list[str]:
@@ -546,12 +717,16 @@ class QuoteMuxStocks:
                 fact_ref_writer=fact_ref_writer,
             )
         )
+        if request_freq == "1d":
+            merged_items = _fill_suspended_daily_gaps(request, merged_items, request_count, actual_adjust, self._settings)
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_stock_quotes(merged_items, actual_freq, actual_adjust)
-        trimmed_items = trim_items_per_key(merged_items, "code", "trade_time", request.count)
+        st_filtered_items, excluded_st_codes = _filter_st_quote_items(merged_items, request.skip_st, actual_freq)
+        filtered_items = _filter_suspended_quote_items(st_filtered_items, request.skip_suspended, request.fill_missing, actual_freq)
+        trimmed_items = trim_items_per_key(filtered_items, "code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
         expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", self._settings)
-        return _build_stock_quotes_query_result(request.codes, sorted_items, actual_freq, actual_limit, expected_dates, request.count), report
+        return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes), report
 
     def get_daily_snapshot(self, request: StockDailySnapshotRequest) -> list[StockQuoteItem]:
         items, _ = self.get_daily_snapshot_with_report(request)
@@ -584,17 +759,22 @@ class QuoteMuxStocks:
                 fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
             )
         )
-        return sorted_items[request.offset: request.offset + request.limit], report
+        filtered_items = _apply_snapshot_filters(list(sorted_items), request.skip_suspended, request.skip_st)
+        return filtered_items[request.offset: request.offset + request.limit], report
+
     def get_daily_window(self, request: StockDailyWindowRequest) -> list[StockQuoteItem]:
         actual_start_date = format_date_value(request.start_date)
         actual_end_date = format_date_value(request.end_date)
         if actual_start_date == "" or actual_end_date == "" or actual_start_date > actual_end_date:
-            raise ValueError("start_date 和 end_date 必须是有效日期，且 start_date 不能晚于 end_date")
+            raise ValueError("start_date ? end_date ????????? start_date ???? end_date")
         if request.limit < 1:
-            raise ValueError("limit 必须大于 0")
+            raise ValueError("limit ???? 0")
         if request.offset < 0:
-            raise ValueError("offset 不能小于 0")
-        return get_local_stock_daily_window(actual_start_date, actual_end_date, request.limit, request.offset)
+            raise ValueError("offset ???? 0")
+        items = get_local_stock_daily_window(actual_start_date, actual_end_date, None, 0)
+        filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
+        return filtered_items[request.offset: request.offset + request.limit]
+
 
     def _build_missing_money_flow_requests(self, items: list[StockMoneyFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[str, str]]:
         actual_trade_date = format_date_value(trade_date)

@@ -48,6 +48,8 @@ class StockQuoteItem(ApiModel):
     volume: float | None = None
     amount: float | None = None
     adjust: str = "none"
+    is_suspended: bool = False
+    is_st: bool = False
 
 
 class StockQuoteCodeSummary(ApiModel):

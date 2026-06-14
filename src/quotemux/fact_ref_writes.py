@@ -55,11 +55,13 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             item.close,
             int(item.volume) if item.volume is not None else 0,
             item.amount,
+            item.is_suspended,
+            item.is_st,
         ))
     return execute_many(
         """
-        insert into fact.stock_daily_1d (market, code, trade_date, open, high, low, close, volume, amount)
-        values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s)
+        insert into fact.stock_daily_1d (market, code, trade_date, open, high, low, close, volume, amount, is_suspended, is_st)
+        values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s)
         on conflict (market, code, trade_date) do update set
             open = excluded.open,
             high = excluded.high,
@@ -67,6 +69,8 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             close = excluded.close,
             volume = excluded.volume,
             amount = excluded.amount,
+            is_suspended = excluded.is_suspended,
+            is_st = excluded.is_st,
             loaded_at = now()
         """,
         params,
