@@ -8,3 +8,5 @@ __pycache__
 /migrations
 /docs
 /tools
+tests/
+CHANGELOG.md
