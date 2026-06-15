@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -99,6 +99,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/reference/hk-connect-targets", ("stocks.reference.hk_connect_targets",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/quotes/auctions", ("stocks.quotes.auctions",)),
     PublicApiCapabilityBinding("/api/boards/quotes", ("boards.quotes.daily",)),
+    PublicApiCapabilityBinding("/api/boards/quotes/daily-snapshot", ("boards.quotes.daily.snapshot",)),
     PublicApiCapabilityBinding("/api/boards/catalog", ("boards.catalog",)),
     PublicApiCapabilityBinding("/api/boards/{board_code}/profile", ("boards.profile",)),
     PublicApiCapabilityBinding("/api/boards/{board_code}/members", ("boards.members",)),
