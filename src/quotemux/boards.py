@@ -309,6 +309,27 @@ class QuoteMuxBoards:
         )
         return items[offset: offset + ensure_limit(limit)]
 
+
+    def get_market_daily_snapshot(self, trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
+        """获取指定交易日全市场板块快照"""
+        store_identity = {"board_codes": [], "trade_date": trade_date, "snapshot": True}
+        handlers = {
+            "get_board_daily_snapshot": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_daily_snapshot", trade_date, limit, offset),
+        }
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="boards.quotes.daily.snapshot",
+                store_identity=store_identity,
+                model_type=BoardQuoteItem,
+                key_fields=("board_code", "trade_time", "freq"),
+                sort_fields=("board_code", "trade_time"),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.quotes.daily.snapshot", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("boards.quotes.daily.snapshot", ("tushare", "akshare")),
+            )
+        )
+        return items[offset: offset + ensure_limit(limit)]
+
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}
         handlers = {

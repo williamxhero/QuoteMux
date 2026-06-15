@@ -358,6 +358,9 @@ def load_index_daily_frame(index_codes: list[str], start_date: str, end_date: st
             high,
             low,
             close,
+            pre_close,
+            pct_chg,
+            volume,
             amount
         from fact.index_bar_1d
         where {' and '.join(where_clauses)}
