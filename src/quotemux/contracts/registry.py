@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -34,6 +34,7 @@ _REQUEST_TYPES = {
     "stocks.quotes.daily": StockQuotesRequest,
     "stocks.quotes.daily_snapshot": StockDailySnapshotRequest,
     "stocks.quotes.intraday": StockQuotesRequest,
+    "boards.quotes.daily.snapshot": object,
 }
 
 _RESULT_TYPES = {
@@ -46,6 +47,7 @@ _RESULT_TYPES = {
     "stocks.quotes.daily": StockQuoteItem,
     "stocks.quotes.daily_snapshot": StockQuoteItem,
     "stocks.quotes.intraday": StockQuoteItem,
+    "boards.quotes.daily.snapshot": object,
 }
 
 _MISSING_REQUEST_BUILDERS = {
@@ -58,6 +60,7 @@ _MISSING_REQUEST_BUILDERS = {
     "stocks.quotes.daily": "stocks.quote_ranges",
     "stocks.quotes.daily_snapshot": "stocks.snapshot_codes",
     "stocks.quotes.intraday": "stocks.quote_ranges",
+    "boards.quotes.daily.snapshot": "",
 }
 
 
