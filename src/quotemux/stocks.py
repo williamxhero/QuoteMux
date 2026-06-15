@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import timedelta
 
@@ -208,7 +208,7 @@ def _limit_quote_items(items: list[StockQuoteItem], limit: int | None) -> list[S
     if limit is None:
         return items
     if limit < 1:
-        raise ValueError("limit 必须大于 0")
+        raise ValueError("limit 蹇呴』澶т簬 0")
     return items[:limit]
 
 
@@ -329,7 +329,7 @@ def _should_return_local_daily(request: StockQuotesRequest, missing_requests: li
         return True
     if not _has_explicit_quote_window(request):
         return False
-    # 盘中或未来日期尚无日线收盘数据时，不能为了补当天空缺进入慢 Store 或外部源链路。
+    # 鐩樹腑鎴栨湭鏉ユ棩鏈熷皻鏃犳棩绾挎敹鐩樻暟鎹椂锛屼笉鑳戒负浜嗚ˉ褰撳ぉ绌虹己杩涘叆鎱?Store 鎴栧閮ㄦ簮閾捐矾銆?
     return _missing_ranges_are_current_or_future(missing_requests)
 
 
@@ -515,7 +515,7 @@ def _build_suspended_fill_items(request: StockQuotesRequest, items: list[StockQu
             previous_item = _previous_daily_item(code, trade_date, current_items, previous_items)
             if previous_item is None or previous_item.close is None:
                 continue
-            # 停牌占位只补时间轴，不代表真实成交。
+            # 鍋滅墝鍗犱綅鍙ˉ鏃堕棿杞达紝涓嶄唬琛ㄧ湡瀹炴垚浜ゃ€?
             filled_item = StockQuoteItem(
                 code=code,
                 trade_time=trade_date,
@@ -741,11 +741,11 @@ class QuoteMuxStocks:
     def get_daily_snapshot_with_report(self, request: StockDailySnapshotRequest) -> tuple[list[StockQuoteItem], ContractReport]:
         actual_trade_date = format_date_value(request.trade_date)
         if actual_trade_date == "":
-            raise ValueError("trade_date 涓嶈兘涓虹┖锛屼笖蹇呴』鏄崟涓氦鏄撴棩")
+            raise ValueError("trade_date 娑撳秷鍏樻稉铏光敄閿涘奔绗栬箛鍛淬€忛弰顖氬礋娑擃亙姘﹂弰鎾存）")
         if request.limit < 1 or request.limit > MARKET_DAILY_SNAPSHOT_LIMIT:
-            raise ValueError("limit 瓒呭嚭鍏佽鑼冨洿")
+            raise ValueError("limit 鐡掑懎鍤崗浣筋啅閼煎啫娲?)
         if request.offset < 0:
-            raise ValueError("offset 涓嶈兘灏忎簬 0")
+            raise ValueError("offset 娑撳秷鍏樼亸蹇庣艾 0")
         store_identity = {
             "trade_date": actual_trade_date,
         }
@@ -819,6 +819,18 @@ class QuoteMuxStocks:
             )
         )
         return sorted_items
+
+    def get_money_flow_batch(self, codes: str, trade_date: str, view: str) -> list[StockMoneyFlowItem]:
+        """批量查询多只股票指定日期的资金流数据"""
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+        if not code_list:
+            return []
+        
+        result = []
+        for code in code_list:
+            items = self.get_money_flow(code, trade_date, "", "", view)
+            result.extend(items)
+        return result
 
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
         store_identity = {
@@ -1081,14 +1093,14 @@ class QuoteMuxStocks:
         actual_codes = _indicator_codes_from_params(code, codes)
         if actual_codes:
             if len(actual_codes) > MAX_DAILY_INDICATOR_CODES:
-                raise ValueError("鏃ラ鎸囨爣鎺ュ彛涓嶆敮鎸佷竴娆′紶鍏ヨ秴杩?200 鍙偂绁紱鍏ㄥ競鍦哄彇鏁拌鎸?trade_date 鍗曟棩鏌ヨ锛屼笉瑕佷紶 code 鎴?codes")
+                raise ValueError("閺冦儵顣堕幐鍥ㄧ垼閹恒儱褰涙稉宥嗘暜閹镐椒绔村▎鈥茬炊閸忋儴绉存潻?200 閸欘亣鍋傜粊顭掔幢閸忋劌绔堕崷鍝勫絿閺佹媽顕幐?trade_date 閸楁洘妫╅弻銉嚄閿涘奔绗夌憰浣风炊 code 閹?codes")
             actual_start, actual_end = normalize_date_range(trade_date, start_date, end_date)
             if actual_start == actual_end:
                 return actual_codes, actual_start, "", ""
             return actual_codes, "", actual_start, actual_end
         actual_trade_date = _single_day_indicator_request(trade_date, start_date, end_date)
         if actual_trade_date == "":
-            raise ValueError("鏈紶 code 鎴?codes 鏃讹紝浠呮敮鎸佸崟鏃ュ叏甯傚満鏌ヨ锛岃浣跨敤 trade_date")
+            raise ValueError("閺堫亙绱?code 閹?codes 閺冭绱濇禒鍛暜閹镐礁宕熼弮銉ュ弿鐢倸婧€閺屻儴顕楅敍宀冾嚞娴ｈ法鏁?trade_date")
         return [], actual_trade_date, "", ""
 
     def get_daily_basic(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[StockDailyBasicItem]:
