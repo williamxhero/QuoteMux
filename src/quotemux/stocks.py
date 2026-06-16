@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import timedelta
 
@@ -741,11 +741,11 @@ class QuoteMuxStocks:
     def get_daily_snapshot_with_report(self, request: StockDailySnapshotRequest) -> tuple[list[StockQuoteItem], ContractReport]:
         actual_trade_date = format_date_value(request.trade_date)
         if actual_trade_date == "":
-            raise ValueError("trade_date 娑撳秷鍏樻稉铏光敄閿涘奔绗栬箛鍛淬€忛弰顖氬礋娑擃亙姘﹂弰鎾存）")
+            raise ValueError("trade_date 不能为空")
         if request.limit < 1 or request.limit > MARKET_DAILY_SNAPSHOT_LIMIT:
-            raise ValueError("limit 鐡掑懎鍤崗浣筋啅閼煎啫娲?)
+            raise ValueError("limit 超出允许范围")
         if request.offset < 0:
-            raise ValueError("offset 娑撳秷鍏樼亸蹇庣艾 0")
+            raise ValueError("offset 不能小于 0")
         store_identity = {
             "trade_date": actual_trade_date,
         }

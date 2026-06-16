@@ -10,7 +10,9 @@ import sys
 from quotemux.source_packages.registry import clear_loaded_source_package_modules, refresh_default_source_package_registry
 
 
-PACKAGE_REPO_SPEC = "git+https://github.com/williamxhero/QuoteMux_Packages.git@main"
+import os
+
+PACKAGE_REPO_SPEC = os.getenv("QUOTEMUX_PACKAGE_REPO_SPEC", "git+https://github.com/williamxhero/QuoteMux_Packages.git@main")
 PACKAGE_DISTRIBUTION_NAME = "quotemux-packages"
 MANIFEST_FILE_NAME = "quotemux_package.json"
 
