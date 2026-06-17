@@ -12,7 +12,7 @@ from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, merge_model_lists, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.local_daily import get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_previous as get_local_stock_daily_previous, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
-from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_name_history, get_local_stock_profile
+from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_money_flow_batch, get_local_stock_name_history, get_local_stock_profile
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
@@ -33,6 +33,20 @@ def _today_text() -> str:
 
 def _payloads_with_as_of_date(items: list[object]) -> list[dict[str, object]]:
     return [{**item.model_dump(), "as_of_date": _today_text()} for item in items if hasattr(item, "model_dump")]
+
+
+def _stock_daily_basic_has_value(item: StockDailyBasicItem) -> bool:
+    return any(
+        value is not None
+        for value in [
+            item.turnover_rate,
+            item.volume_ratio,
+            item.pe,
+            item.pb,
+            item.total_share,
+            item.float_share,
+        ]
+    )
 
 
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
@@ -746,26 +760,9 @@ class QuoteMuxStocks:
             raise ValueError("limit 超出允许范围")
         if request.offset < 0:
             raise ValueError("offset 不能小于 0")
-        store_identity = {
-            "trade_date": actual_trade_date,
-        }
         local_items = get_local_stock_daily_snapshot_full(actual_trade_date)
-        sorted_items, report = execute_capability_query(
-            CapabilityQuerySpec(
-                capability_id="stocks.quotes.daily_snapshot",
-                store_identity=store_identity,
-                model_type=StockQuoteItem,
-                key_fields=("code", "trade_time", "freq"),
-                sort_fields=("code", "trade_time"),
-                request_builder=lambda items: _build_snapshot_requests(actual_trade_date, items),
-                provider_steps=lambda: _build_daily_snapshot_steps(self._settings),
-                source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
-                base_items=local_items,
-                base_source_name="fact.stock_daily_1d",
-                fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
-            )
-        )
-        filtered_items = _apply_snapshot_filters(list(sorted_items), request.skip_suspended, request.skip_st)
+        report = _base_source_report("stocks.quotes.daily_snapshot", "fact.stock_daily_1d", local_items != [])
+        filtered_items = _apply_snapshot_filters(local_items, request.skip_suspended, request.skip_st)
         return filtered_items[request.offset: request.offset + request.limit], report
 
     def get_daily_local_window(self, request: StockDailyLocalWindowRequest) -> list[StockQuoteItem]:
@@ -825,12 +822,7 @@ class QuoteMuxStocks:
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         if not code_list:
             return []
-        
-        result = []
-        for code in code_list:
-            items = self.get_money_flow(code, trade_date, "", "", view)
-            result.extend(items)
-        return result
+        return get_local_stock_money_flow_batch(code_list, trade_date, view)
 
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
         store_identity = {
@@ -1104,7 +1096,8 @@ class QuoteMuxStocks:
         return [], actual_trade_date, "", ""
 
     def get_daily_basic(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[StockDailyBasicItem]:
-        return self._get_daily_indicator("stocks.indicators.daily_basic", StockDailyBasicItem, "get_stock_daily_basic", code, codes, trade_date, start_date, end_date)
+        items = self._get_daily_indicator("stocks.indicators.daily_basic", StockDailyBasicItem, "get_stock_daily_basic", code, codes, trade_date, start_date, end_date)
+        return [item for item in items if _stock_daily_basic_has_value(item)]
 
     def get_daily_valuation(self, code: str, codes: str, trade_date: str, start_date: str, end_date: str) -> list[StockDailyValuationItem]:
         return self._get_daily_indicator("stocks.indicators.daily_valuation", StockDailyValuationItem, "get_stock_daily_valuation", code, codes, trade_date, start_date, end_date)

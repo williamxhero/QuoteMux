@@ -315,6 +315,8 @@ class QuoteMuxIndexes:
         )
         if actual_freq in {"1w", "1mo"}:
             merged_items = _aggregate_index_quotes(merged_items, actual_freq)
+        if actual_freq == "1d":
+            merged_items = _filter_usable_local_index_items(merged_items, actual_freq)
         trimmed_items = trim_items_per_key(merged_items, "index_code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("index_code", "trade_time"))
         return sorted_items[:actual_limit], report

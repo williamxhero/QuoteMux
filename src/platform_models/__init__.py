@@ -80,6 +80,7 @@ class StockQuotesQueryResult(ApiModel):
 
 class BoardQuoteItem(ApiModel):
     board_code: str
+    board_name: str = ""
     trade_time: str
     freq: str
     open: float | None = None

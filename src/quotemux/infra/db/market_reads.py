@@ -185,6 +185,60 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
     return query_dataframe(paged_query, (start_date, end_date, limit, offset))
 
 
+def load_stock_money_flow_frame(codes: list[str], trade_date: str) -> pd.DataFrame:
+    """从股票日线事实表批量读取资金流字段。"""
+    if not codes or not trade_date:
+        return pd.DataFrame()
+    query = """
+        select
+            code,
+            trade_date::text as trade_date,
+            labi_buy,
+            labi_sell,
+            mism_buy,
+            mism_sell
+        from fact.stock_daily_1d
+        where code = any(%s)
+          and trade_date = %s
+        order by code
+    """
+    return query_dataframe(query, (codes, trade_date))
+
+
+def load_board_money_flow_frame(board_codes: list[str], trade_date: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """从板块日线事实表读取板块资金流字段。"""
+    where_clauses: list[str] = []
+    params: list[object] = []
+    if board_codes:
+        where_clauses.append("board_code = any(%s)")
+        params.append(board_codes)
+    if trade_date:
+        where_clauses.append("trade_date = %s")
+        params.append(trade_date)
+    else:
+        if start_date:
+            where_clauses.append("trade_date >= %s")
+            params.append(start_date)
+        if end_date:
+            where_clauses.append("trade_date <= %s")
+            params.append(end_date)
+    if where_clauses == []:
+        return pd.DataFrame()
+    query = f"""
+        select
+            board_code,
+            trade_date::text as trade_date,
+            labi_buy,
+            labi_sell,
+            mism_buy,
+            mism_sell
+        from fact.board_daily_1d
+        where {' and '.join(where_clauses)}
+        order by board_code, trade_date
+    """
+    return query_dataframe(query, tuple(params))
+
+
 def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: object, freq: str = "1m") -> pd.DataFrame:
     if not codes:
         return pd.DataFrame()
@@ -304,6 +358,7 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
     query = f"""
         select
             day_rows.board_code,
+            coalesce(board_ref.name, '') as board_name,
             day_rows.trade_date::text as trade_time,
             day_rows.open,
             day_rows.high,
@@ -325,6 +380,7 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
             order by previous_rows.trade_date desc
             limit 1
         ) previous_rows on true
+        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
         where {' and '.join(where_clauses)}
         order by day_rows.board_code, day_rows.trade_date
     """
@@ -354,6 +410,7 @@ def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
         )
         select
             day_rows.board_code,
+            coalesce(board_ref.name, '') as board_name,
             day_rows.trade_date::text as trade_time,
             day_rows.open,
             day_rows.high,
@@ -375,6 +432,7 @@ def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
             order by previous_rows.trade_date desc
             limit 1
         ) previous_rows on true
+        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
         order by day_rows.board_code
         limit %s
         offset %s

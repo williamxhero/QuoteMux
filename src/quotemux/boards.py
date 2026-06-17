@@ -6,7 +6,7 @@ from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHist
 from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_member_history, get_local_board_members, get_local_board_profile, get_local_board_quotes
+from quotemux.local_store import get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_member_history, get_local_board_members, get_local_board_money_flow, get_local_board_profile, get_local_board_quotes
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -164,6 +164,9 @@ class QuoteMuxBoards:
         count: int | None,
         limit: int,
     ) -> list[BoardQuoteItem]:
+        if freq == "1d" and trade_date != "" and start_date == "" and end_date == "" and start_time == "" and end_time == "" and count is None:
+            local_items = get_local_board_quotes(board_codes, freq, trade_date, "", "", None)
+            return sorted(local_items, key=lambda item: (item.board_code, item.trade_time))[: ensure_limit(limit)]
         store_identity = {"board_codes": list(board_codes), "freq": freq, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "start_time": start_time, "end_time": end_time, "count": count}
         handlers = {
             "get_board_quotes": lambda instance: lambda request_board_codes, missing_start, missing_end: _source_package_call(instance.package_id, "get_board_quotes", request_board_codes, freq, "", missing_start, missing_end, start_time, end_time, count),
@@ -298,6 +301,8 @@ class QuoteMuxBoards:
                 request_builder=lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare")),
+                base_items=get_local_board_money_flow(board_code, trade_date, start_date, end_date, scope),
+                base_source_name="fact.board_daily_1d",
             )
         )
         return sorted_items
@@ -324,30 +329,7 @@ class QuoteMuxBoards:
 
     def get_market_daily_snapshot(self, trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
         """获取指定交易日全市场板块快照"""
-        local_items = get_local_board_daily_snapshot(trade_date, limit, offset)
-        if _has_complete_board_daily_snapshot(local_items):
-            return local_items
-        if local_items:
-            board_codes = [item.board_code for item in local_items if item.board_code != ""]
-            quote_items = self.get_quotes(board_codes, "1d", trade_date, "", "", "", "", None, max(len(board_codes), ensure_limit(limit)))
-            merged_items = merge_model_lists(quote_items, local_items, ("board_code", "trade_time", "freq"))
-            return sorted([item for item in merged_items if item.trade_time == trade_date], key=lambda item: item.board_code)[offset: offset + ensure_limit(limit)]
-        actual_limit = ensure_limit(limit)
-        items: list[BoardQuoteItem] = []
-        seen_codes: set[str] = set()
-        page_offset = 0
-        page_size = 100
-        while len(items) < offset + actual_limit:
-            catalog_items = self.get_catalog("", "a_share", "active", page_size, page_offset)
-            if catalog_items == []:
-                break
-            board_codes = [item.board_code for item in catalog_items if item.board_code != "" and item.board_code not in seen_codes]
-            seen_codes.update(board_codes)
-            if board_codes:
-                quote_items = self.get_quotes(board_codes, "1d", trade_date, "", "", "", "", None, len(board_codes))
-                items.extend(item for item in quote_items if item.trade_time == trade_date)
-            page_offset += page_size
-        return sorted(items, key=lambda item: item.board_code)[offset: offset + actual_limit]
+        return get_local_board_daily_snapshot(trade_date, limit, offset)
 
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}

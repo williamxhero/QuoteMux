@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardMemberItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockProfileItem, TradingCalendarItem
+from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockMoneyFlowItem, StockProfileItem, TradingCalendarItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_stock_intraday_frame
+from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_board_money_flow_frame, load_index_daily_frame, load_stock_intraday_frame, load_stock_money_flow_frame
 from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_board_member_history_frame, load_board_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
@@ -135,6 +135,7 @@ def get_local_board_quotes(board_codes: list[str], freq: str, trade_date: str, s
             items.append(
                 BoardQuoteItem(
                     board_code=str(board_code),
+                    board_name=str(row["board_name"]) if "board_name" in row and pd.notna(row["board_name"]) else "",
                     trade_time=format_datetime_value(row["trade_time"], freq),
                     freq=freq,
                     open=float(row["open"]) if pd.notna(row["open"]) else None,
@@ -175,6 +176,7 @@ def get_local_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> 
         items.append(
             BoardQuoteItem(
                 board_code=str(row["board_code"]),
+                board_name=str(row["board_name"]) if "board_name" in row and pd.notna(row["board_name"]) else "",
                 trade_time=format_datetime_value(row["trade_time"], "1d"),
                 freq="1d",
                 open=float(row["open"]) if "open" in row and pd.notna(row["open"]) else None,
@@ -239,6 +241,72 @@ def get_local_stock_name_history(code: str, start_date: str, end_date: str) -> l
     if frame.empty:
         return []
     return [NameHistoryItem(code=str(row["code"]).zfill(6), name=str(row["name"]), start_date=format_date_value(row["valid_from"]), end_date=format_date_value(row["valid_to"]), ann_date="") for _, row in frame.iterrows()]
+
+
+def _sum_optional(row: pd.Series, left_column: str, right_column: str) -> float | None:
+    left_value = row[left_column]
+    right_value = row[right_column]
+    if pd.isna(left_value) and pd.isna(right_value):
+        return None
+    left_number = float(left_value) if pd.notna(left_value) else 0.0
+    right_number = float(right_value) if pd.notna(right_value) else 0.0
+    return left_number + right_number
+
+
+def _net_optional(inflow: float | None, outflow: float | None) -> float | None:
+    if inflow is None and outflow is None:
+        return None
+    return (inflow if inflow is not None else 0.0) - (outflow if outflow is not None else 0.0)
+
+
+def get_local_stock_money_flow_batch(codes: list[str], trade_date: str, view: str) -> list[StockMoneyFlowItem]:
+    actual_codes = [normalize_stock_code(code) for code in codes]
+    actual_codes = [code for code in dict.fromkeys(actual_codes) if code]
+    actual_trade_date = format_date_value(trade_date)
+    if actual_codes == [] or actual_trade_date == "":
+        return []
+    frame = load_stock_money_flow_frame(actual_codes, actual_trade_date)
+    if frame.empty:
+        return []
+    items: list[StockMoneyFlowItem] = []
+    for _, row in frame.iterrows():
+        main_inflow = _sum_optional(row, "labi_buy", "mism_buy")
+        main_outflow = _sum_optional(row, "labi_sell", "mism_sell")
+        items.append(
+            StockMoneyFlowItem(
+                code=str(row["code"]).zfill(6),
+                trade_date=format_date_value(row["trade_date"]),
+                view=view,
+                main_inflow=main_inflow,
+                main_outflow=main_outflow,
+                net_inflow=_net_optional(main_inflow, main_outflow),
+            )
+        )
+    return items
+
+
+def get_local_board_money_flow(board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
+    actual_board_code = str(board_code)
+    if actual_board_code == "":
+        return []
+    frame = load_board_money_flow_frame([actual_board_code], format_date_value(trade_date), format_date_value(start_date), format_date_value(end_date))
+    if frame.empty:
+        return []
+    items: list[BoardMoneyFlowItem] = []
+    for _, row in frame.iterrows():
+        inflow = _sum_optional(row, "labi_buy", "mism_buy")
+        outflow = _sum_optional(row, "labi_sell", "mism_sell")
+        items.append(
+            BoardMoneyFlowItem(
+                board_code=str(row["board_code"]),
+                trade_date=format_date_value(row["trade_date"]),
+                scope=scope,
+                inflow=inflow,
+                outflow=outflow,
+                net_inflow=_net_optional(inflow, outflow),
+            )
+        )
+    return items
 
 
 def _normalize_ref_market(value: str) -> str:
