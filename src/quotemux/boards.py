@@ -4,9 +4,9 @@ from datetime import timedelta
 
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem
 from quotemux.infra.common import format_date_value, parse_date_text
-from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, trim_items_per_key
+from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_board_catalog, get_local_board_member_history, get_local_board_members, get_local_board_profile, get_local_board_quotes
+from quotemux.local_store import get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_member_history, get_local_board_members, get_local_board_profile, get_local_board_quotes
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -112,13 +112,21 @@ def _build_missing_quote_requests(board_codes: list[str], items: list[BoardQuote
     expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings) if freq == "1d" else []
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for board_code in board_codes:
-        existing_dates = {item.trade_time for item in items if item.board_code == board_code and item.freq == freq}
+        existing_dates = {item.trade_time for item in items if item.board_code == board_code and item.freq == freq and _has_complete_board_quote_metrics(item)}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
             missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
         for missing_start, missing_end in missing_ranges:
             grouped_ranges.setdefault((missing_start, missing_end), []).append(board_code)
     return [(range_codes, range_start, range_end) for (range_start, range_end), range_codes in grouped_ranges.items()]
+
+
+def _has_complete_board_quote_metrics(item: BoardQuoteItem) -> bool:
+    return item.pre_close is not None and item.pct_chg is not None
+
+
+def _has_complete_board_daily_snapshot(items: list[BoardQuoteItem]) -> bool:
+    return items != [] and all(_has_complete_board_quote_metrics(item) for item in items)
 
 
 class QuoteMuxBoards:
@@ -168,8 +176,8 @@ class QuoteMuxBoards:
                 key_fields=("board_code", "trade_time", "freq"),
                 sort_fields=("board_code", "trade_time"),
                 request_builder=lambda current_items: _build_missing_quote_requests(board_codes, current_items, freq, trade_date, start_date, end_date, count, self._settings),
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.quotes.daily", handlers, ("tushare", "akshare")),
-                source_order=self._settings.get_contract_source_order("boards.quotes.daily", ("tushare", "akshare")),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.quotes.daily", handlers, ("tushare", "efinance", "akshare")),
+                source_order=self._settings.get_contract_source_order("boards.quotes.daily", ("tushare", "efinance", "akshare")),
                 base_items=get_local_board_quotes(board_codes, freq, trade_date, start_date, end_date, count),
                 base_source_name="fact.board_daily_1d",
                 fact_ref_writer=get_fact_ref_writer("boards.quotes.daily") if freq == "1d" else None,
@@ -194,14 +202,18 @@ class QuoteMuxBoards:
                 request_builder=lambda current_items: [()] if current_items == [] else [],
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.catalog", handlers, ("tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("boards.catalog", ("tushare", "akshare")),
-                base_items=get_local_board_catalog(status),
+                base_items=[],
                 base_source_name="ref.board",
                 payload_builder=_payloads_with_as_of_date,
                 fact_ref_writer=get_fact_ref_writer("boards.catalog"),
             )
         )
+        local_items = get_local_board_catalog(status)
+        if local_items:
+            items = merge_model_lists(local_items, items, ("board_code",))
         filtered = [item for item in items if (category == "" or item.category == category) and (market == "" or item.market == market) and (status == "" or item.status == status)]
-        return filtered[offset: offset + ensure_limit(limit)]
+        sorted_items = sorted(filtered, key=lambda item: item.board_code)
+        return sorted_items[offset: offset + ensure_limit(limit)]
 
     def get_profile(self, board_code: str) -> BoardCatalogItem | None:
         store_identity = {"board_code": board_code}
@@ -312,23 +324,30 @@ class QuoteMuxBoards:
 
     def get_market_daily_snapshot(self, trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
         """获取指定交易日全市场板块快照"""
-        store_identity = {"board_codes": [], "trade_date": trade_date, "snapshot": True}
-        handlers = {
-            "get_board_daily_snapshot": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_daily_snapshot", trade_date, limit, offset),
-        }
-        items, _ = execute_capability_query(
-            CapabilityQuerySpec(
-                capability_id="boards.quotes.daily.snapshot",
-                store_identity=store_identity,
-                model_type=BoardQuoteItem,
-                key_fields=("board_code", "trade_time", "freq"),
-                sort_fields=("board_code", "trade_time"),
-                request_builder=lambda current_items: [()] if current_items == [] else [],
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.quotes.daily.snapshot", handlers, ("tushare", "akshare")),
-                source_order=self._settings.get_contract_source_order("boards.quotes.daily.snapshot", ("tushare", "akshare")),
-            )
-        )
-        return items[offset: offset + ensure_limit(limit)]
+        local_items = get_local_board_daily_snapshot(trade_date, limit, offset)
+        if _has_complete_board_daily_snapshot(local_items):
+            return local_items
+        if local_items:
+            board_codes = [item.board_code for item in local_items if item.board_code != ""]
+            quote_items = self.get_quotes(board_codes, "1d", trade_date, "", "", "", "", None, max(len(board_codes), ensure_limit(limit)))
+            merged_items = merge_model_lists(quote_items, local_items, ("board_code", "trade_time", "freq"))
+            return sorted([item for item in merged_items if item.trade_time == trade_date], key=lambda item: item.board_code)[offset: offset + ensure_limit(limit)]
+        actual_limit = ensure_limit(limit)
+        items: list[BoardQuoteItem] = []
+        seen_codes: set[str] = set()
+        page_offset = 0
+        page_size = 100
+        while len(items) < offset + actual_limit:
+            catalog_items = self.get_catalog("", "a_share", "active", page_size, page_offset)
+            if catalog_items == []:
+                break
+            board_codes = [item.board_code for item in catalog_items if item.board_code != "" and item.board_code not in seen_codes]
+            seen_codes.update(board_codes)
+            if board_codes:
+                quote_items = self.get_quotes(board_codes, "1d", trade_date, "", "", "", "", None, len(board_codes))
+                items.extend(item for item in quote_items if item.trade_time == trade_date)
+            page_offset += page_size
+        return sorted(items, key=lambda item: item.board_code)[offset: offset + actual_limit]
 
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}

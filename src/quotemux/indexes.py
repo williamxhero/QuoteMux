@@ -99,7 +99,7 @@ def _aggregate_index_quotes(items: list[IndexQuoteItem], freq: str) -> list[Inde
                     pre_close=float(row["pre_close"]) if pd.notna(row["pre_close"]) else None,
                     change=float(row["change"]) if pd.notna(row["change"]) else None,
                     pct_chg=float(row["pct_chg"]) if pd.notna(row["pct_chg"]) else None,
-                    volume=None,
+                    volume=float(row["volume"]) if pd.notna(row["volume"]) else None,
                     amount=float(row["amount"]) if pd.notna(row["amount"]) else None,
                 )
             )
@@ -166,6 +166,25 @@ def _build_missing_quote_requests(
     return [(range_codes, range_start, range_end) for (range_start, range_end), range_codes in grouped_ranges.items()]
 
 
+def _is_index_quote_row_usable(item: IndexQuoteItem) -> bool:
+    if item.close is None:
+        return False
+    if item.freq != "1d":
+        return True
+    normalized_code = item.index_code.strip().upper()
+    if normalized_code in {"000001", "SHSE.000001"} and item.close < 100.0:
+        return False
+    if item.pre_close is None:
+        return False
+    if item.pct_chg is None:
+        return False
+    if item.pre_close <= 0:
+        return False
+    if item.pct_chg < -50.0 or item.pct_chg > 50.0:
+        return False
+    return True
+
+
 def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
     merged: dict[tuple[str, str], IndexMemberItem] = {}
     for item in items:
@@ -183,11 +202,17 @@ def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
     return sorted(merged.values(), key=lambda item: (item.code, item.trade_date))
 
 
+def _filter_usable_local_index_items(items: list[IndexQuoteItem], freq: str) -> list[IndexQuoteItem]:
+    if freq != "1d":
+        return items
+    return [item for item in items if _is_index_quote_row_usable(item)]
+
+
 def _build_quote_steps(request_freq: str, request_count: int | None, settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexQuoteItem], ...]:
     handlers = {
         "get_index_quotes": lambda instance: lambda index_codes, missing_start, missing_end: _source_package_call(instance.package_id, "get_index_quotes", index_codes, request_freq, "", missing_start, missing_end, request_count),
     }
-    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("tushare", "efinance", "mootdx", "akshare", "opentdx"))
+    return SourceInstanceExecutor(settings).build_steps("indexes.quotes.daily", handlers, ("tushare", "akshare", "mootdx", "opentdx"))
 
 
 def _build_member_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[IndexMemberItem], ...]:
@@ -268,7 +293,10 @@ class QuoteMuxIndexes:
             "end_date": request.end_date,
             "count": request.count,
         }
-        local_items = get_local_index_quotes(request.index_codes, request_freq, request.trade_date, request.start_date, request.end_date, request_count)
+        local_items = _filter_usable_local_index_items(
+            get_local_index_quotes(request.index_codes, request_freq, request.trade_date, request.start_date, request.end_date, request_count),
+            request_freq,
+        )
         merged_items, report = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="indexes.quotes.daily",
@@ -278,7 +306,7 @@ class QuoteMuxIndexes:
                 sort_fields=("index_code", "trade_time"),
                 request_builder=lambda items: _build_missing_quote_requests(request.index_codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request_count, self._settings),
                 provider_steps=lambda: _build_quote_steps(request_freq, request_count, self._settings),
-                source_order=self._settings.get_contract_source_order("indexes.quotes.daily", ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
+                source_order=self._settings.get_contract_source_order("indexes.quotes.daily", ("tushare", "akshare", "mootdx", "opentdx")),
                 base_items=local_items,
                 base_source_name="fact.index_bar_1d",
                 store_enabled=store_enabled,

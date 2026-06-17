@@ -66,4 +66,23 @@ def installed_packages_fingerprint() -> str:
 
 
 def _install_distribution(python_executable: str) -> None:
-    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", PACKAGE_REPO_SPEC], check=True)
+    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", _package_install_target()], check=True)
+
+
+def _package_install_target() -> str:
+    local_project_root = _find_local_package_project_root()
+    if local_project_root is not None:
+        return str(local_project_root)
+    return PACKAGE_REPO_SPEC
+
+
+def _find_local_package_project_root() -> Path | None:
+    env_path = Path(PACKAGE_REPO_SPEC).expanduser()
+    if env_path.is_dir() and (env_path / "pyproject.toml").is_file():
+        return env_path.resolve()
+    current_path = Path(__file__).resolve()
+    for parent in current_path.parents:
+        candidate = parent / "QuoteMux_Packages"
+        if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
+            return candidate
+    return None

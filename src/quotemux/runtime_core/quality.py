@@ -26,6 +26,8 @@ def normalize_index_code_full(code: str) -> str:
     normalized = normalize_index_code(text)
     if normalized.startswith("399"):
         return f"SZSE.{normalized}"
+    if normalized.startswith("899"):
+        return f"BJSE.{normalized}"
     if normalized.startswith(("43", "83", "87")):
         return f"BJSE.{normalized}"
     return f"SHSE.{normalized}"

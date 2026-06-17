@@ -177,8 +177,8 @@ class QuoteMuxDatasets:
             [],
             ("index_code", "trade_time", "freq"),
             lambda current_items: [([normalize_index_code(index_code)], _trade_date_text(start_date), _trade_date_text(end_date))] if current_items == [] else [],
-            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_INDEX_DAILY, handlers, ("efinance", "mootdx", "akshare", "opentdx")),
-            self._settings.get_contract_source_order(CONTRACT_INDEX_DAILY, ("efinance", "mootdx", "akshare", "opentdx")),
+            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_INDEX_DAILY, handlers, ("akshare", "mootdx", "opentdx")),
+            self._settings.get_contract_source_order(CONTRACT_INDEX_DAILY, ("akshare", "mootdx", "opentdx")),
         )
         frame = _index_items_to_frame(items)
         if frame.empty:
@@ -252,8 +252,8 @@ class QuoteMuxDatasets:
             base_items,
             ("index_code", "trade_time", "freq"),
             lambda items: [([request.index_code], _trade_date_text(request.start_date), _trade_date_text(request.end_date))] if _needs_more(items) else [],
-            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_INDEX_DAILY, handlers, ("efinance", "mootdx", "akshare", "opentdx")),
-            self._settings.get_contract_source_order(CONTRACT_INDEX_DAILY, ("efinance", "mootdx", "akshare", "opentdx")),
+            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_INDEX_DAILY, handlers, ("akshare", "mootdx", "opentdx")),
+            self._settings.get_contract_source_order(CONTRACT_INDEX_DAILY, ("akshare", "mootdx", "opentdx")),
         )
         out = _index_items_to_frame(merged_items)
         quality = validate_quote_frame(out.rename(columns={"trade_date": "trade_time"}), ["index_code", "trade_time"], "trade_time")

@@ -4,7 +4,7 @@ import pandas as pd
 
 from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardMemberItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockProfileItem, TradingCalendarItem
 from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.market_reads import load_board_daily_frame, load_index_daily_frame, load_stock_intraday_frame
+from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_stock_intraday_frame
 from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_board_member_history_frame, load_board_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
@@ -78,7 +78,24 @@ def get_local_index_quotes(index_codes: list[str], freq: str, trade_date: str, s
         group_frame = group.drop(columns=["index_code"]).sort_values("trade_time")
         if "volume" not in group_frame:
             group_frame["volume"] = pd.NA
-        result_frame = add_quote_metrics(aggregate_ohlc(group_frame, freq)) if freq != "1d" else add_quote_metrics(group_frame)
+        if freq != "1d":
+            result_frame = add_quote_metrics(aggregate_ohlc(group_frame, freq))
+        else:
+            result_frame = group_frame.copy()
+            if "change" not in result_frame.columns:
+                result_frame["change"] = pd.NA
+            missing_change = result_frame["change"].isna() if "change" in result_frame.columns else pd.Series(dtype=bool)
+            if "pre_close" in result_frame.columns:
+                computed_change = result_frame["close"] - result_frame["pre_close"]
+                result_frame.loc[missing_change, "change"] = computed_change.loc[missing_change]
+            else:
+                result_frame["pre_close"] = pd.NA
+            if "pct_chg" not in result_frame.columns:
+                result_frame["pct_chg"] = pd.NA
+            missing_pct = result_frame["pct_chg"].isna()
+            valid_pre_close = result_frame["pre_close"].notna() & (result_frame["pre_close"] != 0)
+            computed_pct = (result_frame["change"] / result_frame["pre_close"]) * 100
+            result_frame.loc[missing_pct & valid_pre_close, "pct_chg"] = computed_pct.loc[missing_pct & valid_pre_close]
         for _, row in result_frame.iterrows():
             items.append(
                 IndexQuoteItem(
@@ -92,7 +109,7 @@ def get_local_index_quotes(index_codes: list[str], freq: str, trade_date: str, s
                     pre_close=float(row["pre_close"]) if "pre_close" in row and pd.notna(row["pre_close"]) else None,
                     change=float(row["change"]) if "change" in row and pd.notna(row["change"]) else None,
                     pct_chg=float(row["pct_chg"]) if "pct_chg" in row and pd.notna(row["pct_chg"]) else None,
-                    volume=None,
+                    volume=float(row["volume"]) if "volume" in row and pd.notna(row["volume"]) else None,
                     amount=float(row["amount"]) if pd.notna(row["amount"]) else None,
                 )
             )
@@ -131,6 +148,46 @@ def get_local_board_quotes(board_codes: list[str], freq: str, trade_date: str, s
                     amount=float(row["amount"]) if "amount" in row and pd.notna(row["amount"]) else None,
                 )
             )
+    return items
+
+
+def get_local_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
+    frame = load_board_daily_snapshot_frame(trade_date, limit, offset)
+    if frame.empty:
+        return []
+    work = frame.copy()
+    work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
+    work = work.dropna(subset=["trade_time"])
+    if work.empty:
+        return []
+    if "change" not in work.columns:
+        work["change"] = pd.NA
+    missing_change = work["change"].isna()
+    work.loc[missing_change, "change"] = (work["close"] - work["pre_close"]).loc[missing_change]
+    if "pct_chg" not in work.columns:
+        work["pct_chg"] = pd.NA
+    valid_pre_close = work["pre_close"].notna() & (work["pre_close"] != 0)
+    missing_pct = work["pct_chg"].isna()
+    computed_pct = (work["change"] / work["pre_close"]) * 100
+    work.loc[missing_pct & valid_pre_close, "pct_chg"] = computed_pct.loc[missing_pct & valid_pre_close]
+    items: list[BoardQuoteItem] = []
+    for _, row in work.sort_values(["board_code", "trade_time"]).iterrows():
+        items.append(
+            BoardQuoteItem(
+                board_code=str(row["board_code"]),
+                trade_time=format_datetime_value(row["trade_time"], "1d"),
+                freq="1d",
+                open=float(row["open"]) if "open" in row and pd.notna(row["open"]) else None,
+                high=float(row["high"]) if "high" in row and pd.notna(row["high"]) else None,
+                low=float(row["low"]) if "low" in row and pd.notna(row["low"]) else None,
+                close=float(row["close"]) if "close" in row and pd.notna(row["close"]) else None,
+                pre_close=float(row["pre_close"]) if "pre_close" in row and pd.notna(row["pre_close"]) else None,
+                change=float(row["change"]) if "change" in row and pd.notna(row["change"]) else None,
+                pct_chg=float(row["pct_chg"]) if "pct_chg" in row and pd.notna(row["pct_chg"]) else None,
+                volume=float(row["volume"]) if "volume" in row and pd.notna(row["volume"]) else None,
+                amount=float(row["amount"]) if "amount" in row and pd.notna(row["amount"]) else None,
+            )
+        )
     return items
 
 

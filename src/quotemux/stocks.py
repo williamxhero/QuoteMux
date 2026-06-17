@@ -336,7 +336,7 @@ def _should_return_local_daily(request: StockQuotesRequest, missing_requests: li
 def _filter_suspended_quote_items(items: list[StockQuoteItem], skip_suspended: bool, fill_missing: bool, freq: str) -> list[StockQuoteItem]:
     if freq not in {"1d", "1w", "1mo"}:
         return items
-    if fill_missing and not skip_suspended:
+    if not skip_suspended:
         return items
     return [item for item in items if not item.is_suspended]
 

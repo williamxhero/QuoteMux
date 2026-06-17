@@ -12,7 +12,7 @@ import sys
 from quotemux.source_packages.manifest import SourcePackageManifest
 
 
-PACKAGE_REPO_SPEC = "git+https://github.com/williamxhero/QuoteMux_Packages.git@main"
+DEFAULT_PACKAGE_REPO_SPEC = "git+https://github.com/williamxhero/QuoteMux_Packages.git@main"
 PACKAGE_DISTRIBUTION_NAME = "quotemux-packages"
 MANIFEST_FILE_NAME = "quotemux_package.json"
 REQUIREMENTS_FILE_NAME = "requirements.txt"
@@ -23,6 +23,17 @@ class PackageEnvironment:
     package_id: str
     python_executable: str
     requirements_path: str
+
+
+def package_repo_spec() -> str:
+    return os.getenv("QUOTEMUX_PACKAGE_REPO_SPEC", DEFAULT_PACKAGE_REPO_SPEC)
+
+
+def package_install_target() -> str:
+    local_project_root = find_local_package_project_root()
+    if local_project_root is not None:
+        return str(local_project_root)
+    return package_repo_spec()
 
 
 def package_requirements_path(manifest: SourcePackageManifest) -> Path | None:
@@ -143,7 +154,19 @@ def _install_runtime_requirements(python_executable: Path) -> None:
 
 
 def _install_distribution_for_python(python_executable: str) -> None:
-    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", PACKAGE_REPO_SPEC], check=True)
+    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", package_install_target()], check=True)
+
+
+def find_local_package_project_root() -> Path | None:
+    env_path = Path(package_repo_spec()).expanduser()
+    if env_path.is_dir() and (env_path / "pyproject.toml").is_file():
+        return env_path.resolve()
+    current_path = Path(__file__).resolve()
+    for parent in current_path.parents:
+        candidate = parent / "QuoteMux_Packages"
+        if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
+            return candidate
+    return None
 
 
 def _installed_packages_fingerprint() -> str:

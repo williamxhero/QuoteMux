@@ -64,6 +64,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/adj", ("stocks.factors.adj",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/technical", ("stocks.factors.technical",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/indicators/money-flow", ("stocks.indicators.money_flow",)),
+    PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/batch", ("stocks.indicators.money_flow",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/ah-comparisons", ("stocks.indicators.ah_comparisons",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/daily-basic", ("stocks.indicators.daily_basic",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/daily-valuation", ("stocks.indicators.daily_valuation",)),
@@ -99,7 +100,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/reference/hk-connect-targets", ("stocks.reference.hk_connect_targets",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/quotes/auctions", ("stocks.quotes.auctions",)),
     PublicApiCapabilityBinding("/api/boards/quotes", ("boards.quotes.daily",)),
-    PublicApiCapabilityBinding("/api/boards/quotes/daily-snapshot", ("boards.quotes.daily.snapshot",)),
+    PublicApiCapabilityBinding("/api/boards/quotes/daily-snapshot", ("boards.quotes.daily",)),
     PublicApiCapabilityBinding("/api/boards/catalog", ("boards.catalog",)),
     PublicApiCapabilityBinding("/api/boards/{board_code}/profile", ("boards.profile",)),
     PublicApiCapabilityBinding("/api/boards/{board_code}/members", ("boards.members",)),
@@ -247,8 +248,10 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "stocks.quotes.intraday":
         return ("opentdx", "efinance", "mootdx", "akshare")
-    if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily"}:
+    if capability_id == "stocks.quotes.daily":
         return ("tushare", "efinance", "mootdx", "akshare", "opentdx")
+    if capability_id == "indexes.quotes.daily":
+        return ("tushare", "akshare", "mootdx", "opentdx")
     if capability_id == "stocks.quotes.daily_snapshot":
         return ("tushare", "efinance", "akshare", "mootdx")
     if capability_id in {"indexes.members"}:
@@ -257,8 +260,10 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("tushare", "akshare")
     if capability_id in {"stocks.indicators.money_flow", "boards.indicators.money_flow"}:
         return ("tushare", "akshare")
-    if capability_id in {"boards.catalog", "boards.profile", "boards.members", "boards.quotes.daily", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
+    if capability_id in {"boards.catalog", "boards.profile", "boards.members", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
         return ("tushare", "akshare")
+    if capability_id == "boards.quotes.daily":
+        return ("tushare", "efinance", "akshare")
     if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions"}:
         return ("tushare", "akshare")
     if capability_id == "markets.participants.dragon_tiger":
