@@ -75,7 +75,7 @@ def validate_instance(instance: SourceInstanceConfig, registry: SourcePackageReg
             issues.append(ValidationIssue("config_values", f"未知配置字段: {field_name}"))
     known_secret_fields = set(manifest.secret_fields)
     for field_name in instance.secret_values:
-        if field_name not in known_secret_fields:
+        if field_name not in known_secret_fields and field_name != "api_key":
             issues.append(ValidationIssue("secret_values", f"未知密钥字段: {field_name}"))
     _raise_if_needed(issues)
 

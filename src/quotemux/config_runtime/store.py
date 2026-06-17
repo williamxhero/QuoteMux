@@ -198,6 +198,8 @@ class RuntimeConfigStore:
     def _reconcile_instance(self, instance: SourceInstanceConfig, manifest: SourcePackageManifest) -> SourceInstanceConfig:
         config_values = {field.name: instance.config_values.get(field.name, field.default_value) for field in manifest.config_schema}
         secret_values = {field_name: instance.secret_values.get(field_name, "") for field_name in manifest.secret_fields}
+        if instance.secret_values.get("api_key", "") != "":
+            secret_values["api_key"] = instance.secret_values.get("api_key", "")
         if instance.package_id == "tushare" and "api_key" in secret_values and secret_values["api_key"] == "":
             secret_values["api_key"] = instance.secret_values.get("token", "")
         return replace(instance, config_values=config_values, secret_values=secret_values)
