@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from platform_models import BoardCatalogItem, BoardMemberItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
+from platform_models import BoardCatalogItem, BoardMemberItem, BoardQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_stock_intraday_frame
-from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_board_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_name_history_frame, load_trade_calendar_frame
+from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_latest_complete_board_daily_snapshot_codes, load_latest_complete_board_daily_snapshot_frame, load_stock_intraday_frame
+from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_board_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
 def _frame_to_stock_quote_items(frame: pd.DataFrame, freq: str):
@@ -56,6 +56,39 @@ def get_local_stock_intraday_quotes(codes: list[str], freq: str, trade_date: str
         for code_items in grouped.values():
             trimmed.extend(sorted(code_items, key=lambda item: item.trade_time)[-count:])
         return trimmed
+    return items
+
+
+def get_local_stock_hl_signal(code: str, trade_date: str, start_date: str, end_date: str) -> list[HLSignalItem]:
+    actual_code = normalize_stock_code(code)
+    if actual_code == "":
+        return []
+    frame = load_stock_hl_frame(actual_code, format_date_value(trade_date), format_date_value(start_date), format_date_value(end_date))
+    if frame.empty:
+        return []
+    items: list[HLSignalItem] = []
+    for _, row in frame.iterrows():
+        high_time = str(row["h_time"]) if pd.notna(row["h_time"]) else ""
+        low_time = str(row["l_time"]) if pd.notna(row["l_time"]) else ""
+        if high_time and low_time and high_time < low_time:
+            first_extreme = "high"
+            signal = "high_first"
+        elif high_time and low_time and low_time < high_time:
+            first_extreme = "low"
+            signal = "low_first"
+        else:
+            first_extreme = ""
+            signal = "same_time"
+        items.append(
+            HLSignalItem(
+                code=actual_code,
+                trade_date=format_date_value(row["trade_date"]),
+                first_extreme=first_extreme,
+                high_time=high_time,
+                low_time=low_time,
+                signal=signal,
+            )
+        )
     return items
 
 
@@ -142,6 +175,15 @@ def get_local_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> 
     if actual_trade_date == "":
         return []
     frame = load_board_daily_snapshot_frame(actual_trade_date, limit, offset)
+    return _frame_to_board_quote_items(frame)
+
+
+def get_latest_complete_board_daily_snapshot_codes(trade_date: str, limit: int, offset: int) -> list[str]:
+    return load_latest_complete_board_daily_snapshot_codes(format_date_value(trade_date), limit, offset)
+
+
+def get_latest_complete_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
+    frame = load_latest_complete_board_daily_snapshot_frame(format_date_value(trade_date), limit, offset)
     return _frame_to_board_quote_items(frame)
 
 

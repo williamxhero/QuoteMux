@@ -32,7 +32,10 @@ def load_builtin_manifests() -> tuple[SourcePackageManifest, ...]:
     if find_spec(BUILTIN_PACKAGE_MODULE) is None:
         return ()
     package_files = resources.files(BUILTIN_PACKAGE_MODULE)
-    package_ids = sorted(path.name for path in package_files.iterdir() if path.is_dir() and path.joinpath(MANIFEST_FILE_NAME).is_file())
+    try:
+        package_ids = sorted(path.name for path in package_files.iterdir() if path.is_dir() and path.joinpath(MANIFEST_FILE_NAME).is_file())
+    except FileNotFoundError:
+        return ()
     return tuple(_load_builtin_manifest(package_id) for package_id in package_ids)
 
 

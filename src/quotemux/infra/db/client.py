@@ -3,6 +3,7 @@
 from queue import Empty, Queue
 import os
 import threading
+import time
 
 import pandas as pd
 import psycopg
@@ -21,12 +22,26 @@ def _int_env(name: str, default: int) -> int:
 
 
 DB_POOL_SIZE = _int_env("MHK_DB_POOL_SIZE", 8)
+DB_FAILURE_COOLDOWN_SECONDS = 60.0
 _POOL: Queue[psycopg.Connection] = Queue(maxsize=max(1, DB_POOL_SIZE))
 _POOL_LOCK = threading.Lock()
 _POOL_CREATED = 0
 _POOL_ACTIVE = 0
 _POOL_REUSED = 0
 _POOL_DROPPED = 0
+_DB_UNAVAILABLE_UNTIL = 0.0
+_DB_UNAVAILABLE_LOCK = threading.Lock()
+
+
+def _db_available_for_attempt() -> bool:
+    with _DB_UNAVAILABLE_LOCK:
+        return time.monotonic() >= _DB_UNAVAILABLE_UNTIL
+
+
+def _mark_db_unavailable() -> None:
+    global _DB_UNAVAILABLE_UNTIL
+    with _DB_UNAVAILABLE_LOCK:
+        _DB_UNAVAILABLE_UNTIL = time.monotonic() + DB_FAILURE_COOLDOWN_SECONDS
 
 
 def _connect() -> psycopg.Connection:
@@ -119,9 +134,12 @@ def _query_dataframe_once(query: str, params: tuple[object, ...]) -> pd.DataFram
 
 
 def query_dataframe(query: str, params: tuple[object, ...] = ()) -> pd.DataFrame:
+    if not _db_available_for_attempt():
+        return pd.DataFrame()
     try:
         return call_provider_api("store_db", "query_dataframe", _query_dataframe_once, query, params)
     except Exception as exc:
+        _mark_db_unavailable()
         print(f"store db query failed: {exc}")
         return pd.DataFrame()
 
@@ -141,9 +159,12 @@ def _execute_sql_once(query: str, params: tuple[object, ...]) -> bool:
 
 
 def execute_sql(query: str, params: tuple[object, ...] = ()) -> bool:
+    if not _db_available_for_attempt():
+        return False
     try:
         return call_provider_api("store_db", "execute_sql", _execute_sql_once, query, params)
     except Exception as exc:
+        _mark_db_unavailable()
         print(f"store db execute failed: {exc}")
         return False
 
@@ -165,9 +186,12 @@ def _execute_many_once(query: str, params_list: list[tuple[object, ...]]) -> boo
 def execute_many(query: str, params_list: list[tuple[object, ...]]) -> bool:
     if not params_list:
         return True
+    if not _db_available_for_attempt():
+        return False
     try:
         return call_provider_api("store_db", "execute_many", _execute_many_once, query, params_list)
     except Exception as exc:
+        _mark_db_unavailable()
         print(f"store db batch execute failed: {exc}")
         return False
 

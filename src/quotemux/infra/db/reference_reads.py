@@ -132,19 +132,50 @@ def load_board_catalog_frame(status_filter: str) -> pd.DataFrame:
 
 def load_board_members_frame(board_code: str, trade_date: str) -> pd.DataFrame:
     query = """
+        with target_rows as (
+            select
+                m.board_code,
+                m.stock_market,
+                m.stock_code,
+                m.valid_from,
+                m.valid_to
+            from ref.board_stock_membership m
+            where m.board_code = %s
+              and m.valid_from <= %s
+              and (m.valid_to is null or m.valid_to >= %s)
+        ),
+        fallback_date as (
+            select max(m.valid_from) as valid_from
+            from ref.board_stock_membership m
+            where m.board_code = %s
+              and m.valid_from <= %s
+        ),
+        fallback_rows as (
+            select
+                m.board_code,
+                m.stock_market,
+                m.stock_code,
+                m.valid_from,
+                m.valid_to
+            from ref.board_stock_membership m
+            join fallback_date latest on latest.valid_from = m.valid_from
+            where m.board_code = %s
+              and not exists (select 1 from target_rows)
+        )
         select
             m.board_code,
             m.stock_code as code,
             coalesce(s.name, '') as name,
             m.valid_from::text as join_date
-        from ref.board_stock_membership m
+        from (
+            select * from target_rows
+            union all
+            select * from fallback_rows
+        ) m
         left join ref.stock s on s.market = m.stock_market and s.code = m.stock_code
-        where m.board_code = %s
-          and m.valid_from <= %s
-          and (m.valid_to is null or m.valid_to >= %s)
         order by m.stock_code
     """
-    return query_dataframe(query, (board_code, trade_date, trade_date))
+    return query_dataframe(query, (board_code, trade_date, trade_date, board_code, trade_date, board_code))
 
 
 def load_index_catalog_frame(index_codes: list[str]) -> pd.DataFrame:

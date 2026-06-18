@@ -6,8 +6,15 @@ from platform_models import NewsEventItem, NewsEventQueryResult, NewsEventSource
 from quotemux.infra.common import format_date_value
 from quotemux.infra.db.news_reads import load_news_event_frame, load_news_event_source_frame
 from quotemux.reports import ContractReport
+from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
+from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
 from quotemux.store import load_store_result, store_result
+
+
+def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
+    handler = get_default_source_package_registry().get_handler(package_id, handler_name)
+    return handler(*args)
 
 
 def _to_text_list(value: object) -> list[str]:
@@ -141,8 +148,64 @@ class QuoteMuxNews:
         if include_sources and items != []:
             sources = _read_news_event_sources([item.event_id for item in items])
             items = [item.model_copy(update={"sources": sources.get(item.event_id, [])}) for item in items]
+        if items == []:
+            items = self._read_provider_events(
+                trade_date,
+                announcement_date,
+                crawl_date,
+                stock_code,
+                event_type,
+                min_importance_score,
+                sort_by,
+                limit,
+                offset,
+                include_sources,
+                include_content_text,
+            )
         store_result("markets.events.news", store_identity, items, ContractReport(contract_name="markets.events.news"))
         return NewsEventQueryResult(events=items)
+
+    def _read_provider_events(
+        self,
+        trade_date: str,
+        announcement_date: str,
+        crawl_date: str,
+        stock_code: str,
+        event_type: str,
+        min_importance_score: int | None,
+        sort_by: str,
+        limit: int,
+        offset: int,
+        include_sources: bool,
+        include_content_text: bool,
+    ) -> list[NewsEventItem]:
+        handlers = {
+            "get_news_events": lambda instance: lambda: _source_package_call(
+                instance.package_id,
+                "get_news_events",
+                trade_date,
+                announcement_date,
+                crawl_date,
+                stock_code,
+                event_type,
+                min_importance_score,
+                sort_by,
+                limit,
+                offset,
+                include_sources,
+                include_content_text,
+            ),
+        }
+        provider_settings = QuoteMuxSettings(enabled_sources=("akshare",), contract_source_orders={"markets.events.news": ("akshare",)})
+        items, _ = run_fallback_chain_with_report(
+            "markets.events.news",
+            [],
+            ("event_id",),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(provider_settings).build_steps("markets.events.news", handlers, ("akshare",)),
+            ("akshare",),
+        )
+        return items
 
     def update_events_capture(
         self,

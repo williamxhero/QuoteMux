@@ -34,18 +34,18 @@ def _optional_update_assignments(existing_columns: set[str], column_names: tuple
 def _stock_market(code: str) -> str:
     if code.startswith("6"):
         return "SHSE"
-    if code.startswith(("4", "8")):
+    if code.startswith(("4", "8", "9")):
         return "BJSE"
     return "SZSE"
 
 
 def _exchange_to_ref(value: str) -> str:
     text = value.upper()
-    if text in {"SSE", "SH", "SHSE"}:
+    if text in {"SSE", "SH", "SHSE", "STAR_MARKET"}:
         return "SHSE"
-    if text in {"SZSE", "SZ"}:
+    if text in {"SZSE", "SZ", "CHI_NEXT"}:
         return "SZSE"
-    if text in {"BSE", "BJ", "BJSE"}:
+    if text in {"BSE", "BJ", "BJSE", "BEIJING"}:
         return "BJSE"
     return value
 
@@ -295,13 +295,17 @@ def _upsert_board_catalog(items: Sequence[BoardCatalogItem]) -> bool:
 
 def _upsert_board_members(items: Sequence[BoardMemberItem]) -> bool:
     params: list[tuple[object, ...]] = []
+    stock_params: list[tuple[object, ...]] = []
     for item in items:
         code = normalize_stock_code(item.code).zfill(6)
         if item.board_code == "" or code == "":
             continue
+        market = _stock_market(code)
         valid_from = format_date_value(item.join_date) or "1900-01-01"
-        params.append((item.board_code, _stock_market(code), code, valid_from, item.weight))
-    return execute_many(
+        params.append((item.board_code, market, code, valid_from, item.weight))
+        if item.name != "":
+            stock_params.append((market, code, item.name))
+    members_ok = execute_many(
         """
         insert into ref.board_stock_membership (board_code, stock_market, stock_code, valid_from, valid_to, weight)
         values (%s, %s, %s, %s::date, null, %s)
@@ -312,6 +316,17 @@ def _upsert_board_members(items: Sequence[BoardMemberItem]) -> bool:
         """,
         params,
     )
+    names_ok = execute_many(
+        """
+        insert into ref.stock (market, code, name)
+        values (%s, %s, %s)
+        on conflict (market, code) do update set
+            name = case when ref.stock.name = '' then excluded.name else ref.stock.name end,
+            updated_at = now()
+        """,
+        stock_params,
+    )
+    return members_ok and names_ok
 
 
 def _upsert_board_member_history(items: Sequence[BoardMemberHistoryItem]) -> bool:

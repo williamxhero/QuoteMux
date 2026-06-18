@@ -7,7 +7,7 @@ from quotemux.infra.common import build_time_bounds, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_index_catalog, get_local_index_profile, get_local_index_quotes
+from quotemux.local_store import get_local_index_catalog, get_local_index_profile, get_local_index_quotes, get_local_stock_catalog
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
@@ -162,6 +162,24 @@ def _merge_index_members(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
     return sorted(merged.values(), key=lambda item: (item.code, item.trade_date))
 
 
+def _fill_index_member_names(items: list[IndexMemberItem]) -> list[IndexMemberItem]:
+    missing_codes = sorted({item.code for item in items if item.name == ""})
+    if missing_codes == []:
+        return items
+    stock_names = {item.code: item.name for item in get_local_stock_catalog(missing_codes, "", "", "", True) if item.name != ""}
+    if stock_names == {}:
+        return items
+    return [item.model_copy(update={"name": stock_names.get(item.code, item.name)}) if item.name == "" else item for item in items]
+
+
+def _build_index_member_requests(index_code: str, trade_date: str, current_items: list[IndexMemberItem]) -> list[tuple[str, str]]:
+    if current_items == []:
+        return [(index_code, trade_date)]
+    if any(item.name == "" for item in current_items):
+        return [(index_code, trade_date)]
+    return []
+
+
 def _filter_usable_local_index_items(items: list[IndexQuoteItem], freq: str) -> list[IndexQuoteItem]:
     if freq != "1d":
         return items
@@ -290,7 +308,7 @@ class QuoteMuxIndexes:
                 model_type=IndexMemberItem,
                 key_fields=("index_code", "code"),
                 sort_fields=("code", "trade_date"),
-                request_builder=lambda current_items: [(request.index_code, request.trade_date)] if current_items == [] else [],
+                request_builder=lambda current_items: _build_index_member_requests(request.index_code, request.trade_date, current_items),
                 provider_steps=lambda: _build_member_steps(self._settings),
                 source_order=self._settings.get_contract_source_order("indexes.members", ("tushare", "efinance", "mootdx", "akshare")),
             )
@@ -298,5 +316,6 @@ class QuoteMuxIndexes:
         normalized_items = _merge_index_members(merged_items)
         if normalized_items == []:
             return [], report
-        result = [item.model_copy(update={"trade_date": request.trade_date}) if item.trade_date == "" and request.trade_date != "" else item for item in normalized_items]
+        named_items = _fill_index_member_names(normalized_items)
+        result = [item.model_copy(update={"trade_date": request.trade_date}) if item.trade_date == "" and request.trade_date != "" else item for item in named_items]
         return result, report

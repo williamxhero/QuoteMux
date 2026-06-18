@@ -260,13 +260,17 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("tushare", "efinance", "mootdx", "akshare")
     if capability_id.startswith("markets.calendar."):
         return ("tushare", "akshare")
-    if capability_id in {"stocks.indicators.money_flow", "boards.indicators.money_flow"}:
+    if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
         return ("tushare", "akshare")
-    if capability_id in {"boards.catalog", "boards.profile", "boards.members", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
+    if capability_id == "boards.indicators.money_flow":
+        return ("tushare", "akshare", "derived_core")
+    if capability_id == "boards.members":
+        return ("derived_core", "tushare", "akshare")
+    if capability_id in {"boards.catalog", "boards.profile", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
         return ("tushare", "akshare")
     if capability_id == "boards.quotes.daily":
         return ("tushare", "efinance", "akshare")
-    if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions"}:
+    if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions", "markets.participants.hot_money.details", "markets.trading.open_auctions", "stocks.quotes.auctions"}:
         return ("tushare", "akshare")
     if capability_id == "markets.participants.dragon_tiger":
         return ("tushare", "akshare", "efinance")
@@ -298,13 +302,12 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "markets.connect.quotas":
         return ("tushare",)
     if capability_id == "markets.events.news":
-        return ()
+        return ("akshare",)
     if capability_id in {
         "stocks.catalog",
         "stocks.profile.basic",
         "stocks.profile.name_history",
         "stocks.factors.adj",
-        "boards.quotes.daily",
         "boards.catalog",
         "boards.profile",
         "boards.members",
@@ -315,6 +318,8 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "indexes.profile",
         "markets.trading.sessions",
     }:
+        if capability_id == "boards.members":
+            return ("derived_core", "tushare", "akshare")
         return ("tushare",)
     return ("tushare",)
 

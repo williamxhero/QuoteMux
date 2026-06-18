@@ -16,10 +16,13 @@ from quotemux.config_runtime.models import SourceInstanceConfig
 from quotemux.source_packages.instance_context import use_source_instance
 
 
+WORKER_RESPONSE_PREFIX = b"__QUOTEMUX_WORKER_RESPONSE__"
+
+
 def main() -> None:
     request = pickle.loads(sys.stdin.buffer.read())
     response = _run_request(request)
-    sys.stdout.buffer.write(base64.b64encode(pickle.dumps(response)))
+    sys.stdout.buffer.write(WORKER_RESPONSE_PREFIX + base64.b64encode(pickle.dumps(response)) + b"\n")
 
 
 def _run_request(request: dict[str, object]) -> dict[str, object]:

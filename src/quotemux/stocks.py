@@ -10,7 +10,7 @@ from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.local_daily import get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
-from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_name_history
+from quotemux.local_store import get_local_stock_catalog, get_local_stock_hl_signal, get_local_stock_intraday_quotes, get_local_stock_name_history
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
@@ -21,6 +21,7 @@ from quotemux.settings import QuoteMuxSettings
 
 MAX_DAILY_INDICATOR_CODES = 200
 QUOTE_REQUEST_CODE_BATCH_SIZE = 10
+MONEY_FLOW_REQUEST_CODE_BATCH_SIZE = 10
 
 
 def _today_text() -> str:
@@ -99,6 +100,10 @@ def _expected_trade_dates(start_date: str, end_date: str, settings: QuoteMuxSett
 
 def _chunk_quote_codes(codes: list[str]) -> list[list[str]]:
     return [codes[index: index + QUOTE_REQUEST_CODE_BATCH_SIZE] for index in range(0, len(codes), QUOTE_REQUEST_CODE_BATCH_SIZE)]
+
+
+def _chunk_money_flow_codes(codes: list[str]) -> list[list[str]]:
+    return [codes[index: index + MONEY_FLOW_REQUEST_CODE_BATCH_SIZE] for index in range(0, len(codes), MONEY_FLOW_REQUEST_CODE_BATCH_SIZE)]
 
 
 def _build_quote_range_requests(grouped_ranges: dict[tuple[str, str], list[str]]) -> list[tuple[list[str], str, str]]:
@@ -275,7 +280,6 @@ def _should_return_local_daily(request: StockQuotesRequest, missing_requests: li
         return True
     if not _has_explicit_quote_window(request):
         return False
-    # 鐩樹腑鎴栨湭鏉ユ棩鏈熷皻鏃犳棩绾挎敹鐩樻暟鎹椂锛屼笉鑳戒负浜嗚ˉ褰撳ぉ绌虹己杩涘叆鎱?Store 鎴栧閮ㄦ簮閾捐矾銆?
     return _missing_ranges_are_current_or_future(missing_requests)
 
 
@@ -617,6 +621,7 @@ class QuoteMuxStocks:
                 source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
                 base_items=local_items,
                 base_source_name="fact.stock_daily_1d",
+                fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
             )
         )
         filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
@@ -678,9 +683,22 @@ class QuoteMuxStocks:
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         if not code_list:
             return []
+        normalized_codes = [code for code in (normalize_stock_code(code) for code in code_list) if code]
+        requested_codes = set(normalized_codes)
+        actual_trade_date = format_date_value(trade_date)
+
+        def build_missing_batch_requests(current_items: list[StockMoneyFlowItem]) -> list[tuple[object, ...]]:
+            existing_codes = {
+                item.code
+                for item in current_items
+                if item.trade_date == actual_trade_date and item.view == view
+            }
+            missing_codes = [code for code in normalized_codes if code not in existing_codes]
+            return [(code_batch,) for code_batch in _chunk_money_flow_codes(missing_codes)]
+
         store_identity = {"codes": ",".join(code_list), "trade_date": trade_date, "view": view}
         handlers = {
-            "get_stock_money_flow_batch": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_money_flow_batch", ",".join(code_list), trade_date, view),
+            "get_stock_money_flow_batch": lambda instance: lambda code_batch: _source_package_call(instance.package_id, "get_stock_money_flow_batch", ",".join(code_batch), trade_date, view),
         }
         sorted_items, _ = execute_capability_query(
             CapabilityQuerySpec(
@@ -689,12 +707,12 @@ class QuoteMuxStocks:
                 model_type=StockMoneyFlowItem,
                 key_fields=("code", "trade_date", "view"),
                 sort_fields=("code", "trade_date"),
-                request_builder=lambda current_items: [()] if current_items == [] else [],
+                request_builder=build_missing_batch_requests,
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow.batch", handlers, ("tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("stocks.indicators.money_flow.batch", ("tushare", "akshare")),
             )
         )
-        return sorted_items
+        return [item for item in sorted_items if item.code in requested_codes and item.trade_date == actual_trade_date and item.view == view]
 
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
         store_identity = {
@@ -889,7 +907,7 @@ class QuoteMuxStocks:
             HLSignalItem,
             ("code", "trade_date", "signal", "first_extreme"),
             ("code", "trade_date", "signal"),
-            lambda: self._source_list("stocks.signals.hl", handlers, ("derived_core",), ("code", "trade_date", "signal", "first_extreme")),
+            lambda: get_local_stock_hl_signal(normalized, trade_date, start_date, end_date) or self._source_list("stocks.signals.hl", handlers, ("derived_core",), ("code", "trade_date", "signal", "first_extreme")),
         )
 
     def get_nine_turn(self, code: str, freq: str, trade_date: str, start_date: str, end_date: str) -> list[NineTurnItem]:
@@ -903,7 +921,7 @@ class QuoteMuxStocks:
             NineTurnItem,
             ("code", "trade_time", "freq"),
             ("code", "trade_time", "freq"),
-            lambda: self._source_list("stocks.signals.nine_turn", handlers, ("tushare",), ("code", "trade_time", "freq")),
+            lambda: self._source_list("stocks.signals.nine_turn", handlers, ("tushare", "derived_core"), ("code", "trade_time", "freq")),
         )
 
     def get_adj_factors(self, code: str, start_date: str, end_date: str, base_date: str) -> list[AdjFactorItem]:
@@ -1402,5 +1420,5 @@ class QuoteMuxStocks:
             AuctionItem,
             ("code", "trade_date", "auction_time", "session"),
             ("trade_date", "code", "auction_time"),
-            lambda: self._source_list("stocks.quotes.auctions", handlers, ("tushare",), ("code", "trade_date", "auction_time", "session")),
+            lambda: self._source_list("stocks.quotes.auctions", handlers, ("tushare", "akshare"), ("code", "trade_date", "auction_time", "session")),
         )

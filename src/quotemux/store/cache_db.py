@@ -3,6 +3,7 @@ from __future__ import annotations
 from queue import Empty, Queue
 import os
 import threading
+import time
 
 import pandas as pd
 import psycopg
@@ -26,6 +27,7 @@ CACHE_DB_NAME = os.getenv("QUOTEMUX_CACHE_DB_NAME", os.getenv("MARKETHUB_DB_NAME
 CACHE_DB_USER = os.getenv("QUOTEMUX_CACHE_DB_USER", DB_USER)
 CACHE_DB_PASSWORD = os.getenv("QUOTEMUX_CACHE_DB_PASSWORD", DB_PASSWORD)
 CACHE_DB_POOL_SIZE = _int_env("QUOTEMUX_CACHE_DB_POOL_SIZE", 8)
+CACHE_DB_FAILURE_COOLDOWN_SECONDS = 60.0
 
 _POOL: Queue[psycopg.Connection] = Queue(maxsize=max(1, CACHE_DB_POOL_SIZE))
 _POOL_LOCK = threading.Lock()
@@ -33,6 +35,19 @@ _POOL_CREATED = 0
 _POOL_ACTIVE = 0
 _POOL_REUSED = 0
 _POOL_DROPPED = 0
+_CACHE_DB_UNAVAILABLE_UNTIL = 0.0
+_CACHE_DB_UNAVAILABLE_LOCK = threading.Lock()
+
+
+def _cache_db_available_for_attempt() -> bool:
+    with _CACHE_DB_UNAVAILABLE_LOCK:
+        return time.monotonic() >= _CACHE_DB_UNAVAILABLE_UNTIL
+
+
+def _mark_cache_db_unavailable() -> None:
+    global _CACHE_DB_UNAVAILABLE_UNTIL
+    with _CACHE_DB_UNAVAILABLE_LOCK:
+        _CACHE_DB_UNAVAILABLE_UNTIL = time.monotonic() + CACHE_DB_FAILURE_COOLDOWN_SECONDS
 
 
 def _connect() -> psycopg.Connection:
@@ -125,9 +140,12 @@ def _query_dataframe_once(query: str, params: tuple[object, ...]) -> pd.DataFram
 
 
 def query_dataframe(query: str, params: tuple[object, ...] = ()) -> pd.DataFrame:
+    if not _cache_db_available_for_attempt():
+        return pd.DataFrame()
     try:
         return call_provider_api("quotemux_cache_db", "query_dataframe", _query_dataframe_once, query, params)
     except Exception as exc:
+        _mark_cache_db_unavailable()
         print(f"quotemux cache db query failed: {exc}")
         return pd.DataFrame()
 
@@ -147,9 +165,12 @@ def _execute_sql_once(query: str, params: tuple[object, ...]) -> bool:
 
 
 def execute_sql(query: str, params: tuple[object, ...] = ()) -> bool:
+    if not _cache_db_available_for_attempt():
+        return False
     try:
         return call_provider_api("quotemux_cache_db", "execute_sql", _execute_sql_once, query, params)
     except Exception as exc:
+        _mark_cache_db_unavailable()
         print(f"quotemux cache db execute failed: {exc}")
         return False
 
@@ -171,9 +192,12 @@ def _execute_many_once(query: str, params_list: list[tuple[object, ...]]) -> boo
 def execute_many(query: str, params_list: list[tuple[object, ...]]) -> bool:
     if not params_list:
         return True
+    if not _cache_db_available_for_attempt():
+        return False
     try:
         return call_provider_api("quotemux_cache_db", "execute_many", _execute_many_once, query, params_list)
     except Exception as exc:
+        _mark_cache_db_unavailable()
         print(f"quotemux cache db batch execute failed: {exc}")
         return False
 

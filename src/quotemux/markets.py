@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from platform_models import AuctionItem, BlockTradeItem, ConnectActiveTop10Item, ConnectCapitalFlowItem, ConnectQuotaItem, DragonTigerInstitutionItem, DragonTigerItem, HotMoneyDetailItem, HotMoneyProfileItem, MarketCapitalFlowItem, TradingCalendarItem, TradingSessionItem
-from quotemux.infra.common import parse_date_text
+from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.common import ensure_limit
 from quotemux.fact_ref_writes import get_fact_ref_writer
@@ -60,7 +60,7 @@ def _build_market_flow_requests(items: list[MarketCapitalFlowItem], trade_date: 
     actual_trade_date = trade_date or (start_date if start_date != "" and start_date == end_date else "")
     if actual_trade_date == "":
         return [()] if items == [] else []
-    complete = any(item.trade_date == actual_trade_date and item.net_inflow is not None and (item.main_inflow is not None or item.main_outflow is not None) for item in items)
+    complete = any(item.trade_date == actual_trade_date and item.net_inflow is not None and item.main_inflow is not None and item.main_outflow is not None for item in items)
     return [] if complete else [()]
 
 
@@ -68,14 +68,38 @@ def _build_connect_flow_requests(items: list[ConnectCapitalFlowItem], trade_date
     actual_trade_date = trade_date or (start_date if start_date != "" and start_date == end_date else "")
     if actual_trade_date == "":
         return [()] if items == [] else []
-    complete = any(item.trade_date == actual_trade_date and item.market == "northbound" and item.net_amount is not None for item in items)
+    complete = any(item.trade_date == actual_trade_date and item.market == "northbound" and item.net_amount is not None and item.buy_amount is not None and item.sell_amount is not None for item in items)
     return [] if complete else [()]
+
+
+def _build_named_event_requests(items: list[object]) -> list[tuple[object, ...]]:
+    if items == []:
+        return [()]
+    if any(getattr(item, "name", "") == "" for item in items):
+        return [()]
+    return []
+
+
+def _dedupe_market_flow_items(items: list[MarketCapitalFlowItem]) -> list[MarketCapitalFlowItem]:
+    keyed_items = {(format_date_value(item.trade_date), item.market): item.model_copy(update={"trade_date": format_date_value(item.trade_date)}) for item in items}
+    return [keyed_items[key] for key in sorted(keyed_items)]
+
+
+def _sum_optional_values(first: float | None, second: float | None) -> float | None:
+    if first is None or second is None:
+        return None
+    return first + second
+
+
+def _dedupe_connect_flow_items(items: list[ConnectCapitalFlowItem]) -> list[ConnectCapitalFlowItem]:
+    keyed_items = {(format_date_value(item.trade_date), item.market): item.model_copy(update={"trade_date": format_date_value(item.trade_date)}) for item in items}
+    return [keyed_items[key] for key in sorted(keyed_items)]
 
 
 def _connect_flow_source_order(settings: QuoteMuxSettings) -> tuple[str, ...]:
     if settings.enabled_sources != ():
         return tuple(source_name for source_name in ("tushare", "akshare") if source_name in settings.enabled_sources)
-    return ("tushare",)
+    return ("tushare", "akshare")
 
 
 class QuoteMuxMarkets:
@@ -135,7 +159,7 @@ class QuoteMuxMarkets:
                 source_order=self._settings.get_contract_source_order("markets.indicators.main_capital_flow", ("tushare", "akshare")),
             )
         )
-        return items
+        return _dedupe_market_flow_items(items)
 
     def get_trading_calendar(self, request: TradingCalendarRequest) -> list[TradingCalendarItem]:
         items, _ = self.get_trading_calendar_with_report(request)
@@ -175,13 +199,14 @@ class QuoteMuxMarkets:
         handlers = {
             "get_previous_trading_days": lambda instance: lambda: _source_package_call(instance.package_id, "get_previous_trading_days", request.exchange, request.trade_date, request.n),
         }
+        derived_settings = QuoteMuxSettings(enabled_sources=("derived_core",))
         items, _ = run_fallback_chain_with_report(
             "markets.calendar.trading.previous",
             [],
             ("exchange", "trade_date"),
             lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading.previous", handlers, ("derived_core",)),
-            self._settings.get_contract_source_order("markets.calendar.trading.previous", ("derived_core",)),
+            SourceInstanceExecutor(derived_settings).build_steps("markets.calendar.trading.previous", handlers, ("derived_core",)),
+            ("derived_core",),
         )
         return items
 
@@ -189,13 +214,14 @@ class QuoteMuxMarkets:
         handlers = {
             "get_next_trading_days": lambda instance: lambda: _source_package_call(instance.package_id, "get_next_trading_days", request.exchange, request.trade_date, request.n),
         }
+        derived_settings = QuoteMuxSettings(enabled_sources=("derived_core",))
         items, _ = run_fallback_chain_with_report(
             "markets.calendar.trading.next",
             [],
             ("exchange", "trade_date"),
             lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading.next", handlers, ("derived_core",)),
-            self._settings.get_contract_source_order("markets.calendar.trading.next", ("derived_core",)),
+            SourceInstanceExecutor(derived_settings).build_steps("markets.calendar.trading.next", handlers, ("derived_core",)),
+            ("derived_core",),
         )
         return items
 
@@ -203,13 +229,14 @@ class QuoteMuxMarkets:
         handlers = {
             "get_yearly_trading_calendar": lambda instance: lambda: _source_package_call(instance.package_id, "get_yearly_trading_calendar", request.exchange, request.start_year, request.end_year),
         }
+        derived_settings = QuoteMuxSettings(enabled_sources=("derived_core",))
         items, _ = run_fallback_chain_with_report(
             "markets.calendar.trading.yearly",
             [],
             ("exchange", "trade_date"),
             lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading.yearly", handlers, ("derived_core",)),
-            self._settings.get_contract_source_order("markets.calendar.trading.yearly", ("derived_core",)),
+            SourceInstanceExecutor(derived_settings).build_steps("markets.calendar.trading.yearly", handlers, ("derived_core",)),
+            ("derived_core",),
         )
         return items
 
@@ -218,7 +245,8 @@ class QuoteMuxMarkets:
         handlers = {
             "get_connect_capital_flow": lambda instance: lambda: _source_package_call(instance.package_id, "get_connect_capital_flow", trade_date, start_date, end_date),
         }
-        source_order = _connect_flow_source_order(self._settings)
+        package_order = _connect_flow_source_order(self._settings)
+        source_order = self._settings.get_contract_source_order("markets.connect.capital_flow", package_order)
         items, _ = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="markets.connect.capital_flow",
@@ -227,11 +255,11 @@ class QuoteMuxMarkets:
                 key_fields=("market", "trade_date"),
                 sort_fields=("trade_date", "market"),
                 request_builder=lambda current_items: _build_connect_flow_requests(current_items, trade_date, start_date, end_date),
-                provider_steps=lambda: tuple(step for step in SourceInstanceExecutor(self._settings).build_steps("markets.connect.capital_flow", handlers, source_order) if step.name in source_order),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.connect.capital_flow", handlers, package_order),
                 source_order=source_order,
             )
         )
-        return items
+        return _dedupe_connect_flow_items(items)
 
     def get_connect_quotas(self, trade_date: str, start_date: str, end_date: str, market_type: str) -> list[ConnectQuotaItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "market_type": market_type}
@@ -267,15 +295,19 @@ class QuoteMuxMarkets:
         handlers = {
             "get_block_trades": lambda instance: lambda: _source_package_call(instance.package_id, "get_block_trades", trade_date, start_date, end_date, code, ensure_limit(limit)),
         }
-        items = self._store_list(
-            "markets.events.block_trades",
-            store_identity,
-            BlockTradeItem,
-            ("trade_date", "code", "buyer", "seller"),
-            ("trade_date", "code", "buyer", "seller"),
-            lambda: self._source_list("markets.events.block_trades", handlers, ("tushare", "akshare"), ("trade_date", "code", "buyer", "seller")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="markets.events.block_trades",
+                store_identity=store_identity,
+                model_type=BlockTradeItem,
+                key_fields=("trade_date", "code", "buyer", "seller"),
+                sort_fields=("trade_date", "code", "buyer", "seller"),
+                request_builder=_build_named_event_requests,
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.events.block_trades", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("markets.events.block_trades", ("tushare", "akshare")),
+            )
         )
-        return items[: ensure_limit(limit)]
+        return list(items)[: ensure_limit(limit)]
 
     def get_dragon_tiger(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[DragonTigerItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "code": code, "limit": limit}
@@ -336,7 +368,7 @@ class QuoteMuxMarkets:
             HotMoneyDetailItem,
             ("trade_date", "name", "code"),
             ("trade_date", "name", "code"),
-            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("tushare",), ("trade_date", "name", "code")),
+            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("tushare", "akshare"), ("trade_date", "name", "code")),
         )
         return items[offset: offset + ensure_limit(limit)]
 
@@ -351,7 +383,7 @@ class QuoteMuxMarkets:
             AuctionItem,
             ("code", "trade_date", "auction_time", "session"),
             ("trade_date", "code", "auction_time"),
-            lambda: self._source_list("markets.trading.open_auctions", handlers, ("tushare",), ("code", "trade_date", "auction_time", "session")),
+            lambda: self._source_list("markets.trading.open_auctions", handlers, ("tushare", "akshare"), ("code", "trade_date", "auction_time", "session")),
         )
 
     def get_sessions(self, codes: str) -> list[TradingSessionItem]:
@@ -363,8 +395,8 @@ class QuoteMuxMarkets:
             "markets.trading.sessions",
             store_identity,
             TradingSessionItem,
-            ("market", "session"),
-            ("market", "session"),
-            lambda: self._source_list("markets.trading.sessions", handlers, ("tushare",), ("market", "session")),
+            ("code", "session_name", "start_time"),
+            ("code", "start_time", "session_name"),
+            lambda: self._source_list("markets.trading.sessions", handlers, ("tushare",), ("code", "session_name", "start_time")),
             _payloads_with_as_of_date,
         )

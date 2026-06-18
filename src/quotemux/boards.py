@@ -6,7 +6,7 @@ from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHist
 from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_members, get_local_board_profile, get_local_board_quotes
+from quotemux.local_store import get_latest_complete_board_daily_snapshot_codes, get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_members, get_local_board_profile, get_local_board_quotes
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -122,11 +122,66 @@ def _build_missing_quote_requests(board_codes: list[str], items: list[BoardQuote
 
 
 def _has_complete_board_quote_metrics(item: BoardQuoteItem) -> bool:
-    return item.pre_close is not None and item.pct_chg is not None
+    return item.close is not None and item.pre_close is not None and item.pct_chg is not None and item.amount is not None
 
 
 def _has_complete_board_daily_snapshot(items: list[BoardQuoteItem]) -> bool:
     return items != [] and all(_has_complete_board_quote_metrics(item) for item in items)
+
+
+def _has_board_snapshot_metrics(item: BoardQuoteItem) -> bool:
+    return item.pct_chg is not None and item.amount is not None
+
+
+def _has_board_snapshot_metrics_for_codes(items: list[BoardQuoteItem], board_codes: list[str]) -> bool:
+    if board_codes == []:
+        return items != []
+    complete_codes = {item.board_code for item in items if _has_board_snapshot_metrics(item)}
+    return all(board_code in complete_codes for board_code in board_codes)
+
+
+def _has_complete_board_daily_snapshot_for_codes(items: list[BoardQuoteItem], board_codes: list[str]) -> bool:
+    if board_codes == []:
+        return items != []
+    complete_codes = {item.board_code for item in items if _has_complete_board_quote_metrics(item)}
+    return all(board_code in complete_codes for board_code in board_codes)
+
+
+def _merge_board_snapshot_items(primary_items: list[BoardQuoteItem], fallback_items: list[BoardQuoteItem]) -> list[BoardQuoteItem]:
+    merged_by_code = {item.board_code: item for item in primary_items if _has_board_snapshot_metrics(item)}
+    for item in fallback_items:
+        if _has_board_snapshot_metrics(item) and item.board_code not in merged_by_code:
+            merged_by_code[item.board_code] = item
+    return list(merged_by_code.values())
+
+
+def _local_bk_board_codes(limit: int, offset: int) -> list[str]:
+    items = get_local_board_catalog("active")
+    codes = [item.board_code for item in items if item.board_code.startswith("BK")]
+    return codes[offset: offset + limit]
+
+
+def _build_board_member_requests(current_items: list[BoardMemberItem]) -> list[tuple[object, ...]]:
+    if current_items == []:
+        return [()]
+    if any(item.name == "" for item in current_items):
+        return [()]
+    return []
+
+
+def _load_money_flow_snapshot_item(board_code: str, trade_date: str, scope: str) -> list[BoardMoneyFlowItem]:
+    actual_trade_date = format_date_value(trade_date)
+    if board_code == "" or actual_trade_date == "":
+        return []
+    items, read_result = load_store_result(
+        "boards.indicators.money_flow.snapshot",
+        {"board_code": "", "trade_date": actual_trade_date, "scope": scope},
+        BoardMoneyFlowItem,
+    )
+    if not read_result.hit and not read_result.partial_hit:
+        return []
+    normalized_board_code = board_code.upper()
+    return [item for item in items if item.board_code.upper() == normalized_board_code and item.trade_date == actual_trade_date and item.scope == scope]
 
 
 class QuoteMuxBoards:
@@ -166,12 +221,15 @@ class QuoteMuxBoards:
     ) -> list[BoardQuoteItem]:
         if freq == "1d" and trade_date != "" and start_date == "" and end_date == "" and start_time == "" and end_time == "" and count is None:
             local_items = get_local_board_quotes(board_codes, freq, trade_date, "", "", None)
-            if _has_complete_board_daily_snapshot(local_items):
+            if _has_complete_board_daily_snapshot_for_codes(local_items, board_codes):
                 return sorted(local_items, key=lambda item: (item.board_code, item.trade_time))[: ensure_limit(limit)]
         store_identity = {"board_codes": list(board_codes), "freq": freq, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "start_time": start_time, "end_time": end_time, "count": count}
         handlers = {
             "get_board_quotes": lambda instance: lambda request_board_codes, missing_start, missing_end: _source_package_call(instance.package_id, "get_board_quotes", request_board_codes, freq, "", missing_start, missing_end, start_time, end_time, count),
         }
+        local_items = get_local_board_quotes(board_codes, freq, trade_date, start_date, end_date, count)
+        if freq == "1d":
+            local_items = [item for item in local_items if _has_complete_board_quote_metrics(item)]
         items, _ = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="boards.quotes.daily",
@@ -182,7 +240,7 @@ class QuoteMuxBoards:
                 request_builder=lambda current_items: _build_missing_quote_requests(board_codes, current_items, freq, trade_date, start_date, end_date, count, self._settings),
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.quotes.daily", handlers, ("tushare", "efinance", "akshare")),
                 source_order=self._settings.get_contract_source_order("boards.quotes.daily", ("tushare", "efinance", "akshare")),
-                base_items=get_local_board_quotes(board_codes, freq, trade_date, start_date, end_date, count),
+                base_items=local_items,
                 base_source_name="fact.board_daily_1d",
                 fact_ref_writer=get_fact_ref_writer("boards.quotes.daily") if freq == "1d" else None,
             )
@@ -254,9 +312,9 @@ class QuoteMuxBoards:
                 model_type=BoardMemberItem,
                 key_fields=("board_code", "code"),
                 sort_fields=("board_code", "code"),
-                request_builder=lambda current_items: [()] if current_items == [] else [],
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.members", handlers, ("tushare", "akshare")),
-                source_order=self._settings.get_contract_source_order("boards.members", ("tushare", "akshare")),
+                request_builder=_build_board_member_requests,
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.members", handlers, ("derived_core", "tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("boards.members", ("derived_core", "tushare", "akshare")),
                 base_items=get_local_board_members(board_code, trade_date),
                 base_source_name="ref.board_stock_membership",
                 payload_builder=lambda payload_items: _board_member_store_payloads(payload_items, trade_date),
@@ -286,6 +344,9 @@ class QuoteMuxBoards:
         return items
 
     def get_money_flow(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
+        snapshot_items = _load_money_flow_snapshot_item(board_code, trade_date, scope)
+        if snapshot_items != []:
+            return sorted(snapshot_items, key=lambda item: (item.board_code, item.trade_date))
         store_identity = {"board_code": board_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "scope": scope}
         handlers = {
             "get_board_money_flow": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_board_money_flow", board_code, trade_date, missing_start, missing_end, scope),
@@ -298,12 +359,28 @@ class QuoteMuxBoards:
                 key_fields=("board_code", "trade_date", "scope"),
                 sort_fields=("board_code", "trade_date"),
                 request_builder=lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare")),
-                source_order=self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare")),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare", "derived_core")),
+                source_order=self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare", "derived_core")),
                 base_items=[],
                 base_source_name="",
             )
         )
+        if sorted_items == [] and board_code.upper().startswith("BK"):
+            derived_items = _source_package_call("derived_core", "get_board_money_flow", board_code, trade_date, start_date, end_date, scope)
+            if isinstance(derived_items, list):
+                typed_items = [item for item in derived_items if isinstance(item, BoardMoneyFlowItem)]
+                if typed_items != []:
+                    store_result(
+                        "boards.indicators.money_flow",
+                        store_identity,
+                        typed_items,
+                        ContractReport(
+                            contract_name="boards.indicators.money_flow",
+                            source_hit_counts={"derived_core": 1},
+                            source_request_counts={"derived_core": 1},
+                        ),
+                    )
+                return sorted(typed_items, key=lambda item: (item.board_code, item.trade_date))
         return sorted_items
 
     def get_market_money_flow(self, trade_date: str, scope: str, limit: int, offset: int) -> list[BoardMoneyFlowItem]:
@@ -332,9 +409,28 @@ class QuoteMuxBoards:
             return []
         actual_limit = ensure_limit(limit)
         local_items = get_local_board_daily_snapshot(actual_trade_date, actual_limit, offset)
-        if local_items:
+        board_codes = _local_bk_board_codes(actual_limit, offset)
+        if board_codes == []:
+            board_codes = get_latest_complete_board_daily_snapshot_codes(actual_trade_date, actual_limit, offset)
+        if board_codes == []:
+            catalog_items = self.get_catalog("", "", "active", actual_limit, offset)
+            board_codes = [item.board_code for item in catalog_items]
+        if board_codes == []:
+            return []
+        if _has_complete_board_daily_snapshot_for_codes(local_items, board_codes):
             return sorted(local_items, key=lambda item: item.board_code)
-        return []
+        quote_items = self.get_quotes(board_codes, "1d", actual_trade_date, "", "", "", "", None, actual_limit)
+        if _has_complete_board_daily_snapshot_for_codes(quote_items, board_codes):
+            return sorted(quote_items, key=lambda item: item.board_code)
+        merged_items = _merge_board_snapshot_items(local_items, quote_items)
+        missing_codes = [board_code for board_code in board_codes if board_code not in {item.board_code for item in merged_items}]
+        if missing_codes:
+            derived_items = _source_package_call("derived_core", "get_board_quotes", missing_codes, "1d", actual_trade_date, "", "", "", "", None)
+            if isinstance(derived_items, list):
+                merged_items = _merge_board_snapshot_items(merged_items, derived_items)
+        if _has_board_snapshot_metrics_for_codes(merged_items, board_codes):
+            return sorted(merged_items, key=lambda item: item.board_code)[:actual_limit]
+        return sorted(merged_items, key=lambda item: item.board_code)[:actual_limit]
 
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}

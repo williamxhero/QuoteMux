@@ -35,6 +35,8 @@ class SourceInstanceConfig:
         config_values = payload.get("config_values", {})
         secret_values = payload.get("secret_values", {})
         timeout_value = payload.get("timeout_seconds", None)
+        if timeout_value in {None, ""} and isinstance(config_values, dict):
+            timeout_value = config_values.get("timeout_seconds", None)
         return cls(
             instance_id=str(payload.get("instance_id", "")),
             package_id=str(payload.get("package_id", "")),

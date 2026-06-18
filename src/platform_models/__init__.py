@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import math
+
 from pydantic import BaseModel, Field
 
 from quotemux.infra.common import format_date_value, format_datetime_value
@@ -19,13 +21,22 @@ def format_api_temporal_value(field_name: str, value: str) -> str:
     return value
 
 
+def format_api_dump_value(field_name: str, value: object) -> object:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, str):
+        return format_api_temporal_value(field_name, value)
+    if isinstance(value, dict):
+        return {str(key): format_api_dump_value(str(key), item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [format_api_dump_value(field_name, item) for item in value]
+    return value
+
+
 class ApiModel(BaseModel):
     def model_dump(self, *args, **kwargs):
         payload = super().model_dump(*args, **kwargs)
-        for field_name, value in payload.items():
-            if isinstance(value, str):
-                payload[field_name] = format_api_temporal_value(field_name, value)
-        return payload
+        return {field_name: format_api_dump_value(field_name, value) for field_name, value in payload.items()}
 
 
 class ApiError(ApiModel):
