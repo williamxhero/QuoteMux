@@ -6,7 +6,7 @@ from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHist
 from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_member_history, get_local_board_members, get_local_board_money_flow, get_local_board_profile, get_local_board_quotes
+from quotemux.local_store import get_local_board_catalog, get_local_board_members, get_local_board_profile, get_local_board_quotes
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -279,8 +279,6 @@ class QuoteMuxBoards:
                 request_builder=lambda current_items: [()] if current_items == [] else [],
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.members.history", handlers, ("tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("boards.members.history", ("tushare", "akshare")),
-                base_items=get_local_board_member_history(board_code),
-                base_source_name="ref.board_stock_membership",
                 fact_ref_writer=get_fact_ref_writer("boards.members.history"),
             )
         )
@@ -301,8 +299,8 @@ class QuoteMuxBoards:
                 request_builder=lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare")),
-                base_items=get_local_board_money_flow(board_code, trade_date, start_date, end_date, scope),
-                base_source_name="fact.board_daily_1d",
+                base_items=[],
+                base_source_name="",
             )
         )
         return sorted_items
@@ -328,9 +326,11 @@ class QuoteMuxBoards:
 
 
     def get_market_daily_snapshot(self, trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
-        """获取指定交易日全市场板块快照"""
-        return get_local_board_daily_snapshot(trade_date, limit, offset)
-
+        catalog_items = self.get_catalog("", "", "", ensure_limit(limit), offset)
+        board_codes = [item.board_code for item in catalog_items]
+        if board_codes == []:
+            return []
+        return self.get_quotes(board_codes, "1d", trade_date, "", "", "", "", None, ensure_limit(limit))
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}
         handlers = {

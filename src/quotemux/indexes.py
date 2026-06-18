@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import pandas as pd
-
 from platform_models import IndexCatalogItem, IndexMemberItem, IndexQuoteItem
-from quotemux.infra.common import add_quote_metrics, aggregate_ohlc, build_time_bounds, format_datetime_value, parse_date_text
+from quotemux.infra.common import build_time_bounds, parse_date_text
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.common import build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
@@ -57,53 +55,11 @@ def _filter_catalog_items(items: list[IndexCatalogItem], category: str, market: 
 
 
 def _fallback_quote_freq(freq: str) -> str:
-    if freq in {"1w", "1mo"}:
-        return "1d"
     return freq
 
 
 def _fallback_quote_count(freq: str, count: int | None) -> int | None:
-    if not count:
-        return count
-    if freq == "1w":
-        return count * 10
-    if freq == "1mo":
-        return count * 35
     return count
-
-
-def _aggregate_index_quotes(items: list[IndexQuoteItem], freq: str) -> list[IndexQuoteItem]:
-    if freq not in {"1w", "1mo"} or items == []:
-        return items
-    frame = pd.DataFrame([item.model_dump() for item in items])
-    frame["trade_time"] = pd.to_datetime(frame["trade_time"], errors="coerce")
-    for column in ["open", "high", "low", "close", "amount"]:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame["volume"] = pd.NA
-    frame = frame.dropna(subset=["trade_time"])
-    if frame.empty:
-        return []
-    result: list[IndexQuoteItem] = []
-    for code_value, group in frame.groupby("index_code", sort=False):
-        aggregated = add_quote_metrics(aggregate_ohlc(group[["trade_time", "open", "high", "low", "close", "volume", "amount"]], freq))
-        for _, row in aggregated.iterrows():
-            result.append(
-                IndexQuoteItem(
-                    index_code=str(code_value),
-                    trade_time=format_datetime_value(row["trade_time"], freq),
-                    freq=freq,
-                    open=float(row["open"]) if pd.notna(row["open"]) else None,
-                    high=float(row["high"]) if pd.notna(row["high"]) else None,
-                    low=float(row["low"]) if pd.notna(row["low"]) else None,
-                    close=float(row["close"]) if pd.notna(row["close"]) else None,
-                    pre_close=float(row["pre_close"]) if pd.notna(row["pre_close"]) else None,
-                    change=float(row["change"]) if pd.notna(row["change"]) else None,
-                    pct_chg=float(row["pct_chg"]) if pd.notna(row["pct_chg"]) else None,
-                    volume=float(row["volume"]) if pd.notna(row["volume"]) else None,
-                    amount=float(row["amount"]) if pd.notna(row["amount"]) else None,
-                )
-            )
-    return result
 
 
 def _build_missing_date_ranges(start_date: str, end_date: str, existing_dates: set[str]) -> list[tuple[str, str]]:
@@ -143,6 +99,8 @@ def _build_missing_quote_requests(
             return []
         missing_codes = [index_code for index_code in index_codes if sum(1 for item in items if item.index_code == index_code) < count]
         return [(missing_codes, "", "")] if missing_codes else []
+    if freq in {"1w", "1mo"}:
+        return [] if items else [(index_codes, trade_date or start_date, trade_date or end_date)]
     if freq != "1d":
         return [] if items else [(index_codes, trade_date or start_date, trade_date or end_date)]
     request_start_dt, request_end_dt = build_time_bounds(trade_date, start_date, end_date, "", "", count, False)
@@ -313,10 +271,6 @@ class QuoteMuxIndexes:
                 fact_ref_writer=get_fact_ref_writer("indexes.quotes.daily") if request_freq == "1d" else None,
             )
         )
-        if actual_freq in {"1w", "1mo"}:
-            merged_items = _aggregate_index_quotes(merged_items, actual_freq)
-        if actual_freq == "1d":
-            merged_items = _filter_usable_local_index_items(merged_items, actual_freq)
         trimmed_items = trim_items_per_key(merged_items, "index_code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("index_code", "trade_time"))
         return sorted_items[:actual_limit], report

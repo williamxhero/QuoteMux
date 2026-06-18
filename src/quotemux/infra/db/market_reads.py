@@ -25,7 +25,7 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            previous_rows.close as pre_close,
+            day_rows.pre_close,
             day_rows.volume,
             day_rows.amount,
             day_rows.is_suspended,
@@ -36,56 +36,10 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
             day_rows.mism_buy,
             day_rows.mism_sell
         from fact.stock_daily_1d day_rows
-        left join lateral (
-            select close
-            from fact.stock_daily_1d previous_rows
-            where previous_rows.code = day_rows.code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
         where {' and '.join(where_clauses)}
         order by day_rows.code, day_rows.trade_date
     """
     return query_dataframe(query, tuple(params))
-
-
-def load_stock_daily_previous_frame(codes: list[str], before_date: str) -> pd.DataFrame:
-    """读取每只股票在指定日期前最近的一条日线。"""
-    if not codes or not before_date:
-        return pd.DataFrame()
-    query = """
-        select distinct on (day_rows.code)
-            day_rows.code,
-            day_rows.trade_date::text as trade_time,
-            day_rows.open,
-            day_rows.high,
-            day_rows.low,
-            day_rows.close,
-            previous_rows.close as pre_close,
-            day_rows.volume,
-            day_rows.amount,
-            day_rows.is_suspended,
-            day_rows.is_st,
-            day_rows.adj_factor,
-            day_rows.labi_buy,
-            day_rows.labi_sell,
-            day_rows.mism_buy,
-            day_rows.mism_sell
-        from fact.stock_daily_1d day_rows
-        left join lateral (
-            select close
-            from fact.stock_daily_1d previous_rows
-            where previous_rows.code = day_rows.code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
-        where day_rows.code = any(%s)
-          and day_rows.trade_date < %s
-        order by day_rows.code, day_rows.trade_date desc
-    """
-    return query_dataframe(query, (codes, before_date))
 
 
 def _stock_daily_snapshot_query() -> str:
@@ -98,6 +52,7 @@ def _stock_daily_snapshot_query() -> str:
                 high,
                 low,
                 close,
+                pre_close,
                 volume,
                 amount,
                 is_suspended,
@@ -112,20 +67,12 @@ def _stock_daily_snapshot_query() -> str:
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            previous_rows.close as pre_close,
+            day_rows.pre_close,
             day_rows.volume,
             day_rows.amount,
             day_rows.is_suspended,
             day_rows.is_st
         from day_rows
-        left join lateral (
-            select close
-            from fact.stock_daily_1d previous_rows
-            where previous_rows.code = day_rows.code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
         order by day_rows.code
     """
 
@@ -150,7 +97,7 @@ def load_stock_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
 
 
 def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: int | None, offset: int) -> pd.DataFrame:
-    """????????????"""
+    """读取本地日线窗口。"""
     if not start_date or not end_date:
         return pd.DataFrame()
     query = """
@@ -161,20 +108,12 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            previous_rows.close as pre_close,
+            day_rows.pre_close,
             day_rows.volume,
             day_rows.amount,
             day_rows.is_suspended,
             day_rows.is_st
         from fact.stock_daily_1d day_rows
-        left join lateral (
-            select close
-            from fact.stock_daily_1d previous_rows
-            where previous_rows.code = day_rows.code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
         where day_rows.trade_date >= %s
           and day_rows.trade_date <= %s
         order by day_rows.trade_date, day_rows.code
@@ -183,60 +122,6 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
         return query_dataframe(query, (start_date, end_date))
     paged_query = query + "\n        limit %s\n        offset %s"
     return query_dataframe(paged_query, (start_date, end_date, limit, offset))
-
-
-def load_stock_money_flow_frame(codes: list[str], trade_date: str) -> pd.DataFrame:
-    """从股票日线事实表批量读取资金流字段。"""
-    if not codes or not trade_date:
-        return pd.DataFrame()
-    query = """
-        select
-            code,
-            trade_date::text as trade_date,
-            labi_buy,
-            labi_sell,
-            mism_buy,
-            mism_sell
-        from fact.stock_daily_1d
-        where code = any(%s)
-          and trade_date = %s
-        order by code
-    """
-    return query_dataframe(query, (codes, trade_date))
-
-
-def load_board_money_flow_frame(board_codes: list[str], trade_date: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """从板块日线事实表读取板块资金流字段。"""
-    where_clauses: list[str] = []
-    params: list[object] = []
-    if board_codes:
-        where_clauses.append("board_code = any(%s)")
-        params.append(board_codes)
-    if trade_date:
-        where_clauses.append("trade_date = %s")
-        params.append(trade_date)
-    else:
-        if start_date:
-            where_clauses.append("trade_date >= %s")
-            params.append(start_date)
-        if end_date:
-            where_clauses.append("trade_date <= %s")
-            params.append(end_date)
-    if where_clauses == []:
-        return pd.DataFrame()
-    query = f"""
-        select
-            board_code,
-            trade_date::text as trade_date,
-            labi_buy,
-            labi_sell,
-            mism_buy,
-            mism_sell
-        from fact.board_daily_1d
-        where {' and '.join(where_clauses)}
-        order by board_code, trade_date
-    """
-    return query_dataframe(query, tuple(params))
 
 
 def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: object, freq: str = "1m") -> pd.DataFrame:
@@ -364,7 +249,7 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            previous_rows.close as pre_close,
+            day_rows.pre_close,
             day_rows.volume,
             day_rows.amount,
             day_rows.labi_buy,
@@ -372,72 +257,11 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
             day_rows.mism_buy,
             day_rows.mism_sell
         from fact.board_daily_1d day_rows
-        left join lateral (
-            select close
-            from fact.board_daily_1d previous_rows
-            where previous_rows.board_code = day_rows.board_code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
         left join ref.board board_ref on board_ref.board_code = day_rows.board_code
         where {' and '.join(where_clauses)}
         order by day_rows.board_code, day_rows.trade_date
     """
     return query_dataframe(query, tuple(params))
-
-
-def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
-    if not trade_date:
-        return pd.DataFrame()
-    query = """
-        with day_rows as (
-            select
-                board_code,
-                trade_date,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                amount,
-                labi_buy,
-                labi_sell,
-                mism_buy,
-                mism_sell
-            from fact.board_daily_1d
-            where trade_date = %s
-        )
-        select
-            day_rows.board_code,
-            coalesce(board_ref.name, '') as board_name,
-            day_rows.trade_date::text as trade_time,
-            day_rows.open,
-            day_rows.high,
-            day_rows.low,
-            day_rows.close,
-            previous_rows.close as pre_close,
-            day_rows.volume,
-            day_rows.amount,
-            day_rows.labi_buy,
-            day_rows.labi_sell,
-            day_rows.mism_buy,
-            day_rows.mism_sell
-        from day_rows
-        left join lateral (
-            select close
-            from fact.board_daily_1d previous_rows
-            where previous_rows.board_code = day_rows.board_code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
-        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
-        order by day_rows.board_code
-        limit %s
-        offset %s
-    """
-    return query_dataframe(query, (trade_date, limit, offset))
 
 
 def load_index_daily_frame(index_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
@@ -459,19 +283,11 @@ def load_index_daily_frame(index_codes: list[str], start_date: str, end_date: st
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            coalesce(day_rows.pre_close, previous_rows.close) as pre_close,
+            day_rows.pre_close,
             day_rows.pct_chg,
             day_rows.volume,
             day_rows.amount
         from fact.index_bar_1d day_rows
-        left join lateral (
-            select close
-            from fact.index_bar_1d previous_rows
-            where previous_rows.index_code = day_rows.index_code
-              and previous_rows.trade_date < day_rows.trade_date
-            order by previous_rows.trade_date desc
-            limit 1
-        ) previous_rows on true
         where {' and '.join(where_clauses)}
         order by day_rows.index_code, day_rows.trade_date
     """

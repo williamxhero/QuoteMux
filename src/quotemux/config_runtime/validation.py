@@ -124,7 +124,7 @@ def _validate_capabilities(manifest: SourcePackageManifest) -> tuple[ValidationI
         seen_names.add(capability_id)
         if not is_known_capability_id(capability_id):
             issues.append(ValidationIssue("capabilities", f"{manifest.package_id} 未知 capability: {capability_id}"))
-        if is_derived_capability_id(capability_id):
+        if is_derived_capability_id(capability_id) and manifest.package_id != "derived_core":
             issues.append(ValidationIssue("capabilities", f"{manifest.package_id} 派生 capability 只能通过 DERIVED_CAPABILITY_BASE_IDS 配置: {capability_id}"))
         if capability.handler_name == "":
             issues.append(ValidationIssue("capabilities", f"{manifest.package_id} capability 未声明 handler_name: {capability_id}"))

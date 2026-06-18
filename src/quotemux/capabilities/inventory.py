@@ -246,6 +246,8 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
+    if capability_id in DERIVED_CAPABILITY_BASE_IDS:
+        return ("derived_core",)
     if capability_id == "stocks.quotes.intraday":
         return ("opentdx", "efinance", "mootdx", "akshare")
     if capability_id == "stocks.quotes.daily":
@@ -318,7 +320,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_source_order(capability_id: str) -> tuple[str, ...]:
-    if capability_id in {"stocks.factors.technical", "stocks.ownership.shareholders.changes", "stocks.signals.hl"}:
+    if capability_id in DERIVED_CAPABILITY_BASE_IDS or capability_id in {"stocks.factors.technical", "stocks.ownership.shareholders.changes", "stocks.signals.hl"}:
         return ("derived_core",)
     return _infer_allowed_packages(capability_id)
 

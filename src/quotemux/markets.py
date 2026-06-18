@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from platform_models import AuctionItem, BlockTradeItem, ConnectActiveTop10Item, ConnectCapitalFlowItem, ConnectQuotaItem, DragonTigerInstitutionItem, DragonTigerItem, HotMoneyDetailItem, HotMoneyProfileItem, MarketCapitalFlowItem, TradingCalendarItem, TradingSessionItem
 from quotemux.infra.common import parse_date_text
@@ -145,23 +145,46 @@ class QuoteMuxMarkets:
         return sorted(merged_items, key=lambda item: item.trade_date), report
 
     def get_previous_trading_days(self, request: PreviousTradingDaysRequest) -> list[TradingCalendarItem]:
-        items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date="", end_date=request.trade_date, is_open=True))
-        return [item for item in items if item.trade_date < request.trade_date][-request.n:]
+        handlers = {
+            "get_previous_trading_days": lambda instance: lambda: _source_package_call(instance.package_id, "get_previous_trading_days", request.exchange, request.trade_date, request.n),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "markets.calendar.trading.previous",
+            [],
+            ("exchange", "trade_date"),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading.previous", handlers, ("derived_core",)),
+            self._settings.get_contract_source_order("markets.calendar.trading.previous", ("derived_core",)),
+        )
+        return items
 
     def get_next_trading_days(self, request: NextTradingDaysRequest) -> list[TradingCalendarItem]:
-        trade_day = parse_date_text(request.trade_date)
-        end_date = ""
-        if trade_day is not None:
-            try:
-                next_year_day = trade_day.replace(year=trade_day.year + 1)
-            except ValueError:
-                next_year_day = date(trade_day.year + 1, 2, 28)
-            end_date = next_year_day.strftime("%Y-%m-%d")
-        items = self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=request.trade_date, end_date=end_date, is_open=True))
-        return [item for item in items if item.trade_date > request.trade_date][: request.n]
+        handlers = {
+            "get_next_trading_days": lambda instance: lambda: _source_package_call(instance.package_id, "get_next_trading_days", request.exchange, request.trade_date, request.n),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "markets.calendar.trading.next",
+            [],
+            ("exchange", "trade_date"),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading.next", handlers, ("derived_core",)),
+            self._settings.get_contract_source_order("markets.calendar.trading.next", ("derived_core",)),
+        )
+        return items
 
     def get_yearly_trading_calendar(self, request: YearlyTradingCalendarRequest) -> list[TradingCalendarItem]:
-        return self.get_trading_calendar(TradingCalendarRequest(exchange=request.exchange, start_date=f"{request.start_year}-01-01", end_date=f"{request.end_year}-12-31", is_open=None))
+        handlers = {
+            "get_yearly_trading_calendar": lambda instance: lambda: _source_package_call(instance.package_id, "get_yearly_trading_calendar", request.exchange, request.start_year, request.end_year),
+        }
+        items, _ = run_fallback_chain_with_report(
+            "markets.calendar.trading.yearly",
+            [],
+            ("exchange", "trade_date"),
+            lambda current_items: [()] if current_items == [] else [],
+            SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading.yearly", handlers, ("derived_core",)),
+            self._settings.get_contract_source_order("markets.calendar.trading.yearly", ("derived_core",)),
+        )
+        return items
 
     def get_connect_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[ConnectCapitalFlowItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}
