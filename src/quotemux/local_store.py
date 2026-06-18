@@ -4,7 +4,7 @@ import pandas as pd
 
 from platform_models import BoardCatalogItem, BoardMemberItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.market_reads import load_board_daily_frame, load_index_daily_frame, load_stock_intraday_frame
+from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_stock_intraday_frame
 from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_board_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
@@ -99,6 +99,34 @@ def get_local_index_quotes(index_codes: list[str], freq: str, trade_date: str, s
     return items
 
 
+def _frame_to_board_quote_items(frame: pd.DataFrame) -> list[BoardQuoteItem]:
+    if frame.empty:
+        return []
+    work = frame.copy()
+    work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
+    work = work.dropna(subset=["trade_time"])
+    items: list[BoardQuoteItem] = []
+    for _, row in work.iterrows():
+        items.append(
+            BoardQuoteItem(
+                board_code=str(row["board_code"]),
+                board_name=str(row["board_name"]) if "board_name" in row and pd.notna(row["board_name"]) else "",
+                trade_time=format_datetime_value(row["trade_time"], "1d"),
+                freq="1d",
+                open=float(row["open"]) if pd.notna(row["open"]) else None,
+                high=float(row["high"]) if pd.notna(row["high"]) else None,
+                low=float(row["low"]) if pd.notna(row["low"]) else None,
+                close=float(row["close"]) if pd.notna(row["close"]) else None,
+                pre_close=float(row["pre_close"]) if "pre_close" in row and pd.notna(row["pre_close"]) else None,
+                change=float(row["change"]) if "change" in row and pd.notna(row["change"]) else None,
+                pct_chg=float(row["pct_chg"]) if "pct_chg" in row and pd.notna(row["pct_chg"]) else None,
+                volume=float(row["volume"]) if "volume" in row and pd.notna(row["volume"]) else None,
+                amount=float(row["amount"]) if "amount" in row and pd.notna(row["amount"]) else None,
+            )
+        )
+    return items
+
+
 def get_local_board_quotes(board_codes: list[str], freq: str, trade_date: str, start_date: str, end_date: str, count: int | None) -> list[BoardQuoteItem]:
     if freq != "1d":
         return []
@@ -106,33 +134,15 @@ def get_local_board_quotes(board_codes: list[str], freq: str, trade_date: str, s
     start_text = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
     end_text = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
     frame = load_board_daily_frame(board_codes, start_text, end_text)
-    if frame.empty:
+    return _frame_to_board_quote_items(frame)
+
+
+def get_local_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date == "":
         return []
-    work = frame.copy()
-    work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
-    work = work.dropna(subset=["trade_time"])
-    items: list[BoardQuoteItem] = []
-    for board_code, group in work.groupby("board_code", sort=False):
-        result_frame = group.drop(columns=["board_code"]).sort_values("trade_time")
-        for _, row in result_frame.iterrows():
-            items.append(
-                BoardQuoteItem(
-                    board_code=str(board_code),
-                    board_name=str(row["board_name"]) if "board_name" in row and pd.notna(row["board_name"]) else "",
-                    trade_time=format_datetime_value(row["trade_time"], freq),
-                    freq=freq,
-                    open=float(row["open"]) if pd.notna(row["open"]) else None,
-                    high=float(row["high"]) if pd.notna(row["high"]) else None,
-                    low=float(row["low"]) if pd.notna(row["low"]) else None,
-                    close=float(row["close"]) if pd.notna(row["close"]) else None,
-                    pre_close=float(row["pre_close"]) if "pre_close" in row and pd.notna(row["pre_close"]) else None,
-                    change=float(row["change"]) if "change" in row and pd.notna(row["change"]) else None,
-                    pct_chg=float(row["pct_chg"]) if "pct_chg" in row and pd.notna(row["pct_chg"]) else None,
-                    volume=float(row["volume"]) if "volume" in row and pd.notna(row["volume"]) else None,
-                    amount=float(row["amount"]) if "amount" in row and pd.notna(row["amount"]) else None,
-                )
-            )
-    return items
+    frame = load_board_daily_snapshot_frame(actual_trade_date, limit, offset)
+    return _frame_to_board_quote_items(frame)
 
 
 def get_local_trading_calendar(exchange: str, start_date: str, end_date: str, is_open: bool | None) -> list[TradingCalendarItem]:

@@ -289,6 +289,36 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
     return query_dataframe(query, tuple(params))
 
 
+def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
+    if not trade_date:
+        return pd.DataFrame()
+    existing_columns = _existing_columns("fact", "board_daily_1d")
+    query = f"""
+        select
+            day_rows.board_code,
+            coalesce(board_ref.name, '') as board_name,
+            day_rows.trade_date::text as trade_time,
+            day_rows.open,
+            day_rows.high,
+            day_rows.low,
+            day_rows.close,
+            {_optional_column(existing_columns, "pre_close")},
+            day_rows.volume,
+            day_rows.amount,
+            {_optional_column(existing_columns, "labi_buy")},
+            {_optional_column(existing_columns, "labi_sell")},
+            {_optional_column(existing_columns, "mism_buy")},
+            {_optional_column(existing_columns, "mism_sell")}
+        from fact.board_daily_1d day_rows
+        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
+        where day_rows.trade_date = %s
+        order by day_rows.board_code
+        limit %s
+        offset %s
+    """
+    return query_dataframe(query, (trade_date, limit, offset))
+
+
 def load_index_daily_frame(index_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     if not index_codes:
         return pd.DataFrame()

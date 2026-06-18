@@ -6,7 +6,7 @@ from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHist
 from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_board_catalog, get_local_board_members, get_local_board_profile, get_local_board_quotes
+from quotemux.local_store import get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_members, get_local_board_profile, get_local_board_quotes
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -330,15 +330,12 @@ class QuoteMuxBoards:
         actual_trade_date = format_date_value(trade_date)
         if actual_trade_date == "":
             return []
-        local_items = sorted(get_local_board_quotes([], "1d", actual_trade_date, "", "", None), key=lambda item: item.board_code)
         actual_limit = ensure_limit(limit)
-        if _has_complete_board_daily_snapshot(local_items):
-            return local_items[offset: offset + actual_limit]
+        local_items = get_local_board_daily_snapshot(actual_trade_date, actual_limit, offset)
         if local_items:
-            board_codes = [item.board_code for item in local_items[offset: offset + actual_limit]]
-        else:
-            catalog_items = self.get_catalog("", "a_share", "active", MARKET_DAILY_SNAPSHOT_LIMIT, 0)
-            board_codes = [item.board_code for item in catalog_items[offset: offset + actual_limit]]
+            return sorted(local_items, key=lambda item: item.board_code)
+        catalog_items = self.get_catalog("", "a_share", "active", MARKET_DAILY_SNAPSHOT_LIMIT, 0)
+        board_codes = [item.board_code for item in catalog_items[offset: offset + actual_limit]]
         if board_codes == []:
             return []
         items = self.get_quotes(board_codes, "1d", actual_trade_date, "", "", "", "", None, actual_limit)
