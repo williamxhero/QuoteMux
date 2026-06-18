@@ -334,12 +334,8 @@ class QuoteMuxBoards:
         local_items = get_local_board_daily_snapshot(actual_trade_date, actual_limit, offset)
         if local_items:
             return sorted(local_items, key=lambda item: item.board_code)
-        catalog_items = self.get_catalog("", "a_share", "active", MARKET_DAILY_SNAPSHOT_LIMIT, 0)
-        board_codes = [item.board_code for item in catalog_items[offset: offset + actual_limit]]
-        if board_codes == []:
-            return []
-        items = self.get_quotes(board_codes, "1d", actual_trade_date, "", "", "", "", None, actual_limit)
-        return sorted(items, key=lambda item: item.board_code)[:actual_limit]
+        return []
+
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}
         handlers = {
