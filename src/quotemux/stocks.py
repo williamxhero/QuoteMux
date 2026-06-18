@@ -406,17 +406,18 @@ def _has_complete_stock_snapshot_item(item: StockQuoteItem) -> bool:
     return item.close is not None and item.pre_close is not None and item.pct_chg is not None and item.amount is not None
 
 
-def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> list[str]:
+def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[str]:
     active_frame = load_stock_active_codes_frame(trade_date)
     if active_frame.empty:
-        return []
+        return [item.code for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and not _has_complete_stock_snapshot_item(item)]
     active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
+    page_codes = active_codes[: offset + limit]
     existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
-    return [code for code in dict.fromkeys(active_codes) if code != "" and code not in existing_codes]
+    return [code for code in dict.fromkeys(page_codes) if code != "" and code not in existing_codes]
 
 
-def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem]) -> list[tuple[list[str], str]]:
-    missing_codes = _missing_snapshot_codes(trade_date, items)
+def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[tuple[list[str], str]]:
+    missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset)
     if missing_codes != []:
         return [(missing_codes, trade_date)]
     if any(not _has_complete_stock_snapshot_item(item) for item in items):
@@ -611,7 +612,7 @@ class QuoteMuxStocks:
                 model_type=StockQuoteItem,
                 key_fields=("code", "trade_time", "freq"),
                 sort_fields=("code", "trade_time"),
-                request_builder=lambda current_items: _build_snapshot_requests(actual_trade_date, current_items),
+                request_builder=lambda current_items: _build_snapshot_requests(actual_trade_date, current_items, request.limit, request.offset),
                 provider_steps=lambda: _build_daily_snapshot_steps(self._settings),
                 source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
                 base_items=local_items,
