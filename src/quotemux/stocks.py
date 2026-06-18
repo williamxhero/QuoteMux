@@ -402,12 +402,16 @@ def _build_missing_quote_requests(
     return _build_quote_range_requests(grouped_ranges)
 
 
+def _has_complete_stock_snapshot_item(item: StockQuoteItem) -> bool:
+    return item.close is not None and item.pre_close is not None and item.pct_chg is not None and item.amount is not None
+
+
 def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem]) -> list[str]:
     active_frame = load_stock_active_codes_frame(trade_date)
     if active_frame.empty:
         return []
     active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
-    existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date}
+    existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
     return [code for code in dict.fromkeys(active_codes) if code != "" and code not in existing_codes]
 
 
@@ -415,6 +419,8 @@ def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem]) -> li
     missing_codes = _missing_snapshot_codes(trade_date, items)
     if missing_codes != []:
         return [(missing_codes, trade_date)]
+    if any(not _has_complete_stock_snapshot_item(item) for item in items):
+        return [([], trade_date)]
     return [([], trade_date)] if items == [] else []
 
 

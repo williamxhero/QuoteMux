@@ -6,7 +6,29 @@ from pydantic import BaseModel
 
 from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardMemberItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.client import execute_many
+from quotemux.infra.db.client import execute_many, query_dataframe
+
+
+def _existing_columns(table_schema: str, table_name: str) -> set[str]:
+    frame = query_dataframe(
+        """
+        select column_name
+        from information_schema.columns
+        where table_schema = %s
+          and table_name = %s
+        """,
+        (table_schema, table_name),
+    )
+    if frame.empty:
+        return set()
+    return {str(row["column_name"]) for _, row in frame.iterrows()}
+
+
+def _optional_update_assignments(existing_columns: set[str], column_names: tuple[str, ...]) -> str:
+    assignments = [f"{column_name} = excluded.{column_name}" for column_name in column_names if column_name in existing_columns]
+    if assignments == []:
+        return ""
+    return ",\n            " + ",\n            ".join(assignments)
 
 
 def _stock_market(code: str) -> str:
@@ -37,6 +59,8 @@ def _stock_status_to_delisted_date(item: StockBasicInfo) -> str:
 
 
 def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
+    existing_columns = _existing_columns("fact", "stock_daily_1d")
+    optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
     params: list[tuple[object, ...]] = []
     for item in items:
         if item.freq != "1d":
@@ -45,6 +69,7 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
         trade_date = format_date_value(item.trade_time)
         if code == "" or trade_date == "":
             continue
+        optional_values = tuple(getattr(item, column_name) for column_name in optional_columns)
         params.append((
             _stock_market(code),
             code,
@@ -57,11 +82,14 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             item.amount,
             item.is_suspended,
             item.is_st,
+            *optional_values,
         ))
+    optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
+    optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
     return execute_many(
-        """
-        insert into fact.stock_daily_1d (market, code, trade_date, open, high, low, close, volume, amount, is_suspended, is_st)
-        values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s)
+        f"""
+        insert into fact.stock_daily_1d (market, code, trade_date, open, high, low, close, volume, amount, is_suspended, is_st{optional_column_sql})
+        values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
         on conflict (market, code, trade_date) do update set
             open = excluded.open,
             high = excluded.high,
@@ -70,7 +98,7 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             volume = excluded.volume,
             amount = excluded.amount,
             is_suspended = excluded.is_suspended,
-            is_st = excluded.is_st,
+            is_st = excluded.is_st{_optional_update_assignments(existing_columns, optional_columns)},
             loaded_at = now()
         """,
         params,
@@ -119,6 +147,8 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
 
 
 def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
+    existing_columns = _existing_columns("fact", "index_bar_1d")
+    optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
     params: list[tuple[object, ...]] = []
     for item in items:
         if item.freq != "1d":
@@ -127,18 +157,21 @@ def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
         trade_date = format_date_value(item.trade_time)
         if index_code == "" or trade_date == "":
             continue
-        params.append((index_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount))
+        optional_values = tuple(getattr(item, column_name) for column_name in optional_columns)
+        params.append((index_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
+    optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
+    optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
     return execute_many(
-        """
-        insert into fact.index_bar_1d (index_code, trade_date, open, high, low, close, volume, amount)
-        values (%s, %s::date, %s, %s, %s, %s, %s, %s)
+        f"""
+        insert into fact.index_bar_1d (index_code, trade_date, open, high, low, close, volume, amount{optional_column_sql})
+        values (%s, %s::date, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
         on conflict (index_code, trade_date) do update set
             open = excluded.open,
             high = excluded.high,
             low = excluded.low,
             close = excluded.close,
             volume = excluded.volume,
-            amount = excluded.amount,
+            amount = excluded.amount{_optional_update_assignments(existing_columns, optional_columns)},
             loaded_at = now()
         """,
         params,
@@ -146,6 +179,8 @@ def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
 
 
 def _upsert_board_daily(items: Sequence[BoardQuoteItem]) -> bool:
+    existing_columns = _existing_columns("fact", "board_daily_1d")
+    optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
     params: list[tuple[object, ...]] = []
     for item in items:
         if item.freq != "1d":
@@ -153,18 +188,21 @@ def _upsert_board_daily(items: Sequence[BoardQuoteItem]) -> bool:
         trade_date = format_date_value(item.trade_time)
         if item.board_code == "" or trade_date == "":
             continue
-        params.append((item.board_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount))
+        optional_values = tuple(getattr(item, column_name) for column_name in optional_columns)
+        params.append((item.board_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
+    optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
+    optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
     return execute_many(
-        """
-        insert into fact.board_daily_1d (board_code, trade_date, open, high, low, close, volume, amount)
-        values (%s, %s::date, %s, %s, %s, %s, %s, %s)
+        f"""
+        insert into fact.board_daily_1d (board_code, trade_date, open, high, low, close, volume, amount{optional_column_sql})
+        values (%s, %s::date, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
         on conflict (board_code, trade_date) do update set
             open = excluded.open,
             high = excluded.high,
             low = excluded.low,
             close = excluded.close,
             volume = excluded.volume,
-            amount = excluded.amount,
+            amount = excluded.amount{_optional_update_assignments(existing_columns, optional_columns)},
             loaded_at = now()
         """,
         params,

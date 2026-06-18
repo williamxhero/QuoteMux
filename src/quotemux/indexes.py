@@ -115,7 +115,7 @@ def _build_missing_quote_requests(
     expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings)
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for index_code in index_codes:
-        existing_dates = {item.trade_time for item in items if item.index_code == index_code and item.freq == "1d"}
+        existing_dates = {item.trade_time for item in items if item.index_code == index_code and item.freq == "1d" and _is_index_quote_row_usable(item)}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
             missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
@@ -135,6 +135,8 @@ def _is_index_quote_row_usable(item: IndexQuoteItem) -> bool:
     if item.pre_close is None:
         return False
     if item.pct_chg is None:
+        return False
+    if item.amount is None:
         return False
     if item.pre_close <= 0:
         return False

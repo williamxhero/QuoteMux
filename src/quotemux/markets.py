@@ -56,6 +56,22 @@ def _build_missing_calendar_ranges(start_date: str, end_date: str, existing_date
     return items
 
 
+def _build_market_flow_requests(items: list[MarketCapitalFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[object, ...]]:
+    actual_trade_date = trade_date or (start_date if start_date != "" and start_date == end_date else "")
+    if actual_trade_date == "":
+        return [()] if items == [] else []
+    complete = any(item.trade_date == actual_trade_date and item.net_inflow is not None and (item.main_inflow is not None or item.main_outflow is not None) for item in items)
+    return [] if complete else [()]
+
+
+def _build_connect_flow_requests(items: list[ConnectCapitalFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[object, ...]]:
+    actual_trade_date = trade_date or (start_date if start_date != "" and start_date == end_date else "")
+    if actual_trade_date == "":
+        return [()] if items == [] else []
+    complete = any(item.trade_date == actual_trade_date and item.market == "northbound" and item.buy_amount is not None and item.sell_amount is not None and item.net_amount is not None for item in items)
+    return [] if complete else [()]
+
+
 class QuoteMuxMarkets:
     def __init__(self, settings: QuoteMuxSettings) -> None:
         self._settings = settings
@@ -101,14 +117,19 @@ class QuoteMuxMarkets:
         handlers = {
             "get_market_capital_flow": lambda instance: lambda: _source_package_call(instance.package_id, "get_market_capital_flow", trade_date, start_date, end_date),
         }
-        return self._store_list(
-            "markets.indicators.main_capital_flow",
-            store_identity,
-            MarketCapitalFlowItem,
-            ("market", "trade_date"),
-            ("trade_date", "market"),
-            lambda: self._source_list("markets.indicators.main_capital_flow", handlers, ("tushare", "akshare"), ("market", "trade_date")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="markets.indicators.main_capital_flow",
+                store_identity=store_identity,
+                model_type=MarketCapitalFlowItem,
+                key_fields=("market", "trade_date"),
+                sort_fields=("trade_date", "market"),
+                request_builder=lambda current_items: _build_market_flow_requests(current_items, trade_date, start_date, end_date),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.indicators.main_capital_flow", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("markets.indicators.main_capital_flow", ("tushare", "akshare")),
+            )
         )
+        return items
 
     def get_trading_calendar(self, request: TradingCalendarRequest) -> list[TradingCalendarItem]:
         items, _ = self.get_trading_calendar_with_report(request)
@@ -191,14 +212,19 @@ class QuoteMuxMarkets:
         handlers = {
             "get_connect_capital_flow": lambda instance: lambda: _source_package_call(instance.package_id, "get_connect_capital_flow", trade_date, start_date, end_date),
         }
-        return self._store_list(
-            "markets.connect.capital_flow",
-            store_identity,
-            ConnectCapitalFlowItem,
-            ("market", "trade_date"),
-            ("trade_date", "market"),
-            lambda: self._source_list("markets.connect.capital_flow", handlers, ("tushare", "akshare"), ("market", "trade_date")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="markets.connect.capital_flow",
+                store_identity=store_identity,
+                model_type=ConnectCapitalFlowItem,
+                key_fields=("market", "trade_date"),
+                sort_fields=("trade_date", "market"),
+                request_builder=lambda current_items: _build_connect_flow_requests(current_items, trade_date, start_date, end_date),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.connect.capital_flow", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("markets.connect.capital_flow", ("tushare", "akshare")),
+            )
         )
+        return items
 
     def get_connect_quotas(self, trade_date: str, start_date: str, end_date: str, market_type: str) -> list[ConnectQuotaItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "market_type": market_type}
