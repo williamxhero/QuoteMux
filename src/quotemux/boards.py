@@ -326,11 +326,11 @@ class QuoteMuxBoards:
 
 
     def get_market_daily_snapshot(self, trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
-        catalog_items = self.get_catalog("", "", "", ensure_limit(limit), offset)
-        board_codes = [item.board_code for item in catalog_items]
-        if board_codes == []:
+        actual_trade_date = format_date_value(trade_date)
+        if actual_trade_date == "":
             return []
-        return self.get_quotes(board_codes, "1d", trade_date, "", "", "", "", None, ensure_limit(limit))
+        items = get_local_board_quotes([], "1d", actual_trade_date, "", "", None)
+        return sorted(items, key=lambda item: item.board_code)[offset: offset + ensure_limit(limit)]
     def get_categories(self, parent_code: str, level: int | None) -> list[BoardCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}
         handlers = {

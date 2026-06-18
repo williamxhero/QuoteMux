@@ -5,10 +5,32 @@ import pandas as pd
 from quotemux.infra.db.client import execute_many, query_dataframe
 
 
+def _existing_columns(table_schema: str, table_name: str) -> set[str]:
+    frame = query_dataframe(
+        """
+        select column_name
+        from information_schema.columns
+        where table_schema = %s
+          and table_name = %s
+        """,
+        (table_schema, table_name),
+    )
+    if frame.empty:
+        return set()
+    return {str(row["column_name"]) for _, row in frame.iterrows()}
+
+
+def _optional_column(existing_columns: set[str], column_name: str) -> str:
+    if column_name in existing_columns:
+        return f"day_rows.{column_name}"
+    return f"null as {column_name}"
+
+
 def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     """读取正式股票日线表。"""
     if not codes:
         return pd.DataFrame()
+    existing_columns = _existing_columns("fact", "stock_daily_1d")
     where_clauses = ["day_rows.code = any(%s)"]
     params: list[object] = [codes]
     if start_date:
@@ -25,16 +47,16 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            day_rows.pre_close,
+            {_optional_column(existing_columns, "pre_close")},
             day_rows.volume,
             day_rows.amount,
-            day_rows.is_suspended,
-            day_rows.is_st,
-            day_rows.adj_factor,
-            day_rows.labi_buy,
-            day_rows.labi_sell,
-            day_rows.mism_buy,
-            day_rows.mism_sell
+            {_optional_column(existing_columns, "is_suspended")},
+            {_optional_column(existing_columns, "is_st")},
+            {_optional_column(existing_columns, "adj_factor")},
+            {_optional_column(existing_columns, "labi_buy")},
+            {_optional_column(existing_columns, "labi_sell")},
+            {_optional_column(existing_columns, "mism_buy")},
+            {_optional_column(existing_columns, "mism_sell")}
         from fact.stock_daily_1d day_rows
         where {' and '.join(where_clauses)}
         order by day_rows.code, day_rows.trade_date
@@ -43,7 +65,8 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
 
 
 def _stock_daily_snapshot_query() -> str:
-    return """
+    existing_columns = _existing_columns("fact", "stock_daily_1d")
+    return f"""
         with day_rows as (
             select
                 code,
@@ -52,12 +75,12 @@ def _stock_daily_snapshot_query() -> str:
                 high,
                 low,
                 close,
-                pre_close,
+                {_optional_column(existing_columns, "pre_close")},
                 volume,
                 amount,
-                is_suspended,
-                is_st
-            from fact.stock_daily_1d
+                {_optional_column(existing_columns, "is_suspended")},
+                {_optional_column(existing_columns, "is_st")}
+            from fact.stock_daily_1d day_rows
             where trade_date = %s
         )
         select
@@ -100,7 +123,8 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
     """读取本地日线窗口。"""
     if not start_date or not end_date:
         return pd.DataFrame()
-    query = """
+    existing_columns = _existing_columns("fact", "stock_daily_1d")
+    query = f"""
         select
             day_rows.code,
             day_rows.trade_date::text as trade_time,
@@ -108,11 +132,11 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            day_rows.pre_close,
+            {_optional_column(existing_columns, "pre_close")},
             day_rows.volume,
             day_rows.amount,
-            day_rows.is_suspended,
-            day_rows.is_st
+            {_optional_column(existing_columns, "is_suspended")},
+            {_optional_column(existing_columns, "is_st")}
         from fact.stock_daily_1d day_rows
         where day_rows.trade_date >= %s
           and day_rows.trade_date <= %s
@@ -229,16 +253,17 @@ def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:
 def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     if not board_codes and not start_date and not end_date:
         return pd.DataFrame()
+    existing_columns = _existing_columns("fact", "board_daily_1d")
     where_clauses: list[str] = []
     params: list[object] = []
     if board_codes:
-        where_clauses.append("board_code = any(%s)")
+        where_clauses.append("day_rows.board_code = any(%s)")
         params.append(board_codes)
     if start_date:
-        where_clauses.append("trade_date >= %s")
+        where_clauses.append("day_rows.trade_date >= %s")
         params.append(start_date)
     if end_date:
-        where_clauses.append("trade_date <= %s")
+        where_clauses.append("day_rows.trade_date <= %s")
         params.append(end_date)
     query = f"""
         select
@@ -249,13 +274,13 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            day_rows.pre_close,
+            {_optional_column(existing_columns, "pre_close")},
             day_rows.volume,
             day_rows.amount,
-            day_rows.labi_buy,
-            day_rows.labi_sell,
-            day_rows.mism_buy,
-            day_rows.mism_sell
+            {_optional_column(existing_columns, "labi_buy")},
+            {_optional_column(existing_columns, "labi_sell")},
+            {_optional_column(existing_columns, "mism_buy")},
+            {_optional_column(existing_columns, "mism_sell")}
         from fact.board_daily_1d day_rows
         left join ref.board board_ref on board_ref.board_code = day_rows.board_code
         where {' and '.join(where_clauses)}
@@ -267,6 +292,7 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
 def load_index_daily_frame(index_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     if not index_codes:
         return pd.DataFrame()
+    existing_columns = _existing_columns("fact", "index_bar_1d")
     where_clauses = ["day_rows.index_code = any(%s)"]
     params: list[object] = [index_codes]
     if start_date:
@@ -283,13 +309,12 @@ def load_index_daily_frame(index_codes: list[str], start_date: str, end_date: st
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            day_rows.pre_close,
-            day_rows.pct_chg,
-            day_rows.volume,
-            day_rows.amount
+            {_optional_column(existing_columns, "pre_close")},
+            {_optional_column(existing_columns, "pct_chg")},
+            {_optional_column(existing_columns, "volume")},
+            {_optional_column(existing_columns, "amount")}
         from fact.index_bar_1d day_rows
         where {' and '.join(where_clauses)}
         order by day_rows.index_code, day_rows.trade_date
     """
     return query_dataframe(query, tuple(params))
-
