@@ -68,7 +68,7 @@ def _build_connect_flow_requests(items: list[ConnectCapitalFlowItem], trade_date
     actual_trade_date = trade_date or (start_date if start_date != "" and start_date == end_date else "")
     if actual_trade_date == "":
         return [()] if items == [] else []
-    complete = any(item.trade_date == actual_trade_date and item.market == "northbound" and item.buy_amount is not None and item.sell_amount is not None and item.net_amount is not None for item in items)
+    complete = any(item.trade_date == actual_trade_date and item.market == "northbound" and item.net_amount is not None for item in items)
     return [] if complete else [()]
 
 
