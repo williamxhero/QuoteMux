@@ -917,6 +917,7 @@ def _stock_trading_day_requests(policy: CapturePolicy, capability_id: str, now: 
         "stocks.indicators.daily_basic": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.indicators.daily_valuation": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.indicators.daily_market_value": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
+        "stocks.indicators.money_flow.batch": lambda batch: {"codes": ",".join(batch), "trade_date": start_date, "view": "main"},
     }
     batch_builder = batch_requests.get(capability_id)
     if batch_builder is not None:
@@ -1191,6 +1192,7 @@ RUNTIME_METHODS: dict[str, tuple[str, str]] = {
     "stocks.indicators.daily_market_value": ("stocks", "get_daily_market_value"),
     "stocks.indicators.daily_valuation": ("stocks", "get_daily_valuation"),
     "stocks.indicators.money_flow": ("stocks", "get_money_flow"),
+    "stocks.indicators.money_flow.batch": ("stocks", "get_money_flow_batch"),
     "stocks.indicators.premarket": ("stocks", "get_premarket"),
     "stocks.indicators.risk_flags": ("stocks", "get_risk_flags"),
     "stocks.ownership.ccass_holding_details": ("stocks", "get_ccass_holding_details"),

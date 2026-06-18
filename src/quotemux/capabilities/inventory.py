@@ -64,7 +64,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/adj", ("stocks.factors.adj",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/technical", ("stocks.factors.technical",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/indicators/money-flow", ("stocks.indicators.money_flow",)),
-    PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/batch", ("stocks.indicators.money_flow",)),
+    PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/batch", ("stocks.indicators.money_flow.batch",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/ah-comparisons", ("stocks.indicators.ah_comparisons",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/daily-basic", ("stocks.indicators.daily_basic",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/daily-valuation", ("stocks.indicators.daily_valuation",)),

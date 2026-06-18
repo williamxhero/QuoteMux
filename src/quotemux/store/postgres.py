@@ -100,7 +100,7 @@ def _time_field_for_capability(capability_id: str) -> str:
         return "trade_time"
     if capability_id.startswith("boards.quotes.") or capability_id.startswith("markets.trading.open_auctions"):
         return "trade_time"
-    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow"}:
+    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
         return "trade_date"
     if capability_id == "stocks.indicators.risk_flags":
         return "start_date"
@@ -238,7 +238,7 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "holder_name", "start_date", "end_date", "status")
     if capability_id == "stocks.ownership.shareholders.count":
         return ("code", "trade_date")
-    if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow"}:
+    if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
         return ("code", "trade_date")
     if capability_id == "stocks.indicators.risk_flags":
         return ("code", "flag_type", "start_date", "end_date", "status")
@@ -312,6 +312,8 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code",)
     if capability_id == "stocks.indicators.money_flow":
         return ("code", "view")
+    if capability_id == "stocks.indicators.money_flow.batch":
+        return ("codes", "view")
     if capability_id == "stocks.indicators.risk_flags":
         return ("flag_type", "status")
     if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot"}:

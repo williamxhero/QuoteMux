@@ -72,6 +72,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("stocks.indicators.daily_market_value", True, "daily", 180),
     _policy("stocks.indicators.daily_valuation", True, "daily", 180),
     _policy("stocks.indicators.money_flow", True, "daily", 180),
+    _policy("stocks.indicators.money_flow.batch", True, "daily", 180),
     _policy("stocks.indicators.premarket", True, "daily", 30),
     _policy("stocks.indicators.risk_flags", True, "daily", 180),
     _policy("stocks.ownership.ccass_holding_details", False, "daily", 180),

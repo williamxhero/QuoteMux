@@ -228,6 +228,7 @@ def _guess_handler_name(capability_id: str, available_handlers: set[str]) -> str
         "stocks.indicators.daily_market_value": "get_stock_daily_market_value",
         "stocks.indicators.daily_valuation": "get_stock_daily_valuation",
         "stocks.indicators.money_flow": "get_stock_money_flow",
+        "stocks.indicators.money_flow.batch": "get_stock_money_flow_batch",
         "stocks.indicators.premarket": "get_premarket",
         "stocks.indicators.risk_flags": "get_stock_risk_flags",
         "stocks.ownership.ccass_holding_details": "get_ccass_holding_details",

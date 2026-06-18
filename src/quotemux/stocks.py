@@ -12,7 +12,7 @@ from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, merge_model_lists, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.local_daily import get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_previous as get_local_stock_daily_previous, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
-from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_money_flow_batch, get_local_stock_name_history, get_local_stock_profile
+from quotemux.local_store import get_local_stock_catalog, get_local_stock_intraday_quotes, get_local_stock_name_history, get_local_stock_profile
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
@@ -822,7 +822,23 @@ class QuoteMuxStocks:
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
         if not code_list:
             return []
-        return get_local_stock_money_flow_batch(code_list, trade_date, view)
+        store_identity = {"codes": ",".join(code_list), "trade_date": trade_date, "view": view}
+        handlers = {
+            "get_stock_money_flow_batch": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_money_flow_batch", ",".join(code_list), trade_date, view),
+        }
+        sorted_items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.indicators.money_flow.batch",
+                store_identity=store_identity,
+                model_type=StockMoneyFlowItem,
+                key_fields=("code", "trade_date", "view"),
+                sort_fields=("code", "trade_date"),
+                request_builder=lambda current_items: [()] if current_items == [] else [],
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.indicators.money_flow.batch", handlers, ("tushare", "akshare")),
+                source_order=self._settings.get_contract_source_order("stocks.indicators.money_flow.batch", ("tushare", "akshare")),
+            )
+        )
+        return sorted_items
 
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
         store_identity = {
