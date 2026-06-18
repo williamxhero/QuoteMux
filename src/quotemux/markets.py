@@ -72,6 +72,12 @@ def _build_connect_flow_requests(items: list[ConnectCapitalFlowItem], trade_date
     return [] if complete else [()]
 
 
+def _connect_flow_source_order(settings: QuoteMuxSettings) -> tuple[str, ...]:
+    if settings.enabled_sources != ():
+        return tuple(source_name for source_name in ("tushare", "akshare") if source_name in settings.enabled_sources)
+    return ("tushare",)
+
+
 class QuoteMuxMarkets:
     def __init__(self, settings: QuoteMuxSettings) -> None:
         self._settings = settings
@@ -212,6 +218,7 @@ class QuoteMuxMarkets:
         handlers = {
             "get_connect_capital_flow": lambda instance: lambda: _source_package_call(instance.package_id, "get_connect_capital_flow", trade_date, start_date, end_date),
         }
+        source_order = _connect_flow_source_order(self._settings)
         items, _ = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="markets.connect.capital_flow",
@@ -220,8 +227,8 @@ class QuoteMuxMarkets:
                 key_fields=("market", "trade_date"),
                 sort_fields=("trade_date", "market"),
                 request_builder=lambda current_items: _build_connect_flow_requests(current_items, trade_date, start_date, end_date),
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.connect.capital_flow", handlers, ("tushare", "akshare")),
-                source_order=self._settings.get_contract_source_order("markets.connect.capital_flow", ("tushare", "akshare")),
+                provider_steps=lambda: tuple(step for step in SourceInstanceExecutor(self._settings).build_steps("markets.connect.capital_flow", handlers, source_order) if step.name in source_order),
+                source_order=source_order,
             )
         )
         return items
