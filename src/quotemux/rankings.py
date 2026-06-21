@@ -37,7 +37,7 @@ class QuoteMuxRankings:
         handlers = {
             "get_rank_research_reports": lambda instance: lambda: _source_package_call(instance.package_id, "get_rank_research_reports", trade_date, start_date, end_date, ensure_limit(limit)),
         }
-        items = self._source_list("rankings.research.reports", handlers, ("tushare",), ("trade_date", "code", "institution", "title"))
+        items = self._source_list("rankings.research.reports", handlers, ("akshare", "tushare"), ("trade_date", "code", "institution", "title"))
         if store_read.partial_hit:
             items = merge_model_lists(store_items, items, ("trade_date", "code", "institution", "title"))
         items = sorted(items, key=lambda item: (item.trade_date, item.code, item.institution, item.title))

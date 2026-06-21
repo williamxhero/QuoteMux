@@ -22,6 +22,7 @@ from quotemux.settings import QuoteMuxSettings
 MAX_DAILY_INDICATOR_CODES = 200
 QUOTE_REQUEST_CODE_BATCH_SIZE = 10
 MONEY_FLOW_REQUEST_CODE_BATCH_SIZE = 10
+HL_SIGNAL_RECENT_WINDOW_DAYS = 20
 
 
 def _today_text() -> str:
@@ -112,6 +113,49 @@ def _build_quote_range_requests(grouped_ranges: dict[tuple[str, str], list[str]]
         for code_batch in _chunk_quote_codes(range_codes):
             requests.append((code_batch, range_start, range_end))
     return requests
+
+
+def _clip_recent_hl_range(range_start: str, range_end: str) -> tuple[str, str] | None:
+    start_day = parse_date_text(range_start)
+    end_day = parse_date_text(range_end)
+    if start_day is None or end_day is None or start_day > end_day:
+        return None
+    window_start = end_day - timedelta(days=HL_SIGNAL_RECENT_WINDOW_DAYS - 1)
+    clipped_start = max(start_day, window_start)
+    if clipped_start > end_day:
+        return None
+    return clipped_start.strftime("%Y-%m-%d"), end_day.strftime("%Y-%m-%d")
+
+
+def _build_hl_signal_requests(
+    items: list[HLSignalItem],
+    trade_date: str,
+    start_date: str,
+    end_date: str,
+    settings: QuoteMuxSettings,
+) -> list[tuple[str, str]]:
+    actual_trade_date = format_date_value(trade_date)
+    existing_dates = {item.trade_date for item in items}
+    if actual_trade_date != "":
+        return [] if actual_trade_date in existing_dates else [(actual_trade_date, actual_trade_date)]
+
+    actual_start = format_date_value(start_date)
+    actual_end = format_date_value(end_date)
+    if actual_start == "" and actual_end == "":
+        return [] if items != [] else [("", "")]
+    if actual_start == "":
+        actual_start = actual_end
+    if actual_end == "":
+        actual_end = actual_start
+
+    expected_dates = _expected_trade_dates(actual_start, actual_end, settings)
+    missing_ranges = build_missing_expected_date_ranges(expected_dates, existing_dates) if expected_dates != [] else _build_missing_date_ranges(actual_start, actual_end, existing_dates)
+    clipped_ranges: list[tuple[str, str]] = []
+    for missing_start, missing_end in missing_ranges:
+        clipped = _clip_recent_hl_range(missing_start, missing_end)
+        if clipped is not None:
+            clipped_ranges.append(clipped)
+    return clipped_ranges
 
 
 def _expected_quote_trade_times(freq: str, expected_dates: list[str]) -> list[str]:
@@ -899,18 +943,28 @@ class QuoteMuxStocks:
             return []
         store_identity = {"code": normalized, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}
         handlers = {
-            "get_hl_signal": lambda instance: lambda: _source_package_call(instance.package_id, "get_hl_signal", normalized, trade_date, start_date, end_date),
+            "get_hl_signal": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_hl_signal", normalized, "", missing_start, missing_end),
         }
-        return self._store_list(
-            "stocks.signals.hl",
-            store_identity,
-            HLSignalItem,
-            ("code", "trade_date", "signal", "first_extreme"),
-            ("code", "trade_date", "signal"),
-            lambda: get_local_stock_hl_signal(normalized, trade_date, start_date, end_date) or self._source_list("stocks.signals.hl", handlers, ("derived_core",), ("code", "trade_date", "signal", "first_extreme")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.signals.hl",
+                store_identity=store_identity,
+                model_type=HLSignalItem,
+                key_fields=("code", "trade_date", "signal", "first_extreme"),
+                sort_fields=("code", "trade_date", "signal"),
+                request_builder=lambda current_items: _build_hl_signal_requests(current_items, trade_date, start_date, end_date, self._settings),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.signals.hl", handlers, ("derived_core",)),
+                source_order=self._settings.get_contract_source_order("stocks.signals.hl", ("derived_core",)),
+                base_items=get_local_stock_hl_signal(normalized, trade_date, start_date, end_date),
+                base_source_name="fact.stock_daily_1d",
+            )
         )
+        return list(items)
 
     def get_nine_turn(self, code: str, freq: str, trade_date: str, start_date: str, end_date: str) -> list[NineTurnItem]:
+        if freq not in {"", "D", "daily"}:
+            items = _source_package_call("derived_core", "get_nine_turn", code, freq, trade_date, start_date, end_date)
+            return sorted([item for item in items if isinstance(item, NineTurnItem)], key=lambda item: (item.code, item.trade_time, item.freq)) if isinstance(items, list) else []
         store_identity = {"code": code, "freq": freq, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}
         handlers = {
             "get_nine_turn": lambda instance: lambda: _source_package_call(instance.package_id, "get_nine_turn", code, freq, trade_date, start_date, end_date),
@@ -1186,7 +1240,7 @@ class QuoteMuxStocks:
             ExpressItem,
             ("code", "report_period", "announce_date"),
             ("code", "report_period", "announce_date"),
-            lambda: self._source_list("stocks.finance.express", handlers, ("tushare", "akshare", "efinance"), ("code", "report_period", "announce_date")),
+            lambda: self._source_list("stocks.finance.express", handlers, ("efinance", "tushare", "akshare"), ("code", "report_period", "announce_date")),
         )
 
     def get_forecasts(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ForecastItem]:
@@ -1336,7 +1390,7 @@ class QuoteMuxStocks:
             ShareholderTop10Item,
             ("code", "report_period", "rank", "shareholder_name"),
             ("code", "report_period", "rank"),
-            lambda: self._source_list("stocks.ownership.shareholders.top10", handlers, ("tushare", "akshare"), ("code", "report_period", "rank", "shareholder_name")),
+            lambda: self._source_list("stocks.ownership.shareholders.top10", handlers, ("akshare", "tushare"), ("code", "report_period", "rank", "shareholder_name")),
         )
 
     def get_shareholder_top10_float(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
@@ -1350,7 +1404,7 @@ class QuoteMuxStocks:
             ShareholderTop10Item,
             ("code", "report_period", "rank", "shareholder_name"),
             ("code", "report_period", "rank"),
-            lambda: self._source_list("stocks.ownership.shareholders.top10_float", handlers, ("tushare", "akshare"), ("code", "report_period", "rank", "shareholder_name")),
+            lambda: self._source_list("stocks.ownership.shareholders.top10_float", handlers, ("akshare", "tushare"), ("code", "report_period", "rank", "shareholder_name")),
         )
 
     def get_research_reports(self, code: str, report_date: str, start_date: str, end_date: str):
@@ -1364,7 +1418,7 @@ class QuoteMuxStocks:
             ResearchReportItem,
             ("code", "report_date", "institution", "title"),
             ("code", "report_date", "institution", "title"),
-            lambda: self._source_list("stocks.research.reports", handlers, ("tushare", "akshare"), ("code", "report_date", "institution", "title")),
+            lambda: self._source_list("stocks.research.reports", handlers, ("akshare", "tushare"), ("code", "report_date", "institution", "title")),
         )
 
     def get_surveys(self, code: str, survey_date: str, start_date: str, end_date: str) -> list[SurveyItem]:
@@ -1420,5 +1474,5 @@ class QuoteMuxStocks:
             AuctionItem,
             ("code", "trade_date", "auction_time", "session"),
             ("trade_date", "code", "auction_time"),
-            lambda: self._source_list("stocks.quotes.auctions", handlers, ("tushare", "akshare"), ("code", "trade_date", "auction_time", "session")),
+            lambda: self._source_list("stocks.quotes.auctions", handlers, ("akshare", "tushare"), ("code", "trade_date", "auction_time", "session")),
         )

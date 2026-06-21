@@ -263,20 +263,30 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
         return ("tushare", "akshare")
     if capability_id == "boards.indicators.money_flow":
-        return ("tushare", "akshare", "derived_core")
+        return ("akshare", "tushare", "derived_core")
     if capability_id == "boards.members":
         return ("derived_core", "tushare", "akshare")
     if capability_id in {"boards.catalog", "boards.profile", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
         return ("tushare", "akshare")
     if capability_id == "boards.quotes.daily":
         return ("tushare", "efinance", "akshare")
-    if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions", "markets.participants.hot_money.details", "markets.trading.open_auctions", "stocks.quotes.auctions"}:
+    if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions", "markets.trading.open_auctions"}:
         return ("tushare", "akshare")
+    if capability_id == "markets.participants.hot_money.details":
+        return ("akshare", "tushare")
+    if capability_id == "stocks.quotes.auctions":
+        return ("akshare", "tushare")
     if capability_id == "markets.participants.dragon_tiger":
         return ("tushare", "akshare", "efinance")
-    if capability_id in {"stocks.finance.express", "stocks.finance.indicators"}:
+    if capability_id == "stocks.finance.express":
+        return ("efinance", "tushare", "akshare")
+    if capability_id == "stocks.finance.indicators":
         return ("tushare", "akshare", "efinance")
-    if capability_id in {"stocks.finance.disclosure_dates", "stocks.finance.forecasts", "stocks.finance.main_business", "stocks.finance.statements", "stocks.profile.company", "stocks.research.reports", "stocks.research.surveys"}:
+    if capability_id == "rankings.research.reports":
+        return ("akshare", "tushare")
+    if capability_id == "stocks.research.reports":
+        return ("akshare", "tushare")
+    if capability_id in {"stocks.finance.disclosure_dates", "stocks.finance.forecasts", "stocks.finance.main_business", "stocks.finance.statements", "stocks.profile.company", "stocks.research.surveys"}:
         return ("tushare", "akshare")
     if capability_id in {
         "stocks.corporate_actions.dividends",
@@ -287,16 +297,18 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "stocks.ownership.hk_connect_holdings",
         "stocks.ownership.pledges.details",
         "stocks.ownership.pledges.stats",
-        "stocks.ownership.shareholders.top10",
-        "stocks.ownership.shareholders.top10_float",
     }:
         return ("tushare", "akshare")
+    if capability_id in {"stocks.ownership.shareholders.top10", "stocks.ownership.shareholders.top10_float"}:
+        return ("akshare", "tushare")
     if capability_id == "stocks.ownership.shareholders.changes":
         return ("derived_core", "tushare", "akshare")
     if capability_id == "stocks.ownership.shareholders.count":
         return ("tushare", "akshare", "efinance")
     if capability_id == "stocks.signals.hl":
         return ("derived_core", "tushare", "opentdx", "efinance", "mootdx", "akshare")
+    if capability_id == "stocks.signals.nine_turn":
+        return ("tushare", "derived_core")
     if capability_id == "stocks.factors.technical":
         return ("derived_core", "tushare")
     if capability_id == "markets.connect.quotas":

@@ -368,7 +368,7 @@ class QuoteMuxMarkets:
             HotMoneyDetailItem,
             ("trade_date", "name", "code"),
             ("trade_date", "name", "code"),
-            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("tushare", "akshare"), ("trade_date", "name", "code")),
+            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("akshare", "tushare"), ("trade_date", "name", "code")),
         )
         return items[offset: offset + ensure_limit(limit)]
 

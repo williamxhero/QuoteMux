@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem
+from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, StockMoneyFlowItem
 from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.local_store import get_latest_complete_board_daily_snapshot_codes, get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_members, get_local_board_profile, get_local_board_quotes
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor, run_fallback_chain_with_report
+from quotemux.source_packages.instance_context import use_source_instance
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
 from quotemux.reports import ContractReport
@@ -18,6 +19,12 @@ from quotemux.store import load_store_result, store_result
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
     handler = get_default_source_package_registry().get_handler(package_id, handler_name)
     return handler(*args)
+
+
+def _source_package_call_with_instance(instance: object, handler_name: str, *args: object) -> object:
+    handler = get_default_source_package_registry().get_handler(instance.package_id, handler_name)
+    with use_source_instance(instance):
+        return handler(*args)
 
 
 def _today_text() -> str:
@@ -184,6 +191,61 @@ def _load_money_flow_snapshot_item(board_code: str, trade_date: str, scope: str)
     return [item for item in items if item.board_code.upper() == normalized_board_code and item.trade_date == actual_trade_date and item.scope == scope]
 
 
+def _load_money_flow_snapshot_range_items(board_code: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
+    actual_start_date = format_date_value(start_date)
+    actual_end_date = format_date_value(end_date)
+    start_day = parse_date_text(actual_start_date)
+    end_day = parse_date_text(actual_end_date)
+    if board_code == "" or start_day is None or end_day is None or start_day > end_day:
+        return []
+    items: list[BoardMoneyFlowItem] = []
+    current_day = start_day
+    while current_day <= end_day:
+        items.extend(_load_money_flow_snapshot_item(board_code, current_day.strftime("%Y-%m-%d"), scope))
+        current_day += timedelta(days=1)
+    return sorted(items, key=lambda item: (item.board_code, item.trade_date))
+
+
+def _money_flow_date_values(trade_date: str, start_date: str, end_date: str) -> list[str]:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date != "":
+        return [actual_trade_date]
+    actual_start_date = format_date_value(start_date)
+    actual_end_date = format_date_value(end_date)
+    if actual_start_date == "" and actual_end_date == "":
+        return []
+    if actual_start_date == "":
+        actual_start_date = actual_end_date
+    if actual_end_date == "":
+        actual_end_date = actual_start_date
+    start_day = parse_date_text(actual_start_date)
+    end_day = parse_date_text(actual_end_date)
+    if start_day is None or end_day is None or start_day > end_day:
+        return []
+    values: list[str] = []
+    current_day = start_day
+    while current_day <= end_day:
+        values.append(current_day.strftime("%Y-%m-%d"))
+        current_day += timedelta(days=1)
+    return values
+
+
+def _sum_money_flow_values(values: list[float | None]) -> float | None:
+    present_values = [value for value in values if value is not None]
+    if present_values == []:
+        return None
+    return float(sum(present_values))
+
+
+def _aggregate_board_money_flow_item(board_code: str, trade_date: str, scope: str, items: list[StockMoneyFlowItem]) -> BoardMoneyFlowItem | None:
+    inflow = _sum_money_flow_values([item.main_inflow for item in items])
+    outflow = _sum_money_flow_values([item.main_outflow for item in items])
+    net_inflow = _sum_money_flow_values([item.net_inflow for item in items])
+    if inflow is None and outflow is None and net_inflow is None:
+        return None
+    return BoardMoneyFlowItem(board_code=board_code.upper(), trade_date=trade_date, scope=scope, inflow=inflow, outflow=outflow, net_inflow=net_inflow)
+
+
 class QuoteMuxBoards:
     def __init__(self, settings: QuoteMuxSettings) -> None:
         self._settings = settings
@@ -343,14 +405,86 @@ class QuoteMuxBoards:
         )
         return items
 
+    def _get_board_money_flow_from_stock_flows(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
+        if scope != "board":
+            return []
+        date_values = _money_flow_date_values(trade_date, start_date, end_date)
+        if date_values == []:
+            return []
+        from quotemux.stocks import QuoteMuxStocks
+
+        stock_client = QuoteMuxStocks(self._settings)
+        rows: list[BoardMoneyFlowItem] = []
+        member_items = self._get_tushare_board_members(board_code, date_values[-1])
+        if member_items == []:
+            member_items = self.get_members(board_code, date_values[-1])
+        member_codes = [item.code for item in member_items if item.code != ""]
+        member_codes = list(dict.fromkeys(member_codes))
+        if member_codes == []:
+            return []
+        for date_value in date_values:
+            if member_codes == []:
+                continue
+            flow_items = stock_client.get_money_flow_batch(",".join(member_codes), date_value, "main")
+            filtered_items = [item for item in flow_items if item.code in member_codes and item.trade_date == date_value and item.view == "main"]
+            item = _aggregate_board_money_flow_item(board_code, date_value, scope, filtered_items)
+            if item is not None:
+                rows.append(item)
+        return sorted(rows, key=lambda item: (item.board_code, item.trade_date))
+
+    def _get_tushare_board_members(self, board_code: str, trade_date: str) -> list[BoardMemberItem]:
+        for instance in self._settings.get_contract_source_instances("boards.members", ("tushare",)):
+            if instance.package_id != "tushare":
+                continue
+            items = _source_package_call_with_instance(instance, "get_board_members", board_code, trade_date)
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, BoardMemberItem)]
+        return []
+
     def get_money_flow(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
         snapshot_items = _load_money_flow_snapshot_item(board_code, trade_date, scope)
         if snapshot_items != []:
             return sorted(snapshot_items, key=lambda item: (item.board_code, item.trade_date))
+        snapshot_range_items = _load_money_flow_snapshot_range_items(board_code, start_date, end_date, scope)
+        if snapshot_range_items != []:
+            return snapshot_range_items
         store_identity = {"board_code": board_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "scope": scope}
+        store_items, store_read = load_store_result("boards.indicators.money_flow", store_identity, BoardMoneyFlowItem)
+        if store_read.hit and self._build_money_flow_requests(store_items, trade_date, start_date, end_date) == []:
+            return sorted(store_items, key=lambda item: (item.board_code, item.trade_date))
+        stock_flow_items = self._get_board_money_flow_from_stock_flows(board_code, trade_date, start_date, end_date, scope)
+        if stock_flow_items != []:
+            store_result(
+                "boards.indicators.money_flow",
+                store_identity,
+                stock_flow_items,
+                ContractReport(
+                    contract_name="boards.indicators.money_flow",
+                    source_hit_counts={"stocks.indicators.money_flow.batch": 1},
+                    source_request_counts={"stocks.indicators.money_flow.batch": 1},
+                ),
+            )
+            return stock_flow_items
+        if scope == "board":
+            derived_items = _source_package_call("derived_core", "get_board_money_flow", board_code, trade_date, start_date, end_date, scope)
+            if isinstance(derived_items, list):
+                typed_items = [item for item in derived_items if isinstance(item, BoardMoneyFlowItem)]
+                if typed_items != []:
+                    store_result(
+                        "boards.indicators.money_flow",
+                        store_identity,
+                        typed_items,
+                        ContractReport(
+                            contract_name="boards.indicators.money_flow",
+                            source_hit_counts={"derived_core": 1},
+                            source_request_counts={"derived_core": 1},
+                        ),
+                    )
+                    return sorted(typed_items, key=lambda item: (item.board_code, item.trade_date))
         handlers = {
             "get_board_money_flow": lambda instance: lambda missing_start, missing_end: _source_package_call(instance.package_id, "get_board_money_flow", board_code, trade_date, missing_start, missing_end, scope),
         }
+        source_order = ("akshare", "tushare", "derived_core")
         sorted_items, _ = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="boards.indicators.money_flow",
@@ -359,13 +493,13 @@ class QuoteMuxBoards:
                 key_fields=("board_code", "trade_date", "scope"),
                 sort_fields=("board_code", "trade_date"),
                 request_builder=lambda items: self._build_money_flow_requests(items, trade_date, start_date, end_date),
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, ("tushare", "akshare", "derived_core")),
-                source_order=self._settings.get_contract_source_order("boards.indicators.money_flow", ("tushare", "akshare", "derived_core")),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.indicators.money_flow", handlers, source_order),
+                source_order=self._settings.get_contract_source_order("boards.indicators.money_flow", source_order),
                 base_items=[],
                 base_source_name="",
             )
         )
-        if sorted_items == [] and board_code.upper().startswith("BK"):
+        if sorted_items == []:
             derived_items = _source_package_call("derived_core", "get_board_money_flow", board_code, trade_date, start_date, end_date, scope)
             if isinstance(derived_items, list):
                 typed_items = [item for item in derived_items if isinstance(item, BoardMoneyFlowItem)]
