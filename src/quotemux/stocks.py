@@ -158,6 +158,47 @@ def _build_hl_signal_requests(
     return clipped_ranges
 
 
+def _report_period_candidates(report_period: str, start_period: str, end_period: str) -> list[str]:
+    actual_period = format_date_value(report_period)
+    if actual_period != "":
+        return [actual_period]
+    actual_start = format_date_value(start_period)
+    actual_end = format_date_value(end_period)
+    if actual_start == "" or actual_end == "":
+        return []
+    start_day = parse_date_text(actual_start)
+    end_day = parse_date_text(actual_end)
+    if start_day is None or end_day is None or start_day > end_day:
+        return []
+    rows: list[str] = []
+    for year in range(start_day.year, end_day.year + 1):
+        for month, day in ((3, 31), (6, 30), (9, 30), (12, 31)):
+            current = start_day.replace(year=year, month=month, day=day)
+            if start_day <= current <= end_day:
+                rows.append(current.strftime("%Y-%m-%d"))
+    return rows
+
+
+def _build_shareholder_top10_requests(
+    items: list[ShareholderTop10Item],
+    report_period: str,
+    start_period: str,
+    end_period: str,
+) -> list[tuple[str, str, str]]:
+    expected_periods = _report_period_candidates(report_period, start_period, end_period)
+    if expected_periods == []:
+        return [] if items != [] else [(report_period, start_period, end_period)]
+    existing_ranks_by_period: dict[str, set[int]] = {}
+    for item in items:
+        existing_ranks_by_period.setdefault(item.report_period, set()).add(item.rank)
+    requests: list[tuple[str, str, str]] = []
+    for period in expected_periods:
+        existing_ranks = existing_ranks_by_period.get(period, set())
+        if len(existing_ranks) < 10:
+            requests.append((period, "", ""))
+    return requests
+
+
 def _expected_quote_trade_times(freq: str, expected_dates: list[str]) -> list[str]:
     return expected_intraday_trade_times(freq, expected_dates)
 
@@ -1382,30 +1423,40 @@ class QuoteMuxStocks:
     def get_shareholder_top10(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
         handlers = {
-            "get_shareholder_top10": lambda instance: lambda: _source_package_call(instance.package_id, "get_shareholder_top10", code, report_period, start_period, end_period, False),
+            "get_shareholder_top10": lambda instance: lambda missing_report_period, missing_start_period, missing_end_period: _source_package_call(instance.package_id, "get_shareholder_top10", code, missing_report_period, missing_start_period, missing_end_period, False),
         }
-        return self._store_list(
-            "stocks.ownership.shareholders.top10",
-            store_identity,
-            ShareholderTop10Item,
-            ("code", "report_period", "rank", "shareholder_name"),
-            ("code", "report_period", "rank"),
-            lambda: self._source_list("stocks.ownership.shareholders.top10", handlers, ("akshare", "tushare"), ("code", "report_period", "rank", "shareholder_name")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.ownership.shareholders.top10",
+                store_identity=store_identity,
+                model_type=ShareholderTop10Item,
+                key_fields=("code", "report_period", "rank", "shareholder_name"),
+                sort_fields=("code", "report_period", "rank"),
+                request_builder=lambda current_items: _build_shareholder_top10_requests(current_items, report_period, start_period, end_period),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.ownership.shareholders.top10", handlers, ("akshare", "tushare")),
+                source_order=self._settings.get_contract_source_order("stocks.ownership.shareholders.top10", ("akshare", "tushare")),
+            )
         )
+        return list(items)
 
     def get_shareholder_top10_float(self, code: str, report_period: str, start_period: str, end_period: str) -> list[ShareholderTop10Item]:
         store_identity = {"code": code, "report_period": report_period, "start_period": start_period, "end_period": end_period}
         handlers = {
-            "get_shareholder_top10": lambda instance: lambda: _source_package_call(instance.package_id, "get_shareholder_top10", code, report_period, start_period, end_period, True),
+            "get_shareholder_top10": lambda instance: lambda missing_report_period, missing_start_period, missing_end_period: _source_package_call(instance.package_id, "get_shareholder_top10", code, missing_report_period, missing_start_period, missing_end_period, True),
         }
-        return self._store_list(
-            "stocks.ownership.shareholders.top10_float",
-            store_identity,
-            ShareholderTop10Item,
-            ("code", "report_period", "rank", "shareholder_name"),
-            ("code", "report_period", "rank"),
-            lambda: self._source_list("stocks.ownership.shareholders.top10_float", handlers, ("akshare", "tushare"), ("code", "report_period", "rank", "shareholder_name")),
+        items, _ = execute_capability_query(
+            CapabilityQuerySpec(
+                capability_id="stocks.ownership.shareholders.top10_float",
+                store_identity=store_identity,
+                model_type=ShareholderTop10Item,
+                key_fields=("code", "report_period", "rank", "shareholder_name"),
+                sort_fields=("code", "report_period", "rank"),
+                request_builder=lambda current_items: _build_shareholder_top10_requests(current_items, report_period, start_period, end_period),
+                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.ownership.shareholders.top10_float", handlers, ("akshare", "tushare")),
+                source_order=self._settings.get_contract_source_order("stocks.ownership.shareholders.top10_float", ("akshare", "tushare")),
+            )
         )
+        return list(items)
 
     def get_research_reports(self, code: str, report_date: str, start_date: str, end_date: str):
         store_identity = {"code": code, "report_date": report_date, "start_date": start_date, "end_date": end_date}
