@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 import hashlib
+import shutil
 import subprocess
 import sys
 
@@ -66,7 +67,9 @@ def installed_packages_fingerprint() -> str:
 
 
 def _install_distribution(python_executable: str) -> None:
-    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", _package_install_target()], check=True)
+    target = _package_install_target()
+    _clean_local_package_build_artifacts(target)
+    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", target], check=True)
 
 
 def _package_install_target() -> str:
@@ -86,3 +89,12 @@ def _find_local_package_project_root() -> Path | None:
         if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
             return candidate
     return None
+
+
+def _clean_local_package_build_artifacts(target: str) -> None:
+    project_root = Path(target)
+    if not project_root.is_dir():
+        return
+    for child in project_root.iterdir():
+        if child.name == "build" or child.name.endswith(".egg-info"):
+            shutil.rmtree(child, ignore_errors=True)
