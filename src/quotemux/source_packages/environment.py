@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -153,8 +154,19 @@ def _install_runtime_requirements(python_executable: Path) -> None:
     _install_distribution_for_python(str(python_executable))
 
 
+def _clean_local_package_build_artifacts(target: str) -> None:
+    project_root = Path(target)
+    if not project_root.is_dir():
+        return
+    for child in project_root.iterdir():
+        if child.name == "build" or child.name.endswith(".egg-info"):
+            shutil.rmtree(child, ignore_errors=True)
+
+
 def _install_distribution_for_python(python_executable: str) -> None:
-    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", package_install_target()], check=True)
+    target = package_install_target()
+    _clean_local_package_build_artifacts(target)
+    subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", target], check=True)
 
 
 def find_local_package_project_root() -> Path | None:

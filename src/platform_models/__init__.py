@@ -537,6 +537,19 @@ class StockPremarketItem(ApiModel):
     limit_down: float | None = None
 
 
+class LimitOrderAmountItem(ApiModel):
+    code: str
+    trade_date: str
+    limit_side: str
+    market: str
+    close: float | None = None
+    limit_price: float | None = None
+    order_price: float | None = None
+    order_volume: float | None = None
+    order_amount: float | None = None
+    captured_at: str
+
+
 class ChipDistributionItem(ApiModel):
     code: str
     trade_date: str

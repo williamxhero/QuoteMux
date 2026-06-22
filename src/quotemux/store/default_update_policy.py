@@ -98,6 +98,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("stocks.research.reports", False, "daily", 180),
     _policy("stocks.research.surveys", False, "daily", 180),
     _policy("stocks.signals.hl", True, "daily", 1),
+    _policy("stocks.signals.limit_order_amount", False, "daily", 30),
     _policy("stocks.signals.nine_turn", True, "daily", 30),
 )
 

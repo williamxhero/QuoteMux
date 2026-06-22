@@ -128,7 +128,7 @@ def _time_field_for_capability(capability_id: str) -> str:
         return "as_of_date"
     if capability_id == "stocks.profile.management_rewards":
         return "ann_date"
-    if capability_id == "stocks.signals.hl":
+    if capability_id in {"stocks.signals.hl", "stocks.signals.limit_order_amount"}:
         return "trade_date"
     if capability_id == "stocks.signals.nine_turn":
         return "trade_time"
@@ -224,6 +224,8 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "ann_date", "name", "title")
     if capability_id == "stocks.signals.hl":
         return ("code", "trade_date", "signal", "first_extreme")
+    if capability_id == "stocks.signals.limit_order_amount":
+        return ("code", "trade_date", "limit_side")
     if capability_id == "stocks.signals.nine_turn":
         return ("code", "trade_time", "freq")
     if capability_id == "stocks.ownership.ccass_holdings":
@@ -306,6 +308,8 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("event_type", "stock_code", "sort_by", "include_sources", "include_content_text")
     if capability_id in {"markets.trading.open_auctions", "stocks.catalog.archive", "stocks.factors.technical", "stocks.indicators.ah_comparisons", "stocks.indicators.chip_distribution", "stocks.indicators.chip_performance", "stocks.indicators.premarket", "stocks.ownership.shareholders.changes", "stocks.profile.management_rewards", "stocks.profile.managers", "stocks.quotes.auctions", "stocks.signals.hl"}:
         return ("code",)
+    if capability_id == "stocks.signals.limit_order_amount":
+        return ()
     if capability_id == "stocks.signals.nine_turn":
         return ("code", "freq")
     if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation"}:
@@ -1107,7 +1111,7 @@ def _coverage_covers(policy: CachePolicy, coverage: CacheCoverage, scope: CacheS
     if not _is_fresh(policy, coverage.fresh_until, now):
         return False
     if policy.coverage_mode == "snapshot":
-        return coverage.scope_identity == scope.scope_identity
+        return coverage.scope_identity == scope.scope_identity and coverage.time_start == scope.time_start and coverage.time_end == scope.time_end
     return coverage.time_start <= scope.time_start and coverage.time_end >= scope.time_end
 
 
@@ -1115,13 +1119,13 @@ def _coverage_overlaps(policy: CachePolicy, coverage: CacheCoverage, scope: Cach
     if not _is_fresh(policy, coverage.fresh_until, now):
         return False
     if policy.coverage_mode == "snapshot":
-        return coverage.scope_identity == scope.scope_identity
+        return coverage.scope_identity == scope.scope_identity and coverage.time_start == scope.time_start and coverage.time_end == scope.time_end
     return coverage.time_start <= scope.time_end and coverage.time_end >= scope.time_start
 
 
 def _coverage_read_range(policy: CachePolicy, coverage: CacheCoverage, scope: CacheScope) -> tuple[datetime, datetime]:
     if policy.coverage_mode == "snapshot":
-        return datetime(1970, 1, 1), datetime(2100, 12, 31)
+        return scope.time_start, scope.time_end
     start = max(coverage.time_start, scope.time_start)
     end = min(coverage.time_end, scope.time_end)
     if policy.coverage_mode == "event_range" and start == end and start.time() == time.min:

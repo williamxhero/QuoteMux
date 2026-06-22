@@ -254,6 +254,7 @@ def _guess_handler_name(capability_id: str, available_handlers: set[str]) -> str
         "stocks.research.reports": "get_research_reports",
         "stocks.research.surveys": "get_surveys",
         "stocks.signals.hl": "get_hl_signal",
+        "stocks.signals.limit_order_amount": "get_limit_order_amount",
         "stocks.signals.nine_turn": "get_nine_turn",
     }
     handler_name = handler_map.get(normalized, "")

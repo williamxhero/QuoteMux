@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
+from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
 from quotemux.infra.common import build_time_bounds, format_date_value, normalize_stock_code, parse_date_text
 from quotemux.infra.db.reference_reads import load_stock_active_codes_frame
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
@@ -23,6 +23,8 @@ MAX_DAILY_INDICATOR_CODES = 200
 QUOTE_REQUEST_CODE_BATCH_SIZE = 10
 MONEY_FLOW_REQUEST_CODE_BATCH_SIZE = 10
 HL_SIGNAL_RECENT_WINDOW_DAYS = 20
+LIMIT_PRICE_TOLERANCE = 0.001
+LIMIT_ORDER_AMOUNT_CAPABILITY = "stocks.signals.limit_order_amount"
 
 
 def _today_text() -> str:
@@ -47,6 +49,53 @@ def _stock_daily_basic_has_value(item: StockDailyBasicItem) -> bool:
             item.float_share,
         ]
     )
+
+
+def _price_matches(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return False
+    return abs(left - right) <= LIMIT_PRICE_TOLERANCE
+
+
+def _limit_order_candidates(
+    quote_items: list[StockQuoteItem],
+    premarket_items: list[StockPremarketItem],
+    trade_date: str,
+) -> list[LimitOrderAmountItem]:
+    limits_by_code = {item.code: item for item in premarket_items if item.trade_date == trade_date}
+    candidates: list[LimitOrderAmountItem] = []
+    for quote in quote_items:
+        quote_date = format_date_value(quote.trade_time)
+        if quote_date != trade_date:
+            continue
+        limits = limits_by_code.get(quote.code)
+        if limits is None:
+            continue
+        if _price_matches(quote.close, limits.limit_up):
+            candidates.append(
+                LimitOrderAmountItem(
+                    code=quote.code,
+                    trade_date=trade_date,
+                    limit_side="up",
+                    market="",
+                    close=quote.close,
+                    limit_price=limits.limit_up,
+                    captured_at="",
+                )
+            )
+        if _price_matches(quote.close, limits.limit_down):
+            candidates.append(
+                LimitOrderAmountItem(
+                    code=quote.code,
+                    trade_date=trade_date,
+                    limit_side="down",
+                    market="",
+                    close=quote.close,
+                    limit_price=limits.limit_down,
+                    captured_at="",
+                )
+            )
+    return candidates
 
 
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
@@ -1143,6 +1192,59 @@ class QuoteMuxStocks:
             ("code", "trade_date"),
             lambda: self._source_list("stocks.indicators.premarket", handlers, ("tushare",), ("code", "trade_date")),
         )
+
+    def get_limit_order_amount(self, trade_date: str) -> list[LimitOrderAmountItem]:
+        actual_trade_date = format_date_value(trade_date)
+        if actual_trade_date == "":
+            raise ValueError("trade_date 不能为空")
+        items, _ = load_store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, {"trade_date": actual_trade_date}, LimitOrderAmountItem)
+        return sorted(items, key=lambda item: (item.trade_date, item.limit_side, item.code))
+
+    def build_limit_order_amount_candidates(self, trade_date: str) -> list[LimitOrderAmountItem]:
+        actual_trade_date = format_date_value(trade_date)
+        if actual_trade_date == "":
+            raise ValueError("trade_date 不能为空")
+        quote_items = self.get_daily_snapshot(StockDailySnapshotRequest(trade_date=actual_trade_date, limit=MARKET_DAILY_SNAPSHOT_LIMIT, offset=0, skip_suspended=True, skip_st=False))
+        premarket_items = self.get_premarket("", actual_trade_date, "", "")
+        if quote_items == []:
+            raise ValueError(f"{actual_trade_date} 收盘价数据为空")
+        if premarket_items == []:
+            raise ValueError(f"{actual_trade_date} 涨跌停价数据为空")
+        candidates = _limit_order_candidates(quote_items, premarket_items, actual_trade_date)
+        return sorted(candidates, key=lambda item: (item.limit_side, item.code))
+
+    def run_limit_order_amount_capture(self, trade_date: str) -> dict[str, object]:
+        actual_trade_date = format_date_value(trade_date) or datetime.now().strftime("%Y-%m-%d")
+        candidates = self.build_limit_order_amount_candidates(actual_trade_date)
+        handlers = {
+            "get_limit_order_amount": lambda instance: lambda code, request_trade_date, limit_side, close, limit_price: _source_package_call(instance.package_id, "get_limit_order_amount", code, request_trade_date, limit_side, close, limit_price),
+        }
+        steps = SourceInstanceExecutor(self._settings).build_steps(LIMIT_ORDER_AMOUNT_CAPABILITY, handlers, ("crawler_provider",))
+        source_order = self._settings.get_contract_source_order(LIMIT_ORDER_AMOUNT_CAPABILITY, ("crawler_provider",))
+        items, fallback_report = run_fallback_chain_with_report(
+            LIMIT_ORDER_AMOUNT_CAPABILITY,
+            [],
+            ("code", "trade_date", "limit_side"),
+            lambda current_items: [
+                (item.code, item.trade_date, item.limit_side, item.close, item.limit_price)
+                for item in candidates
+                if not any(current.code == item.code and current.trade_date == item.trade_date and current.limit_side == item.limit_side for current in current_items)
+            ],
+            steps,
+            source_order,
+        )
+        sorted_items = sorted(items, key=lambda item: (item.limit_side, item.code))
+        report = ContractReport.from_fallback_report(LIMIT_ORDER_AMOUNT_CAPABILITY, fallback_report)
+        write_result = store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, {"trade_date": actual_trade_date}, sorted_items, report, report.quarantine_count)
+        report = report.with_store_stats(miss=True, write=write_result.status == "write")
+        return {
+            "status": "success",
+            "trade_date": actual_trade_date,
+            "candidate_count": len(candidates),
+            "row_count": len(sorted_items),
+            "items": [item.model_dump() for item in sorted_items],
+            "report": report.to_dict(),
+        }
 
     def get_chip_distribution(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ChipDistributionItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}

@@ -237,13 +237,19 @@ def _sum_money_flow_values(values: list[float | None]) -> float | None:
     return float(sum(present_values))
 
 
+def _money_flow_yuan_to_yi(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return float(value) / 100000000.0
+
+
 def _aggregate_board_money_flow_item(board_code: str, trade_date: str, scope: str, items: list[StockMoneyFlowItem]) -> BoardMoneyFlowItem | None:
     inflow = _sum_money_flow_values([item.main_inflow for item in items])
     outflow = _sum_money_flow_values([item.main_outflow for item in items])
     net_inflow = _sum_money_flow_values([item.net_inflow for item in items])
     if inflow is None and outflow is None and net_inflow is None:
         return None
-    return BoardMoneyFlowItem(board_code=board_code.upper(), trade_date=trade_date, scope=scope, inflow=inflow, outflow=outflow, net_inflow=net_inflow)
+    return BoardMoneyFlowItem(board_code=board_code.upper(), trade_date=trade_date, scope=scope, inflow=_money_flow_yuan_to_yi(inflow), outflow=_money_flow_yuan_to_yi(outflow), net_inflow=_money_flow_yuan_to_yi(net_inflow))
 
 
 class QuoteMuxBoards:
@@ -441,6 +447,25 @@ class QuoteMuxBoards:
                 return [item for item in items if isinstance(item, BoardMemberItem)]
         return []
 
+    def _get_money_flow_from_market_snapshot(self, board_code: str, trade_date: str, scope: str) -> tuple[list[BoardMoneyFlowItem], bool]:
+        actual_trade_date = format_date_value(trade_date)
+        if board_code == "" or actual_trade_date == "":
+            return [], False
+        normalized_board_code = board_code.upper()
+        snapshot_hit = False
+        snapshot_scopes = ("concept", "industry") if scope == "board" else (scope,)
+        for snapshot_scope in snapshot_scopes:
+            items = self.get_market_money_flow(actual_trade_date, snapshot_scope, MARKET_DAILY_SNAPSHOT_LIMIT, 0)
+            snapshot_hit = snapshot_hit or items != []
+            matched = [
+                item.model_copy(update={"scope": scope})
+                for item in items
+                if item.board_code.upper() == normalized_board_code and item.trade_date == actual_trade_date
+            ]
+            if matched != []:
+                return matched, snapshot_hit
+        return [], snapshot_hit
+
     def get_money_flow(self, board_code: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[BoardMoneyFlowItem]:
         snapshot_items = _load_money_flow_snapshot_item(board_code, trade_date, scope)
         if snapshot_items != []:
@@ -448,6 +473,9 @@ class QuoteMuxBoards:
         snapshot_range_items = _load_money_flow_snapshot_range_items(board_code, start_date, end_date, scope)
         if snapshot_range_items != []:
             return snapshot_range_items
+        snapshot_items, _ = self._get_money_flow_from_market_snapshot(board_code, trade_date, scope)
+        if snapshot_items != []:
+            return sorted(snapshot_items, key=lambda item: (item.board_code, item.trade_date))
         store_identity = {"board_code": board_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "scope": scope}
         store_items, store_read = load_store_result("boards.indicators.money_flow", store_identity, BoardMoneyFlowItem)
         if store_read.hit and self._build_money_flow_requests(store_items, trade_date, start_date, end_date) == []:

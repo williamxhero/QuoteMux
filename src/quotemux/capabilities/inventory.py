@@ -60,6 +60,8 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/{code}/profile/managers", ("stocks.profile.managers",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/profile/management-rewards", ("stocks.profile.management_rewards",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/signals/hl", ("stocks.signals.hl",)),
+    PublicApiCapabilityBinding("/api/stocks/signals/limit-order-amount", ("stocks.signals.limit_order_amount",)),
+    PublicApiCapabilityBinding("/api/admin/capture/limit-order-amount/run-today", ("stocks.signals.limit_order_amount",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/signals/nine-turn", ("stocks.signals.nine_turn",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/adj", ("stocks.factors.adj",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/technical", ("stocks.factors.technical",)),
@@ -155,6 +157,7 @@ STORE_TARGET_CAPABILITIES = {
     "stocks.quotes.intraday",
     "stocks.quotes.daily",
     "stocks.quotes.daily_snapshot",
+    "stocks.signals.limit_order_amount",
     "indexes.quotes.daily",
     "markets.calendar.trading",
     "markets.events.news",
@@ -307,6 +310,8 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("tushare", "akshare", "efinance")
     if capability_id == "stocks.signals.hl":
         return ("derived_core", "tushare", "opentdx", "efinance", "mootdx", "akshare")
+    if capability_id == "stocks.signals.limit_order_amount":
+        return ("crawler_provider",)
     if capability_id == "stocks.signals.nine_turn":
         return ("tushare", "derived_core")
     if capability_id == "stocks.factors.technical":
