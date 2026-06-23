@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import time
 
 from quotemux.store.admin import CachePolicyUpdate, CapturePolicyPayload, QuoteMuxCacheAdmin, QuoteMuxCaptureAdmin
+from quotemux.store.timeout_admin import CapabilityTimeoutPolicyUpdate, ProviderTimeoutPolicyUpdate, QuoteMuxTimeoutAdmin
 
 
 def get_admin_cache_policies() -> tuple[dict[str, object], ...]:
@@ -90,6 +91,61 @@ def post_admin_run_capture(capability_id: str) -> dict[str, object]:
 
 def post_admin_run_due_captures() -> tuple[dict[str, object], ...]:
     return QuoteMuxCaptureAdmin().run_due_captures()
+
+
+def post_admin_timeout_sync_defaults() -> bool:
+    return QuoteMuxTimeoutAdmin().sync_defaults()
+
+
+def get_admin_capability_timeout_policies() -> tuple[dict[str, object], ...]:
+    return QuoteMuxTimeoutAdmin().list_capability_policies()
+
+
+def get_admin_provider_timeout_policies() -> tuple[dict[str, object], ...]:
+    return QuoteMuxTimeoutAdmin().list_provider_policies()
+
+
+def get_admin_effective_capability_timeouts() -> tuple[dict[str, object], ...]:
+    return QuoteMuxTimeoutAdmin().list_effective_capability_timeouts()
+
+
+def get_admin_effective_provider_timeouts() -> tuple[dict[str, object], ...]:
+    return QuoteMuxTimeoutAdmin().list_effective_provider_timeouts()
+
+
+def get_admin_provider_timeout_metrics(capability_id: str = "", provider: str = "", limit: int = 100) -> tuple[dict[str, object], ...]:
+    return QuoteMuxTimeoutAdmin().list_provider_metrics(capability_id, provider, limit)
+
+
+def get_admin_capability_timeout_metrics(capability_id: str = "", limit: int = 100) -> tuple[dict[str, object], ...]:
+    return QuoteMuxTimeoutAdmin().list_capability_metrics(capability_id, limit)
+
+
+def put_admin_capability_timeout_policy(capability_id: str, payload: dict[str, object]) -> dict[str, object]:
+    return QuoteMuxTimeoutAdmin().update_capability_policy(
+        CapabilityTimeoutPolicyUpdate(
+            capability_id=capability_id,
+            default_timeout_seconds=float(payload["default_timeout_seconds"]),
+            min_timeout_seconds=float(payload["min_timeout_seconds"]),
+            max_timeout_seconds=float(payload["max_timeout_seconds"]),
+            sample_window_size=int(payload["sample_window_size"]),
+            min_sample_count=int(payload["min_sample_count"]),
+        )
+    )
+
+
+def put_admin_provider_timeout_policy(capability_id: str, provider: str, payload: dict[str, object]) -> dict[str, object]:
+    return QuoteMuxTimeoutAdmin().update_provider_policy(
+        ProviderTimeoutPolicyUpdate(
+            capability_id=capability_id,
+            provider=provider,
+            default_timeout_seconds=float(payload["default_timeout_seconds"]),
+            min_timeout_seconds=float(payload["min_timeout_seconds"]),
+            max_timeout_seconds=float(payload["max_timeout_seconds"]),
+            sample_window_size=int(payload["sample_window_size"]),
+            min_sample_count=int(payload["min_sample_count"]),
+        )
+    )
 
 
 def _optional_int(value: object) -> int | None:

@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 import inspect
 import time
 from typing import Callable, Generic, Mapping, Sequence, TypeVar
@@ -10,11 +10,14 @@ from pydantic import BaseModel
 
 from quotemux.config_runtime.models import SourceInstanceConfig
 from quotemux.config_runtime.runtime import get_config_runtime
+from quotemux.provider_timeout.adaptive import resolve_capability_timeout
+from quotemux.provider_timeout.metrics import record_capability_timeout_metric
+from quotemux.provider_timeout.policy import CapabilityTimeoutMetric, TIMEOUT_STATUS_EMPTY, TIMEOUT_STATUS_ERROR, TIMEOUT_STATUS_SUCCESS, TIMEOUT_STATUS_TIMEOUT
+from quotemux.provider_timeout.runtime import run_provider_request
 from quotemux.runtime_core.audit import record_provider_event
 from quotemux.contracts.policies import get_contract_policy
 from quotemux.contracts.strategies import MERGE_STRATEGY_APPEND_DEDUPE, MERGE_STRATEGY_FIELD_CONSENSUS, MERGE_STRATEGY_FIRST_SUCCESS, MERGE_STRATEGY_FRESHEST_WINS, MERGE_STRATEGY_PRIORITY_FALLBACK, MERGE_STRATEGY_RAW_PASSTHROUGH, normalize_merge_strategy
 from quotemux.settings import QuoteMuxSettings
-from quotemux.source_packages.instance_context import use_source_instance
 from quotemux.source_packages.registry import get_default_source_package_registry
 
 
@@ -95,6 +98,18 @@ class ProviderFetchResult(Generic[T]):
     @property
     def fetched_row_count(self) -> int:
         return len(self.items)
+
+
+@dataclass(frozen=True)
+class CapabilityTimeoutBudget:
+    timeout_seconds: float
+    started_at: float
+
+    def remaining_seconds(self) -> float:
+        return self.timeout_seconds - (time.perf_counter() - self.started_at)
+
+    def elapsed_ms(self) -> float:
+        return (time.perf_counter() - self.started_at) * 1000
 
 
 class SourceInstanceExecutor:
@@ -258,7 +273,7 @@ def _merge_consensus_items(results: Sequence[ProviderFetchResult[T]], key_fields
     return merged_items, conflict_count
 
 
-def _fetch_step_requests(contract_name: str, step: ProviderStep[T], requests: list[tuple[object, ...]], snapshot) -> ProviderFetchResult[T]:
+def _fetch_step_requests(contract_name: str, step: ProviderStep[T], requests: list[tuple[object, ...]], snapshot, budget: CapabilityTimeoutBudget) -> ProviderFetchResult[T]:
     fetched_items: list[T] = []
     error_count = 0
     elapsed_ms = 0.0
@@ -266,11 +281,16 @@ def _fetch_step_requests(contract_name: str, step: ProviderStep[T], requests: li
     for request in requests:
         started_at = time.perf_counter()
         try:
-            if source_instance is None:
-                fetched_items.extend(step.fetcher(*request))
-            else:
-                with use_source_instance(source_instance):
-                    fetched_items.extend(step.fetcher(*request))
+            request_items = run_provider_request(
+                contract_name,
+                step.name,
+                step.step_id,
+                step.handler,
+                source_instance,
+                lambda request=request: step.fetcher(*request),
+                budget.remaining_seconds(),
+            )
+            fetched_items.extend(request_items)
         except Exception as exc:
             elapsed_ms += (time.perf_counter() - started_at) * 1000
             error_count += 1
@@ -303,6 +323,7 @@ def _run_consensus_race_internal(
     merge_strategy: str,
 ) -> tuple[list[T], FallbackReport]:
     snapshot = get_config_runtime().get_active_snapshot()
+    budget = _start_capability_budget(contract_name)
     ordered_steps = _order_steps(steps, source_order)
     results: list[ProviderFetchResult[T]] = []
     merge_strategy = normalize_merge_strategy(merge_strategy)
@@ -312,7 +333,7 @@ def _run_consensus_race_internal(
         if requests == []:
             results.append(ProviderFetchResult(step=step, items=(), request_count=0, error_count=0, elapsed_ms=0.0))
             break
-        result = _fetch_step_requests(contract_name, step, requests, snapshot)
+        result = _fetch_step_requests(contract_name, step, requests, snapshot, budget)
         results.append(result)
         if merge_strategy in {MERGE_STRATEGY_FIRST_SUCCESS, MERGE_STRATEGY_RAW_PASSTHROUGH} and result.fetched_row_count > 0:
             break
@@ -321,7 +342,9 @@ def _run_consensus_race_internal(
         if merge_strategy == MERGE_STRATEGY_FIELD_CONSENSUS:
             merged_probe_items, _, _, _ = _merge_model_lists(merged_probe_items, list(result.items), key_fields)
     if results == []:
-        return [item.model_copy(deep=True) for item in base_items], FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=())
+        report = FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=())
+        _record_capability_timeout_result(contract_name, budget, (), 0)
+        return [item.model_copy(deep=True) for item in base_items], report
     if merge_strategy in {MERGE_STRATEGY_FIRST_SUCCESS, MERGE_STRATEGY_FRESHEST_WINS, MERGE_STRATEGY_RAW_PASSTHROUGH}:
         best_result = _select_best_result(results, merge_strategy)
         merged_items = [item.model_copy(deep=True) for item in base_items]
@@ -385,7 +408,9 @@ def _run_consensus_race_internal(
                 elapsed_ms=result.elapsed_ms,
             )
         )
-    return merged_items, FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=tuple(reports))
+    report = FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=tuple(reports))
+    _record_capability_timeout_result(contract_name, budget, tuple(reports), len(merged_items))
+    return merged_items, report
 
 
 def _run_fallback_chain_internal(
@@ -402,6 +427,7 @@ def _run_fallback_chain_internal(
     merge_strategy = normalize_merge_strategy(snapshot.get_contract_merge_strategy(contract_name, policy.merge_strategy))
     if merge_strategy != MERGE_STRATEGY_PRIORITY_FALLBACK:
         return _run_consensus_race_internal(contract_name, base_items, key_fields, request_builder, steps, ordered_names, merge_strategy)
+    budget = _start_capability_budget(contract_name)
     ordered_steps = _order_steps(steps, ordered_names)
     merged_items = [item.model_copy(deep=True) for item in base_items]
     reports: list[ProviderMergeStats] = []
@@ -449,11 +475,15 @@ def _run_fallback_chain_internal(
             started_at = time.perf_counter()
             try:
                 source_instance = source_instances.get(step.step_id)
-                if source_instance is None:
-                    fetched_items = step.fetcher(*request)
-                else:
-                    with use_source_instance(source_instance):
-                        fetched_items = step.fetcher(*request)
+                fetched_items = run_provider_request(
+                    contract_name,
+                    step.name,
+                    step.step_id,
+                    step.handler,
+                    source_instance,
+                    lambda request=request: step.fetcher(*request),
+                    budget.remaining_seconds(),
+                )
             except Exception as exc:
                 elapsed_ms += (time.perf_counter() - started_at) * 1000
                 error_count += 1
@@ -532,7 +562,40 @@ def _run_fallback_chain_internal(
                 elapsed_ms=round(elapsed_ms, 3),
             )
         )
-    return merged_items, FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=tuple(reports))
+    report = FallbackReport(contract_name=contract_name, profile_id=snapshot.profile_id, profile_version=snapshot.version, steps=tuple(reports))
+    _record_capability_timeout_result(contract_name, budget, tuple(reports), len(merged_items))
+    return merged_items, report
+
+
+def _start_capability_budget(contract_name: str) -> CapabilityTimeoutBudget:
+    resolved = resolve_capability_timeout(contract_name)
+    return CapabilityTimeoutBudget(timeout_seconds=resolved.timeout_seconds, started_at=time.perf_counter())
+
+
+def _record_capability_timeout_result(contract_name: str, budget: CapabilityTimeoutBudget, reports: tuple[ProviderMergeStats, ...], row_count: int) -> None:
+    elapsed_ms = round(budget.elapsed_ms(), 3)
+    error_count = sum(item.error_count for item in reports)
+    request_count = sum(item.request_count for item in reports)
+    if elapsed_ms > budget.timeout_seconds * 1000:
+        status = TIMEOUT_STATUS_TIMEOUT
+    elif error_count >= request_count and request_count > 0:
+        status = TIMEOUT_STATUS_ERROR
+    elif row_count == 0:
+        status = TIMEOUT_STATUS_EMPTY
+    else:
+        status = TIMEOUT_STATUS_SUCCESS
+    record_capability_timeout_metric(
+        CapabilityTimeoutMetric(
+            capability_id=contract_name,
+            status=status,
+            elapsed_ms=elapsed_ms,
+            effective_timeout_seconds=round(budget.timeout_seconds, 3),
+            provider_request_count=request_count,
+            row_count=row_count,
+            error_count=error_count,
+            created_at=datetime.now(),
+        )
+    )
 
 
 def _order_steps(steps: Sequence[ProviderStep[T]], ordered_names: tuple[str, ...]) -> tuple[ProviderStep[T], ...]:
