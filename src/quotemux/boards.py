@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, StockMoneyFlowItem
 from quotemux.infra.common import format_date_value, parse_date_text
+from quotemux.infra.db.client import is_db_available
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, merge_model_lists, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.local_store import get_latest_complete_board_daily_snapshot_codes, get_local_board_catalog, get_local_board_daily_snapshot, get_local_board_members, get_local_board_profile, get_local_board_quotes
@@ -151,6 +152,13 @@ def _has_complete_board_daily_snapshot_for_codes(items: list[BoardQuoteItem], bo
     if board_codes == []:
         return items != []
     complete_codes = {item.board_code for item in items if _has_complete_board_quote_metrics(item)}
+    return all(board_code in complete_codes for board_code in board_codes)
+
+
+def _has_board_daily_snapshot_for_codes(items: list[BoardQuoteItem], board_codes: list[str]) -> bool:
+    if board_codes == []:
+        return items != []
+    complete_codes = {item.board_code for item in items if _has_board_snapshot_metrics(item)}
     return all(board_code in complete_codes for board_code in board_codes)
 
 
@@ -369,6 +377,11 @@ class QuoteMuxBoards:
         return items[0] if items else None
 
     def get_members(self, board_code: str, trade_date: str) -> list[BoardMemberItem]:
+        local_items = get_local_board_members(board_code, trade_date)
+        if local_items == [] and get_local_board_profile(board_code) != []:
+            return []
+        if local_items == [] and not is_db_available():
+            return []
         store_identity = {"board_code": board_code, "trade_date": trade_date}
         handlers = {
             "get_board_members": lambda instance: lambda: _source_package_call(instance.package_id, "get_board_members", board_code, trade_date),
@@ -383,7 +396,7 @@ class QuoteMuxBoards:
                 request_builder=_build_board_member_requests,
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("boards.members", handlers, ("derived_core", "tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("boards.members", ("derived_core", "tushare", "akshare")),
-                base_items=get_local_board_members(board_code, trade_date),
+                base_items=local_items,
                 base_source_name="ref.board_stock_membership",
                 payload_builder=lambda payload_items: _board_member_store_payloads(payload_items, trade_date),
                 fact_ref_writer=get_fact_ref_writer("boards.members"),
@@ -579,10 +592,10 @@ class QuoteMuxBoards:
             board_codes = [item.board_code for item in catalog_items]
         if board_codes == []:
             return []
-        if _has_complete_board_daily_snapshot_for_codes(local_items, board_codes):
+        if _has_board_daily_snapshot_for_codes(local_items, board_codes):
             return sorted(local_items, key=lambda item: item.board_code)
         quote_items = self.get_quotes(board_codes, "1d", actual_trade_date, "", "", "", "", None, actual_limit)
-        if _has_complete_board_daily_snapshot_for_codes(quote_items, board_codes):
+        if _has_board_daily_snapshot_for_codes(quote_items, board_codes):
             return sorted(quote_items, key=lambda item: item.board_code)
         merged_items = _merge_board_snapshot_items(local_items, quote_items)
         missing_codes = [board_code for board_code in board_codes if board_code not in {item.board_code for item in merged_items}]

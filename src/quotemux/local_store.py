@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 from platform_models import BoardCatalogItem, BoardMemberItem, BoardQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
@@ -261,9 +263,7 @@ def get_local_board_profile(board_code: str) -> list[BoardCatalogItem]:
 
 
 def get_local_board_members(board_code: str, trade_date: str) -> list[BoardMemberItem]:
-    actual_trade_date = format_date_value(trade_date)
-    if actual_trade_date == "":
-        return []
+    actual_trade_date = format_date_value(trade_date) or date.today().strftime("%Y-%m-%d")
     frame = load_board_members_frame(board_code, actual_trade_date)
     if frame.empty:
         return []

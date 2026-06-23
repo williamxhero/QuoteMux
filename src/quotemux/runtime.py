@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from quotemux.boards import QuoteMuxBoards
+from quotemux.concepts import QuoteMuxConcepts
 from quotemux.indexes import QuoteMuxIndexes
 from quotemux.markets import QuoteMuxMarkets
 from quotemux.news import QuoteMuxNews
@@ -18,6 +19,7 @@ class QuoteMux:
         self.indexes = QuoteMuxIndexes(self.settings)
         self.markets = QuoteMuxMarkets(self.settings)
         self.boards = QuoteMuxBoards(self.settings)
+        self.concepts = QuoteMuxConcepts(self.settings)
         self.news = QuoteMuxNews(self.settings)
         self.rankings = QuoteMuxRankings(self.settings)
         self.datasets = QuoteMuxDatasets(self.settings)

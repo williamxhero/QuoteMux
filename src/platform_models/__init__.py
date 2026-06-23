@@ -262,6 +262,24 @@ class BoardMemberItem(ApiModel):
     join_date: str = ""
 
 
+class ConceptAliasResolveItem(ApiModel):
+    concept_id: str
+    canonical_name: str
+    confidence: float | None = None
+
+
+class ConceptAliasGroupMemberItem(ApiModel):
+    provider: str
+    board_code: str
+    board_name: str
+
+
+class ConceptAliasGroupItem(ApiModel):
+    concept_id: str
+    canonical_name: str
+    members: list[ConceptAliasGroupMemberItem] = Field(default_factory=list)
+
+
 class BoardMemberHistoryItem(ApiModel):
     board_code: str
     code: str

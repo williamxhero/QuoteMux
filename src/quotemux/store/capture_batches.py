@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -29,12 +29,12 @@ class FirstBatchCapturePolicy:
 
 
 FIRST_BATCH_CAPTURE_POLICIES = (
-    FirstBatchCapturePolicy("stocks.quotes.intraday", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 5, 100, "第一批：分钟 K 线，provider 历史窗口有限，每天补最近 5 个交易日"),
+    FirstBatchCapturePolicy("stocks.quotes.intraday", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 5, 100, "第一批：分钟 K 线，每天补最近 5 个交易日"),
     FirstBatchCapturePolicy("stocks.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：股票日线，每天补最近 30 个交易日"),
     FirstBatchCapturePolicy("stocks.quotes.daily_snapshot", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 5, 1, "第一批：股票全市场日快照，每天补最近 5 个交易日"),
     FirstBatchCapturePolicy("indexes.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：指数日线，每天补最近 30 个交易日"),
-    FirstBatchCapturePolicy("boards.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：板块日线，每天补最近 30 个交易日"),
-    FirstBatchCapturePolicy("markets.calendar.trading", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 2, 1, "第一批：交易日历，每月最后一天维护当前和下一年度窗口"),
+    FirstBatchCapturePolicy("boards.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 1, 100, "第一批：板块日线，只维护最新交易日截面"),
+    FirstBatchCapturePolicy("markets.calendar.trading", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 2, 1, "第一批：交易日历，每月维护当前和下一年度窗口"),
     FirstBatchCapturePolicy("markets.trading.sessions", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：交易时段，低频参考数据"),
     FirstBatchCapturePolicy("stocks.catalog", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：股票目录，采集股票范围依赖"),
     FirstBatchCapturePolicy("stocks.catalog.archive", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：股票目录归档，采集股票范围依赖"),
@@ -131,3 +131,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

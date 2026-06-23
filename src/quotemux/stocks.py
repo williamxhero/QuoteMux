@@ -557,7 +557,7 @@ def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit:
 def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[tuple[list[str], str]]:
     missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset)
     if missing_codes != []:
-        return [(missing_codes, trade_date)]
+        return [(code_batch, trade_date) for code_batch in _chunk_quote_codes(missing_codes)]
     if any(not _has_complete_stock_snapshot_item(item) for item in items):
         return [([], trade_date)]
     return [([], trade_date)] if items == [] else []

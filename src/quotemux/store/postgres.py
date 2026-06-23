@@ -1025,7 +1025,15 @@ def _time_range_from_request(request_identity: dict[str, object]) -> tuple[datet
 
 
 def _request_scopes(policy: CachePolicy, request_identity: dict[str, object]) -> tuple[CacheScope, ...]:
-    time_start, time_end = _time_range_from_request(request_identity)
+    if (
+        policy.capability_id == "stocks.finance.main_business"
+        and _normalize_text(request_identity.get("report_period", "")) == ""
+        and _normalize_text(request_identity.get("start_period", "")) == ""
+        and _normalize_text(request_identity.get("end_period", "")) == ""
+    ):
+        time_start, time_end = datetime.min, datetime.max
+    else:
+        time_start, time_end = _time_range_from_request(request_identity)
     if policy.request_scope_fields == ():
         return (CacheScope("", {}, time_start, time_end),)
     scopes: list[CacheScope] = [CacheScope("", {}, time_start, time_end)]
@@ -1094,6 +1102,16 @@ def _build_actual_coverage_rows(
     fresh_until: datetime,
     source_json: dict[str, object],
 ) -> list[tuple[CacheScope, int, datetime, dict[str, object]]]:
+    if policy.capability_id == "stocks.finance.main_business" and payloads != []:
+        rows: list[tuple[CacheScope, int, datetime, dict[str, object]]] = []
+        for scope in scopes:
+            matched_payloads = [payload for payload in payloads if _payload_matches_scope(payload, scope)]
+            if matched_payloads == []:
+                continue
+            time_keys = [build_time_key(payload, policy.time_field) for payload in matched_payloads]
+            actual_scope = CacheScope(scope.scope_identity, scope.criteria, min(time_keys), max(time_keys))
+            rows.append((actual_scope, len(matched_payloads), fresh_until, source_json))
+        return rows
     if payloads == [] or not policy.capability_id.startswith("stocks.quotes."):
         return [(scope, sum(1 for payload in payloads if _payload_matches_scope(payload, scope)), fresh_until, source_json) for scope in scopes]
     rows: list[tuple[CacheScope, int, datetime, dict[str, object]]] = []

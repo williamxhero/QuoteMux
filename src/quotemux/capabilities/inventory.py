@@ -110,6 +110,8 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/boards/{board_code}/indicators/money-flow", ("boards.indicators.money_flow",)),
     PublicApiCapabilityBinding("/api/boards/indicators/money-flow", ("boards.indicators.money_flow.snapshot",)),
     PublicApiCapabilityBinding("/api/boards/reference/categories", ("boards.reference.categories",)),
+    PublicApiCapabilityBinding("/api/concepts/alias/resolve", ("concepts.alias.resolve",)),
+    PublicApiCapabilityBinding("/api/concepts/alias/groups/{concept_id}", ("concepts.alias.groups",)),
     PublicApiCapabilityBinding("/api/indexes/catalog", ("indexes.catalog",)),
     PublicApiCapabilityBinding("/api/indexes/{index_code}/profile", ("indexes.profile",)),
     PublicApiCapabilityBinding("/api/indexes/quotes", ("indexes.quotes.daily",)),
@@ -184,6 +186,8 @@ def _default_merge_strategy(result_shape: str) -> str:
 def _infer_result_shape(capability_id: str) -> str:
     if capability_id == "markets.events.news":
         return RESULT_SHAPE_EVENT_STREAM
+    if capability_id == "concepts.alias.resolve":
+        return RESULT_SHAPE_SINGLE_RECORD
     if capability_id.endswith(".basic") or capability_id.endswith(".company") or capability_id in {"boards.profile", "indexes.profile"}:
         return RESULT_SHAPE_SINGLE_RECORD
     if capability_id.endswith(".catalog") or capability_id.endswith(".archive") or capability_id.startswith("stocks.reference.") or capability_id in {"boards.reference.categories", "markets.trading.sessions", "indexes.catalog"}:
@@ -229,6 +233,10 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
         return ("board_code", "code")
     if capability_id.startswith("boards."):
         return ("board_code",)
+    if capability_id == "concepts.alias.resolve":
+        return ("concept_id",)
+    if capability_id == "concepts.alias.groups":
+        return ("concept_id",)
     if capability_id.startswith("indexes.quotes."):
         return ("index_code", "trade_time", "freq")
     if capability_id == "indexes.members":
@@ -250,6 +258,8 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id in DERIVED_CAPABILITY_BASE_IDS:
+        return ("derived_core",)
+    if capability_id.startswith("concepts.alias."):
         return ("derived_core",)
     if capability_id == "stocks.quotes.intraday":
         return ("opentdx", "efinance", "mootdx", "akshare")
@@ -343,6 +353,8 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
 
 def _infer_source_order(capability_id: str) -> tuple[str, ...]:
     if capability_id in DERIVED_CAPABILITY_BASE_IDS or capability_id in {"stocks.factors.technical", "stocks.ownership.shareholders.changes", "stocks.signals.hl"}:
+        return ("derived_core",)
+    if capability_id.startswith("concepts.alias."):
         return ("derived_core",)
     return _infer_allowed_packages(capability_id)
 

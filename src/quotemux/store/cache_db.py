@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from queue import Empty, Queue
 import os
+from queue import Empty, Queue
 import threading
-import time
 
 import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 
+from quotemux.infra.db.availability_gate import DbAvailabilityGate
 from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from quotemux.infra.provider_runtime.core import call_provider_api
 
@@ -35,23 +35,23 @@ _POOL_CREATED = 0
 _POOL_ACTIVE = 0
 _POOL_REUSED = 0
 _POOL_DROPPED = 0
-_CACHE_DB_UNAVAILABLE_UNTIL = 0.0
-_CACHE_DB_UNAVAILABLE_LOCK = threading.Lock()
+_CACHE_DB_AVAILABILITY = DbAvailabilityGate(CACHE_DB_FAILURE_COOLDOWN_SECONDS)
 
 
 def _cache_db_available_for_attempt() -> bool:
-    with _CACHE_DB_UNAVAILABLE_LOCK:
-        return time.monotonic() >= _CACHE_DB_UNAVAILABLE_UNTIL
+    return _CACHE_DB_AVAILABILITY.probe_port(CACHE_DB_HOST, CACHE_DB_PORT)
 
 
 def _mark_cache_db_unavailable() -> None:
-    global _CACHE_DB_UNAVAILABLE_UNTIL
-    with _CACHE_DB_UNAVAILABLE_LOCK:
-        _CACHE_DB_UNAVAILABLE_UNTIL = time.monotonic() + CACHE_DB_FAILURE_COOLDOWN_SECONDS
+    _CACHE_DB_AVAILABILITY.mark_unavailable()
+
+
+def is_cache_db_available() -> bool:
+    return _cache_db_available_for_attempt()
 
 
 def _connect() -> psycopg.Connection:
-    return psycopg.connect(
+    connection = psycopg.connect(
         host=CACHE_DB_HOST,
         port=CACHE_DB_PORT,
         dbname=CACHE_DB_NAME,
@@ -60,6 +60,8 @@ def _connect() -> psycopg.Connection:
         connect_timeout=DB_CONNECT_TIMEOUT,
         row_factory=dict_row,
     )
+    _CACHE_DB_AVAILABILITY.mark_available()
+    return connection
 
 
 def _acquire_connection() -> psycopg.Connection:
