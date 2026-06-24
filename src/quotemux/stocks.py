@@ -21,6 +21,7 @@ from quotemux.settings import QuoteMuxSettings
 
 MAX_DAILY_INDICATOR_CODES = 200
 QUOTE_REQUEST_CODE_BATCH_SIZE = 10
+SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD = 100
 MONEY_FLOW_REQUEST_CODE_BATCH_SIZE = 10
 HL_SIGNAL_RECENT_WINDOW_DAYS = 20
 LIMIT_PRICE_TOLERANCE = 0.001
@@ -557,6 +558,8 @@ def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit:
 def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[tuple[list[str], str]]:
     missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset)
     if missing_codes != []:
+        if offset == 0 and len(missing_codes) >= SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD:
+            return [([], trade_date)]
         return [(code_batch, trade_date) for code_batch in _chunk_quote_codes(missing_codes)]
     if any(not _has_complete_stock_snapshot_item(item) for item in items):
         return [([], trade_date)]

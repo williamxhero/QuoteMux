@@ -111,6 +111,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/boards/indicators/money-flow", ("boards.indicators.money_flow.snapshot",)),
     PublicApiCapabilityBinding("/api/boards/reference/categories", ("boards.reference.categories",)),
     PublicApiCapabilityBinding("/api/concepts/alias/resolve", ("concepts.alias.resolve",)),
+    PublicApiCapabilityBinding("/api/concepts/alias/groups", ("concepts.alias.groups",)),
     PublicApiCapabilityBinding("/api/concepts/alias/groups/{concept_id}", ("concepts.alias.groups",)),
     PublicApiCapabilityBinding("/api/indexes/catalog", ("indexes.catalog",)),
     PublicApiCapabilityBinding("/api/indexes/{index_code}/profile", ("indexes.profile",)),

@@ -242,6 +242,8 @@ class BoardCatalogItem(ApiModel):
     category: str = ""
     market: str = "a_share"
     status: str = "active"
+    start_date: str = ""
+    end_date: str = ""
 
 
 class IndexCatalogItem(ApiModel):
@@ -270,13 +272,18 @@ class ConceptAliasResolveItem(ApiModel):
 
 class ConceptAliasGroupMemberItem(ApiModel):
     provider: str
+    board_type: str = ""
     board_code: str
     board_name: str
+    start_date: str = ""
+    end_date: str = ""
 
 
 class ConceptAliasGroupItem(ApiModel):
     concept_id: str
     canonical_name: str
+    start_date: str = ""
+    end_date: str = ""
     members: list[ConceptAliasGroupMemberItem] = Field(default_factory=list)
 
 

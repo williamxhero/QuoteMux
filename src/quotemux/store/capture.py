@@ -17,6 +17,7 @@ from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PA
 from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
 from quotemux.capabilities import get_capability_config_root, is_independently_configurable_capability_id
 from quotemux.capabilities.inventory import list_capability_ids
+from quotemux.concepts import QuoteMuxConcepts
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
 from quotemux.requests.markets import TradingCalendarRequest
@@ -675,10 +676,7 @@ def _index_codes() -> tuple[str, ...]:
 
 
 def _board_codes() -> tuple[str, ...]:
-    frame = load_board_catalog_frame("active")
-    if _is_empty_dataframe(frame):
-        return ()
-    return tuple(str(row["board_code"]) for row in frame.to_dict("records") if str(row["board_code"]) != "")
+    return tuple(group.concept_id for group in QuoteMuxConcepts().list_alias_groups("") if group.concept_id != "")
 
 
 def _active_stock_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
