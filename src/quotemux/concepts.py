@@ -496,7 +496,7 @@ def _name_similarity(left: str, right: str) -> float:
 
 def _normalize_board_name(value: str) -> str:
     upper_value = value.upper()
-    normalized = re.sub(r"[\s·・（）()\[\]【】\-_/]+", "", upper_value)
+    normalized = re.sub(r"[\s·・（�?)\[\]【】\-_/]+", "", upper_value)
     for suffix in ("概念", "板块", "行业"):
         if normalized.endswith(suffix):
             normalized = normalized[: -len(suffix)]
@@ -628,7 +628,7 @@ def _group_start_date(members: Sequence[ConceptAliasGroupMemberItem]) -> str:
         return ""
     real_values = [value for value in values if value != DEFAULT_CONCEPT_START_DATE]
     if real_values != []:
-        return min(real_values)
+        return max(real_values)
     return min(values)
 
 
@@ -650,7 +650,7 @@ def _concept_name_start_date(board_name: str) -> str:
     period = match.group(2)
     if period in {"年报", "四季"}:
         return f"{year + 1}0101"
-    if period == "一季":
+    if period == "一�?:
         return f"{year}0401"
     if period in {"中报", "二季"}:
         return f"{year}0701"
@@ -969,7 +969,7 @@ def _tushare_dc_catalog(tushare_source, api_name: str, trade_date: str):
         frame = tushare_source.call_tushare_api(api_name, getattr(pro, api_name), trade_date=_to_tushare_date(trade_date))
     except Exception:
         return tushare_source.pd.DataFrame()
-    return _standard_tushare_catalog_frame(tushare_source, frame, "DC", ("概念板块", "题材股"))
+    return _standard_tushare_catalog_frame(tushare_source, frame, "DC", ("概念板块", "题材�?))
 
 
 def _tushare_tdx_catalog(tushare_source, api_name: str, trade_date: str):
@@ -1137,7 +1137,7 @@ def _tushare_kpl_list_member_frame(tushare_source, board_code: str, trade_date: 
 
 def _split_kpl_themes(value: str) -> list[str]:
     names: list[str] = []
-    for item in re.split(r"[、,，/]+", value):
+    for item in re.split(r"[�?�?]+", value):
         name = item.strip()
         if name != "" and name not in names:
             names.append(name)
