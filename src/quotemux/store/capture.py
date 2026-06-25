@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from quotemux.infra.common import format_date_value
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
-from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
+from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
 from quotemux.capabilities import get_capability_config_root, is_independently_configurable_capability_id
 from quotemux.capabilities.inventory import list_capability_ids
 from quotemux.concepts import QuoteMuxConcepts
@@ -42,7 +42,7 @@ PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS = "active_stocks_recent_trading_days"
 PROFILE_INDEXES_RECENT_TRADING_DAYS = "indexes_recent_trading_days"
 PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS = "daily_snapshot_recent_trading_days"
 PROFILE_TRADING_CALENDAR_YEAR_WINDOW = "trading_calendar_year_window"
-PROFILE_BOARDS_RECENT_TRADING_DAYS = "boards_recent_trading_days"
+PROFILE_CONCEPTS_RECENT_TRADING_DAYS = "concepts_recent_trading_days"
 PROFILE_CATALOG_SNAPSHOT = "catalog_snapshot"
 PROFILE_SINGLE_ENTITY_SNAPSHOT = "single_entity_snapshot"
 PROFILE_MARKET_RECENT_TRADING_DAYS = "market_recent_trading_days"
@@ -60,7 +60,7 @@ PROFILE_LABELS = {
     PROFILE_INDEXES_RECENT_TRADING_DAYS: "指数最近交易日",
     PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS: "股票全市场日快照",
     PROFILE_TRADING_CALENDAR_YEAR_WINDOW: "交易日历年度窗口",
-    PROFILE_BOARDS_RECENT_TRADING_DAYS: "板块最近交易日",
+    PROFILE_CONCEPTS_RECENT_TRADING_DAYS: "题材概念最近交易日",
     PROFILE_CATALOG_SNAPSHOT: "目录快照",
     PROFILE_SINGLE_ENTITY_SNAPSHOT: "单实体快照",
     PROFILE_MARKET_RECENT_TRADING_DAYS: "市场最近交易日",
@@ -159,13 +159,13 @@ def _default_profile_for_capability(capability_id: str) -> str:
         return PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS
     if capability_id in {"indexes.quotes.daily", "indexes.members"}:
         return PROFILE_INDEXES_RECENT_TRADING_DAYS
-    if capability_id in {"boards.quotes.daily", "boards.members", "boards.members.history", "boards.indicators.money_flow"}:
-        return PROFILE_BOARDS_RECENT_TRADING_DAYS
+    if capability_id in {"concepts.quotes.daily", "concepts.members", "concepts.members.history", "concepts.indicators.money_flow"}:
+        return PROFILE_CONCEPTS_RECENT_TRADING_DAYS
     if capability_id == "markets.calendar.trading":
         return PROFILE_TRADING_CALENDAR_YEAR_WINDOW
-    if capability_id in {"stocks.catalog", "stocks.catalog.archive", "indexes.catalog", "boards.catalog", "boards.reference.categories", "markets.participants.hot_money"}:
+    if capability_id in {"stocks.catalog", "stocks.catalog.archive", "indexes.catalog", "concepts.catalog", "concepts.reference.categories", "markets.participants.hot_money"}:
         return PROFILE_CATALOG_SNAPSHOT
-    if capability_id in {"stocks.profile.basic", "stocks.profile.company", "stocks.profile.managers", "stocks.profile.management_rewards", "stocks.profile.name_history", "indexes.profile", "boards.profile"}:
+    if capability_id in {"stocks.profile.basic", "stocks.profile.company", "stocks.profile.managers", "stocks.profile.management_rewards", "stocks.profile.name_history", "indexes.profile", "concepts.profile"}:
         return PROFILE_SINGLE_ENTITY_SNAPSHOT
     if capability_id.startswith("stocks.reference."):
         return PROFILE_STOCK_REFERENCE_SNAPSHOT
@@ -183,7 +183,7 @@ def _default_profile_for_capability(capability_id: str) -> str:
         return PROFILE_RESEARCH_RECENT_MONTHS
     if capability_id == "markets.events.news":
         return PROFILE_NEWS_EVENT_UPDATE
-    if capability_id.startswith("markets.") or capability_id == "boards.indicators.money_flow.snapshot":
+    if capability_id.startswith("markets.") or capability_id == "concepts.indicators.money_flow.snapshot":
         return PROFILE_MARKET_RECENT_TRADING_DAYS
     if capability_id.startswith("stocks."):
         return PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS
@@ -201,7 +201,7 @@ def _default_cadence_for_profile(scope_profile: str) -> str:
 def _default_window_for_profile(scope_profile: str, capability_id: str) -> int:
     if capability_id == "stocks.quotes.intraday":
         return 5
-    if scope_profile in {PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS, PROFILE_INDEXES_RECENT_TRADING_DAYS, PROFILE_BOARDS_RECENT_TRADING_DAYS, PROFILE_MARKET_RECENT_TRADING_DAYS, PROFILE_OWNERSHIP_RECENT_TRADING_DAYS, PROFILE_RESEARCH_RECENT_DATES, PROFILE_CORPORATE_ACTIONS_RECENT_ANNOUNCEMENTS}:
+    if scope_profile in {PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS, PROFILE_INDEXES_RECENT_TRADING_DAYS, PROFILE_CONCEPTS_RECENT_TRADING_DAYS, PROFILE_MARKET_RECENT_TRADING_DAYS, PROFILE_OWNERSHIP_RECENT_TRADING_DAYS, PROFILE_RESEARCH_RECENT_DATES, PROFILE_CORPORATE_ACTIONS_RECENT_ANNOUNCEMENTS}:
         return 30
     if scope_profile == PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS:
         return 5
@@ -675,7 +675,7 @@ def _index_codes() -> tuple[str, ...]:
     return tuple(str(row["index_code"]) for row in frame.to_dict("records") if str(row["index_code"]) != "")
 
 
-def _board_codes() -> tuple[str, ...]:
+def _concept_ids() -> tuple[str, ...]:
     return tuple(group.concept_id for group in QuoteMuxConcepts().list_alias_groups("") if group.concept_id != "")
 
 
@@ -756,12 +756,12 @@ def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: d
     )
 
 
-def _board_quote_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
+def _concept_quote_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
     if trading_days == ():
         return ()
-    board_codes = _board_codes()
-    if board_codes == ():
+    concept_ids = _concept_ids()
+    if concept_ids == ():
         return ()
     start_date = trading_days[0]
     end_date = trading_days[-1]
@@ -769,7 +769,7 @@ def _board_quote_requests(policy: CapturePolicy, capability_id: str, now: dateti
         CaptureRequest(
             capability_id,
             {
-                "board_codes": list(batch),
+                "concept_ids": list(batch),
                 "freq": "1d",
                 "trade_date": "",
                 "start_date": start_date,
@@ -780,7 +780,7 @@ def _board_quote_requests(policy: CapturePolicy, capability_id: str, now: dateti
                 "limit": 5000,
             },
         )
-        for batch in _chunk(board_codes, policy.batch_size)
+        for batch in _chunk(concept_ids, policy.batch_size)
     )
 
 
@@ -796,15 +796,15 @@ def _index_member_requests(policy: CapturePolicy, capability_id: str, now: datet
     )
 
 
-def _board_member_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
+def _concept_member_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
     if trading_days == ():
         return ()
-    board_codes = _board_codes()
+    concept_ids = _concept_ids()
     return tuple(
-        CaptureRequest(capability_id, {"board_code": board_code, "trade_date": trade_date})
+        CaptureRequest(capability_id, {"concept_id": concept_id, "trade_date": trade_date})
         for trade_date in trading_days
-        for board_code in board_codes
+        for concept_id in concept_ids
     )
 
 
@@ -851,8 +851,8 @@ def _catalog_snapshot_requests(policy: CapturePolicy, capability_id: str, now: d
         "stocks.catalog": {"codes": [], "name": "", "exchange": "", "list_status": "L", "include_delisted": False, "limit": 10000, "offset": 0},
         "stocks.catalog.archive": {"trade_date": end_date, "code": "", "name": "", "industry": "", "area": "", "limit": 10000, "offset": 0},
         "indexes.catalog": {"category": "", "market": "", "publisher": "", "status": "active", "limit": 10000, "offset": 0},
-        "boards.catalog": {"category": "", "market": "", "status": "active", "limit": 10000, "offset": 0},
-        "boards.reference.categories": {"parent_code": "", "level": None},
+        "concepts.catalog": {"category": "", "market": "", "status": "active", "limit": 10000, "offset": 0},
+        "concepts.reference.categories": {"parent_code": "", "level": None},
         "markets.participants.hot_money": {"name": "", "tag": "", "limit": 10000, "offset": 0},
     }
     identity = identities.get(capability_id)
@@ -878,14 +878,14 @@ def _single_entity_snapshot_requests(policy: CapturePolicy, capability_id: str, 
             return tuple(CaptureRequest(capability_id, {"code": code, "start_date": start_date, "end_date": end_date}) for code in codes)
     if capability_id == "indexes.profile":
         return tuple(CaptureRequest(capability_id, {"index_code": index_code}) for index_code in _index_codes())
-    if capability_id == "boards.profile":
-        return tuple(CaptureRequest(capability_id, {"board_code": board_code}) for board_code in _board_codes())
+    if capability_id == "concepts.profile":
+        return tuple(CaptureRequest(capability_id, {"concept_id": concept_id}) for concept_id in _concept_ids())
     return ()
 
 
 def _market_recent_trading_day_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_date, end_date = _date_window(policy, now)
-    if capability_id == "boards.indicators.money_flow.snapshot":
+    if capability_id == "concepts.indicators.money_flow.snapshot":
         return tuple(CaptureRequest(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0}) for trade_date in _recent_trading_days(policy.window_count, now))
     identities = {
         "markets.indicators.main_capital_flow": {"trade_date": "", "start_date": start_date, "end_date": end_date},
@@ -1075,18 +1075,18 @@ def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[Captur
         return _daily_snapshot_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_TRADING_CALENDAR_YEAR_WINDOW and policy.capability_id == "markets.calendar.trading":
         return _trading_calendar_requests(policy, policy.capability_id, now)
-    if policy.scope_profile == PROFILE_BOARDS_RECENT_TRADING_DAYS and policy.capability_id == "boards.quotes.daily":
-        return _board_quote_requests(policy, policy.capability_id, now)
+    if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.quotes.daily":
+        return _concept_quote_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_INDEXES_RECENT_TRADING_DAYS and policy.capability_id == "indexes.members":
         return _index_member_requests(policy, policy.capability_id, now)
-    if policy.scope_profile == PROFILE_BOARDS_RECENT_TRADING_DAYS and policy.capability_id == "boards.members":
-        return _board_member_requests(policy, policy.capability_id, now)
-    if policy.scope_profile == PROFILE_BOARDS_RECENT_TRADING_DAYS and policy.capability_id == "boards.members.history":
+    if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.members":
+        return _concept_member_requests(policy, policy.capability_id, now)
+    if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.members.history":
         start_date, end_date = _date_window(policy, now)
-        return tuple(CaptureRequest(policy.capability_id, {"board_code": board_code, "start_date": start_date, "end_date": end_date}) for board_code in _board_codes())
-    if policy.scope_profile == PROFILE_BOARDS_RECENT_TRADING_DAYS and policy.capability_id == "boards.indicators.money_flow":
+        return tuple(CaptureRequest(policy.capability_id, {"concept_id": concept_id, "start_date": start_date, "end_date": end_date}) for concept_id in _concept_ids())
+    if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.indicators.money_flow":
         start_date, end_date = _date_window(policy, now)
-        return tuple(CaptureRequest(policy.capability_id, {"board_code": board_code, "trade_date": "", "start_date": start_date, "end_date": end_date, "scope": ""}) for board_code in _board_codes())
+        return tuple(CaptureRequest(policy.capability_id, {"concept_id": concept_id, "trade_date": "", "start_date": start_date, "end_date": end_date, "scope": "concept"}) for concept_id in _concept_ids())
     if policy.scope_profile == PROFILE_CATALOG_SNAPSHOT:
         return _catalog_snapshot_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_SINGLE_ENTITY_SNAPSHOT:
@@ -1146,12 +1146,12 @@ def is_capture_due(policy: CapturePolicy, runs: CaptureRunRepository, now: datet
 
 
 RUNTIME_METHODS: dict[str, tuple[str, str]] = {
-    "boards.catalog": ("boards", "get_catalog"),
-    "boards.indicators.money_flow": ("boards", "get_money_flow"),
-    "boards.indicators.money_flow.snapshot": ("boards", "get_market_money_flow"),
-    "boards.members.history": ("boards", "get_member_history"),
-    "boards.profile": ("boards", "get_profile"),
-    "boards.reference.categories": ("boards", "get_categories"),
+    "concepts.catalog": ("concepts", "get_catalog"),
+    "concepts.indicators.money_flow": ("concepts", "get_money_flow"),
+    "concepts.indicators.money_flow.snapshot": ("concepts", "get_market_money_flow"),
+    "concepts.members.history": ("concepts", "get_member_history"),
+    "concepts.profile": ("concepts", "get_profile"),
+    "concepts.reference.categories": ("concepts", "get_categories"),
     "indexes.catalog": ("indexes", "get_catalog"),
     "indexes.profile": ("indexes", "get_profile"),
     "markets.connect.active_top10": ("markets", "get_connect_active_top10"),
@@ -1338,12 +1338,12 @@ class QuoteMuxCaptureJob:
             return self._runtime.markets.get_trading_calendar_with_report(TradingCalendarRequest(**request.request_identity))
         if request.capability_id == "indexes.members":
             return self._runtime.indexes.get_members_with_report(IndexMembersRequest(**request.request_identity))
-        if request.capability_id == "boards.quotes.daily":
-            items = self._runtime.boards.get_quotes(**request.request_identity)
-            return items, _CaptureRuntimeReport("boards.quotes.daily")
-        if request.capability_id == "boards.members":
-            items = self._runtime.boards.get_members(**request.request_identity)
-            return items, _CaptureRuntimeReport("boards.members")
+        if request.capability_id == "concepts.quotes.daily":
+            items = self._runtime.concepts.get_quotes(**request.request_identity)
+            return items, _CaptureRuntimeReport("concepts.quotes.daily")
+        if request.capability_id == "concepts.members":
+            items = self._runtime.concepts.get_members(**request.request_identity)
+            return items, _CaptureRuntimeReport("concepts.members")
         if request.capability_id == "markets.events.news":
             return self._run_news_update(request)
         method_spec = RUNTIME_METHODS.get(request.capability_id)

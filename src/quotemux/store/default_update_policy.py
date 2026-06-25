@@ -22,14 +22,14 @@ def _policy(capability_id: str, capture_enabled: bool, capture_cadence: str, cac
 
 
 CAPABILITY_UPDATE_POLICY_DEFAULTS = (
-    _policy("boards.catalog", True, "monthly", 365),
-    _policy("boards.indicators.money_flow", True, "daily", 180),
-    _policy("boards.indicators.money_flow.snapshot", True, "daily", 180),
-    _policy("boards.members", True, "weekly", 365),
-    _policy("boards.members.history", False, "daily", 365),
-    _policy("boards.profile", False, "daily", 365),
-    _policy("boards.quotes.daily", True, "daily", 30),
-    _policy("boards.reference.categories", True, "monthly", CACHE_NEVER_EXPIRE_TTL_DAYS),
+    _policy("concepts.catalog", True, "monthly", 365),
+    _policy("concepts.indicators.money_flow", True, "daily", 180),
+    _policy("concepts.indicators.money_flow.snapshot", True, "daily", 180),
+    _policy("concepts.members", True, "weekly", 365),
+    _policy("concepts.members.history", False, "daily", 365),
+    _policy("concepts.profile", False, "daily", 365),
+    _policy("concepts.quotes.daily", True, "daily", 30),
+    _policy("concepts.reference.categories", True, "monthly", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("concepts.alias.groups", False, "daily", 365),
     _policy("concepts.alias.resolve", False, "daily", 365),
     _policy("indexes.catalog", True, "monthly", 365),

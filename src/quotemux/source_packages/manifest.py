@@ -178,14 +178,14 @@ def _load_capabilities(payload: dict[str, object]) -> tuple[SourcePackageCapabil
 def _guess_handler_name(capability_id: str, available_handlers: set[str]) -> str:
     normalized = normalize_capability_id(capability_id)
     handler_map = {
-        "boards.catalog": "get_board_catalog",
-        "boards.indicators.money_flow": "get_board_money_flow",
-        "boards.indicators.money_flow.snapshot": "get_board_daily_money_flow_snapshot",
-        "boards.members": "get_board_members",
-        "boards.members.history": "get_board_member_history",
-        "boards.profile": "get_board_profile",
-        "boards.quotes.daily": "get_board_quotes",
-        "boards.reference.categories": "get_board_categories",
+        "concepts.catalog": "get_concept_catalog",
+        "concepts.indicators.money_flow": "get_concept_money_flow",
+        "concepts.indicators.money_flow.snapshot": "get_concept_daily_money_flow_snapshot",
+        "concepts.members": "get_concept_members",
+        "concepts.members.history": "get_concept_member_history",
+        "concepts.profile": "get_concept_profile",
+        "concepts.quotes.daily": "get_concept_quotes",
+        "concepts.reference.categories": "get_concept_categories",
         "indexes.catalog": "get_index_catalog",
         "indexes.members": "get_index_members",
         "indexes.profile": "get_index_profile",

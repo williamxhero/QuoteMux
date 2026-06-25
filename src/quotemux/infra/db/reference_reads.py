@@ -110,60 +110,60 @@ def load_stock_hl_frame(code: str, trade_date: str, start_date: str, end_date: s
     return query_dataframe(query, tuple(params))
 
 
-def load_board_catalog_frame(status_filter: str) -> pd.DataFrame:
-    where_clauses = ["board_code <> '000000'"]
+def load_concept_catalog_frame(status_filter: str) -> pd.DataFrame:
+    where_clauses = ["concept_id <> '000000'"]
     if status_filter == "active":
         where_clauses.append("(delisted_date is null or delisted_date >= current_date)")
     elif status_filter == "inactive":
         where_clauses.append("delisted_date < current_date")
     query = f"""
         select
-            board_code,
-            board_type,
+            concept_id,
+            concept_type,
             name,
             listed_date::text as listed_date,
             delisted_date::text as delisted_date
-        from ref.board
+        from ref.concept
         where {' and '.join(where_clauses)}
-        order by board_code
+        order by concept_id
     """
     return query_dataframe(query)
 
 
-def load_board_members_frame(board_code: str, trade_date: str) -> pd.DataFrame:
+def load_concept_members_frame(concept_id: str, trade_date: str) -> pd.DataFrame:
     query = """
         with target_rows as (
             select
-                m.board_code,
+                m.concept_id,
                 m.stock_market,
                 m.stock_code,
                 m.valid_from,
                 m.valid_to
-            from ref.board_stock_membership m
-            where m.board_code = %s
+            from ref.concept_stock_membership m
+            where m.concept_id = %s
               and m.valid_from <= %s
               and (m.valid_to is null or m.valid_to >= %s)
         ),
         fallback_date as (
             select max(m.valid_from) as valid_from
-            from ref.board_stock_membership m
-            where m.board_code = %s
+            from ref.concept_stock_membership m
+            where m.concept_id = %s
               and m.valid_from <= %s
         ),
         fallback_rows as (
             select
-                m.board_code,
+                m.concept_id,
                 m.stock_market,
                 m.stock_code,
                 m.valid_from,
                 m.valid_to
-            from ref.board_stock_membership m
+            from ref.concept_stock_membership m
             join fallback_date latest on latest.valid_from = m.valid_from
-            where m.board_code = %s
+            where m.concept_id = %s
               and not exists (select 1 from target_rows)
         )
         select
-            m.board_code,
+            m.concept_id,
             m.stock_code as code,
             coalesce(s.name, '') as name,
             m.valid_from::text as join_date
@@ -175,7 +175,7 @@ def load_board_members_frame(board_code: str, trade_date: str) -> pd.DataFrame:
         left join ref.stock s on s.market = m.stock_market and s.code = m.stock_code
         order by m.stock_code
     """
-    return query_dataframe(query, (board_code, trade_date, trade_date, board_code, trade_date, board_code))
+    return query_dataframe(query, (concept_id, trade_date, trade_date, concept_id, trade_date, concept_id))
 
 
 def load_index_catalog_frame(index_codes: list[str]) -> pd.DataFrame:
@@ -224,18 +224,18 @@ def load_trade_calendar_frame(exchange: str, start_date: str, end_date: str, is_
     return query_dataframe(query, tuple(params))
 
 
-def load_board_member_history_frame(board_code: str) -> pd.DataFrame:
+def load_concept_member_history_frame(concept_id: str) -> pd.DataFrame:
     query = """
         select
-            m.board_code,
+            m.concept_id,
             m.stock_code as code,
             coalesce(s.name, '') as name,
             m.valid_from::text as valid_from,
             m.valid_to::text as valid_to
-        from ref.board_stock_membership m
+        from ref.concept_stock_membership m
         left join ref.stock s on s.market = m.stock_market and s.code = m.stock_code
-        where m.board_code = %s
+        where m.concept_id = %s
         order by m.stock_code, m.valid_from
     """
-    return query_dataframe(query, (board_code,))
+    return query_dataframe(query, (concept_id,))
 

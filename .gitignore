@@ -10,3 +10,4 @@ __pycache__
 /tools
 tests/
 CHANGELOG.md
+/verification_tests

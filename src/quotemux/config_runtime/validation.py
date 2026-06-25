@@ -16,7 +16,7 @@ from quotemux.source_packages.registry import SourcePackageRegistry
 _HANDLER_CAPABILITY_PREFIXES = (
     ("get_stock", ("stocks.", "reference")),
     ("get_index", ("indexes.",)),
-    ("get_board", ("boards.",)),
+    ("get_concept", ("concepts.",)),
     ("get_trading_calendar", ("markets.calendar.trading",)),
     ("get_market_sessions", ("markets.trading.sessions",)),
     ("get_news", ("markets.events.news",)),

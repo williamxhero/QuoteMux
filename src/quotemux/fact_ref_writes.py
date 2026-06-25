@@ -4,7 +4,7 @@ from typing import Callable, Sequence
 
 from pydantic import BaseModel
 
-from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardMemberItem, BoardQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
+from platform_models import ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
 from quotemux.infra.db.client import execute_many, query_dataframe
 
@@ -178,25 +178,25 @@ def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
     )
 
 
-def _upsert_board_daily(items: Sequence[BoardQuoteItem]) -> bool:
-    existing_columns = _existing_columns("fact", "board_daily_1d")
+def _upsert_concept_daily(items: Sequence[ConceptQuoteItem]) -> bool:
+    existing_columns = _existing_columns("fact", "concept_daily_1d")
     optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
     params: list[tuple[object, ...]] = []
     for item in items:
         if item.freq != "1d":
             continue
         trade_date = format_date_value(item.trade_time)
-        if item.board_code == "" or trade_date == "":
+        if item.concept_id == "" or trade_date == "":
             continue
         optional_values = tuple(getattr(item, column_name) for column_name in optional_columns)
-        params.append((item.board_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
+        params.append((item.concept_id, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
     optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
     optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
     return execute_many(
         f"""
-        insert into fact.board_daily_1d (board_code, trade_date, open, high, low, close, volume, amount{optional_column_sql})
+        insert into fact.concept_daily_1d (concept_id, trade_date, open, high, low, close, volume, amount{optional_column_sql})
         values (%s, %s::date, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
-        on conflict (board_code, trade_date) do update set
+        on conflict (concept_id, trade_date) do update set
             open = excluded.open,
             high = excluded.high,
             low = excluded.low,
@@ -237,11 +237,11 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         params.append((market, code, item.name, item.industry, format_date_value(item.list_date), _stock_status_to_delisted_date(item), item.area))
     return execute_many(
         """
-        insert into ref.stock (market, code, name, board_type, listed_date, delisted_date, area)
+        insert into ref.stock (market, code, name, industry, listed_date, delisted_date, area)
         values (%s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s)
         on conflict (market, code) do update set
             name = excluded.name,
-            board_type = excluded.board_type,
+            industry = excluded.industry,
             listed_date = excluded.listed_date,
             delisted_date = excluded.delisted_date,
             area = excluded.area,
@@ -272,18 +272,18 @@ def _upsert_stock_name_history(items: Sequence[NameHistoryItem]) -> bool:
     )
 
 
-def _upsert_board_catalog(items: Sequence[BoardCatalogItem]) -> bool:
+def _upsert_concept_catalog(items: Sequence[ConceptCatalogItem]) -> bool:
     params: list[tuple[object, ...]] = []
     for item in items:
-        if item.board_code == "":
+        if item.concept_id == "":
             continue
-        params.append((item.board_code, item.category, item.board_name, item.market, item.status))
+        params.append((item.concept_id, item.category, item.concept_name, item.market, item.status))
     return execute_many(
         """
-        insert into ref.board (board_code, board_type, name, market, status)
+        insert into ref.concept (concept_id, concept_type, name, market, status)
         values (%s, %s, %s, %s, %s)
-        on conflict (board_code) do update set
-            board_type = excluded.board_type,
+        on conflict (concept_id) do update set
+            concept_type = excluded.concept_type,
             name = excluded.name,
             market = excluded.market,
             status = excluded.status,
@@ -293,23 +293,23 @@ def _upsert_board_catalog(items: Sequence[BoardCatalogItem]) -> bool:
     )
 
 
-def _upsert_board_members(items: Sequence[BoardMemberItem]) -> bool:
+def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
     params: list[tuple[object, ...]] = []
     stock_params: list[tuple[object, ...]] = []
     for item in items:
         code = normalize_stock_code(item.code).zfill(6)
-        if item.board_code == "" or code == "":
+        if item.concept_id == "" or code == "":
             continue
         market = _stock_market(code)
         valid_from = format_date_value(item.join_date) or "1900-01-01"
-        params.append((item.board_code, market, code, valid_from, item.weight))
+        params.append((item.concept_id, market, code, valid_from, item.weight))
         if item.name != "":
             stock_params.append((market, code, item.name))
     members_ok = execute_many(
         """
-        insert into ref.board_stock_membership (board_code, stock_market, stock_code, valid_from, valid_to, weight)
+        insert into ref.concept_stock_membership (concept_id, stock_market, stock_code, valid_from, valid_to, weight)
         values (%s, %s, %s, %s::date, null, %s)
-        on conflict (board_code, stock_market, stock_code, valid_from) do update set
+        on conflict (concept_id, stock_market, stock_code, valid_from) do update set
             valid_to = excluded.valid_to,
             weight = excluded.weight,
             updated_at = now()
@@ -329,32 +329,32 @@ def _upsert_board_members(items: Sequence[BoardMemberItem]) -> bool:
     return members_ok and names_ok
 
 
-def _upsert_board_member_history(items: Sequence[BoardMemberHistoryItem]) -> bool:
+def _upsert_concept_member_history(items: Sequence[ConceptMemberHistoryItem]) -> bool:
     in_params: list[tuple[object, ...]] = []
     out_params: list[tuple[object, ...]] = []
     for item in items:
         code = normalize_stock_code(item.code).zfill(6)
         effective_date = format_date_value(item.effective_date)
-        if item.board_code == "" or code == "" or effective_date == "":
+        if item.concept_id == "" or code == "" or effective_date == "":
             continue
         if item.action == "out":
-            out_params.append((effective_date, item.board_code, _stock_market(code), code))
+            out_params.append((effective_date, item.concept_id, _stock_market(code), code))
         else:
-            in_params.append((item.board_code, _stock_market(code), code, effective_date))
+            in_params.append((item.concept_id, _stock_market(code), code, effective_date))
     insert_ok = execute_many(
         """
-        insert into ref.board_stock_membership (board_code, stock_market, stock_code, valid_from, valid_to)
+        insert into ref.concept_stock_membership (concept_id, stock_market, stock_code, valid_from, valid_to)
         values (%s, %s, %s, %s::date, null)
-        on conflict (board_code, stock_market, stock_code, valid_from) do nothing
+        on conflict (concept_id, stock_market, stock_code, valid_from) do nothing
         """,
         in_params,
     )
     update_ok = execute_many(
         """
-        update ref.board_stock_membership
+        update ref.concept_stock_membership
         set valid_to = %s::date,
             updated_at = now()
-        where board_code = %s
+        where concept_id = %s
           and stock_market = %s
           and stock_code = %s
           and valid_to is null
@@ -394,15 +394,15 @@ def get_fact_ref_writer(capability_id: str) -> Callable[[list[BaseModel]], bool]
         "stocks.quotes.intraday": _upsert_stock_intraday,
         "stocks.quotes.daily_snapshot": _upsert_stock_daily,
         "indexes.quotes.daily": _upsert_index_daily,
-        "boards.quotes.daily": _upsert_board_daily,
+        "concepts.quotes.daily": _upsert_concept_daily,
         "markets.calendar.trading": _upsert_trading_calendar,
         "stocks.catalog": _upsert_stock_catalog,
         "stocks.profile.basic": _upsert_stock_catalog,
         "stocks.profile.name_history": _upsert_stock_name_history,
-        "boards.catalog": _upsert_board_catalog,
-        "boards.profile": _upsert_board_catalog,
-        "boards.members": _upsert_board_members,
-        "boards.members.history": _upsert_board_member_history,
+        "concepts.catalog": _upsert_concept_catalog,
+        "concepts.profile": _upsert_concept_catalog,
+        "concepts.members": _upsert_concept_members,
+        "concepts.members.history": _upsert_concept_member_history,
         "indexes.catalog": _upsert_index_catalog,
         "indexes.profile": _upsert_index_catalog,
     }

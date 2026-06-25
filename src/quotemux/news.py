@@ -78,12 +78,12 @@ def _read_news_events(
                 primary_detail_url=str(row["primary_detail_url"]),
                 related_stock_codes=_to_text_list(row["related_stock_codes"]),
                 related_stock_names=_to_text_list(row["related_stock_names"]),
-                related_board_codes=_to_text_list(row["related_board_codes"]),
-                related_board_names=_to_text_list(row["related_board_names"]),
+                related_concept_ids=_to_text_list(row["related_concept_ids"]),
+                related_concept_names=_to_text_list(row["related_concept_names"]),
                 topic_tags=_to_text_list(row["topic_tags"]),
                 mentioned_stock_codes=_to_text_list(row["mentioned_stock_codes"]),
                 mentioned_stock_names=_to_text_list(row["mentioned_stock_names"]),
-                mentioned_board_names=_to_text_list(row["mentioned_board_names"]),
+                mentioned_concept_names=_to_text_list(row["mentioned_concept_names"]),
             )
         )
     return items

@@ -105,6 +105,22 @@ class BoardQuoteItem(ApiModel):
     amount: float | None = None
 
 
+class ConceptQuoteItem(ApiModel):
+    concept_id: str
+    concept_name: str = ""
+    trade_time: str
+    freq: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    pre_close: float | None = None
+    change: float | None = None
+    pct_chg: float | None = None
+    volume: float | None = None
+    amount: float | None = None
+
+
 class IndexQuoteItem(ApiModel):
     index_code: str
     trade_time: str
@@ -155,12 +171,12 @@ class NewsEventItem(ApiModel):
     primary_detail_url: str
     related_stock_codes: list[str] = Field(default_factory=list)
     related_stock_names: list[str] = Field(default_factory=list)
-    related_board_codes: list[str] = Field(default_factory=list)
-    related_board_names: list[str] = Field(default_factory=list)
+    related_concept_ids: list[str] = Field(default_factory=list)
+    related_concept_names: list[str] = Field(default_factory=list)
     topic_tags: list[str] = Field(default_factory=list)
     mentioned_stock_codes: list[str] = Field(default_factory=list)
     mentioned_stock_names: list[str] = Field(default_factory=list)
-    mentioned_board_names: list[str] = Field(default_factory=list)
+    mentioned_concept_names: list[str] = Field(default_factory=list)
     sources: list[NewsEventSourceItem] = Field(default_factory=list)
 
 
@@ -207,6 +223,15 @@ class BoardMoneyFlowItem(ApiModel):
     net_inflow: float | None = None
 
 
+class ConceptMoneyFlowItem(ApiModel):
+    concept_id: str
+    trade_date: str
+    scope: str
+    inflow: float | None = None
+    outflow: float | None = None
+    net_inflow: float | None = None
+
+
 class StockBasicInfo(ApiModel):
     code: str
     name: str
@@ -246,6 +271,16 @@ class BoardCatalogItem(ApiModel):
     end_date: str = ""
 
 
+class ConceptCatalogItem(ApiModel):
+    concept_id: str
+    concept_name: str
+    category: str = ""
+    market: str = "a_share"
+    status: str = "active"
+    start_date: str = ""
+    end_date: str = ""
+
+
 class IndexCatalogItem(ApiModel):
     index_code: str
     index_name: str
@@ -264,6 +299,14 @@ class BoardMemberItem(ApiModel):
     join_date: str = ""
 
 
+class ConceptMemberItem(ApiModel):
+    concept_id: str
+    code: str
+    name: str
+    weight: float | None = None
+    join_date: str = ""
+
+
 class ConceptAliasResolveItem(ApiModel):
     concept_id: str
     canonical_name: str
@@ -272,11 +315,23 @@ class ConceptAliasResolveItem(ApiModel):
 
 class ConceptAliasGroupMemberItem(ApiModel):
     provider: str
-    board_type: str = ""
-    board_code: str
-    board_name: str
+    provider_concept_type: str = ""
+    provider_concept_code: str
+    provider_concept_name: str
     start_date: str = ""
     end_date: str = ""
+
+    @property
+    def board_type(self) -> str:
+        return self.provider_concept_type
+
+    @property
+    def board_code(self) -> str:
+        return self.provider_concept_code
+
+    @property
+    def board_name(self) -> str:
+        return self.provider_concept_name
 
 
 class ConceptAliasGroupItem(ApiModel):
@@ -295,6 +350,14 @@ class BoardMemberHistoryItem(ApiModel):
     action: str
 
 
+class ConceptMemberHistoryItem(ApiModel):
+    concept_id: str
+    code: str
+    name: str
+    effective_date: str
+    action: str
+
+
 class IndexMemberItem(ApiModel):
     index_code: str
     code: str
@@ -304,6 +367,14 @@ class IndexMemberItem(ApiModel):
 
 
 class BoardCategoryItem(ApiModel):
+    category_code: str
+    category_name: str
+    parent_code: str = ""
+    level: int | None = None
+    sort_order: int | None = None
+
+
+class ConceptCategoryItem(ApiModel):
     category_code: str
     category_name: str
     parent_code: str = ""

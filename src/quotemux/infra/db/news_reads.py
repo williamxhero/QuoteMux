@@ -51,12 +51,12 @@ def load_news_event_frame(
         "primary_detail_url",
         "related_stock_codes",
         "related_stock_names",
-        "related_board_codes",
-        "related_board_names",
+        "related_board_codes as related_concept_ids",
+        "related_board_names as related_concept_names",
         "topic_tags",
         "mentioned_stock_codes",
         "mentioned_stock_names",
-        "mentioned_board_names",
+        "mentioned_board_names as mentioned_concept_names",
     ]
     if include_content_text:
         select_columns.insert(7, "content_text")

@@ -317,15 +317,15 @@ def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:
     )
 
 
-def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
-    if not board_codes and not start_date and not end_date:
+def load_concept_daily_frame(concept_ids: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    if not concept_ids and not start_date and not end_date:
         return pd.DataFrame()
-    existing_columns = _existing_columns("fact", "board_daily_1d")
+    existing_columns = _existing_columns("fact", "concept_daily_1d")
     where_clauses: list[str] = []
     params: list[object] = []
-    if board_codes:
-        where_clauses.append("day_rows.board_code = any(%s)")
-        params.append(board_codes)
+    if concept_ids:
+        where_clauses.append("day_rows.concept_id = any(%s)")
+        params.append(concept_ids)
     if start_date:
         where_clauses.append("day_rows.trade_date >= %s")
         params.append(start_date)
@@ -336,13 +336,13 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
         with scoped_rows as (
             select
                 day_rows.*,
-                lag(day_rows.close) over (partition by day_rows.board_code order by day_rows.trade_date) as previous_close
-            from fact.board_daily_1d day_rows
+                lag(day_rows.close) over (partition by day_rows.concept_id order by day_rows.trade_date) as previous_close
+            from fact.concept_daily_1d day_rows
             where {' and '.join(where_clauses)}
         )
         select
-            day_rows.board_code,
-            coalesce(board_ref.name, '') as board_name,
+            day_rows.concept_id,
+            coalesce(concept_ref.name, '') as concept_name,
             day_rows.trade_date::text as trade_time,
             day_rows.open,
             day_rows.high,
@@ -356,22 +356,22 @@ def load_board_daily_frame(board_codes: list[str], start_date: str, end_date: st
             {_optional_column(existing_columns, "mism_buy")},
             {_optional_column(existing_columns, "mism_sell")}
         from scoped_rows day_rows
-        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
-        order by day_rows.board_code, day_rows.trade_date
+        left join ref.concept concept_ref on concept_ref.concept_id = day_rows.concept_id
+        order by day_rows.concept_id, day_rows.trade_date
     """
     return query_dataframe(query, tuple(params))
 
 
-def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
+def load_concept_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
     if not trade_date:
         return pd.DataFrame()
-    existing_columns = _existing_columns("fact", "board_daily_1d")
+    existing_columns = _existing_columns("fact", "concept_daily_1d")
     query = f"""
         with scoped_rows as (
             select
                 day_rows.*,
-                lag(day_rows.close) over (partition by day_rows.board_code order by day_rows.trade_date) as previous_close
-            from fact.board_daily_1d day_rows
+                lag(day_rows.close) over (partition by day_rows.concept_id order by day_rows.trade_date) as previous_close
+            from fact.concept_daily_1d day_rows
             where day_rows.trade_date <= %s
         ),
         latest_rows as (
@@ -380,8 +380,8 @@ def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
             where trade_date = %s
         )
         select
-            day_rows.board_code,
-            coalesce(board_ref.name, '') as board_name,
+            day_rows.concept_id,
+            coalesce(concept_ref.name, '') as concept_name,
             day_rows.trade_date::text as trade_time,
             day_rows.open,
             day_rows.high,
@@ -395,15 +395,15 @@ def load_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) ->
             {_optional_column(existing_columns, "mism_buy")},
             {_optional_column(existing_columns, "mism_sell")}
         from latest_rows day_rows
-        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
-        order by day_rows.board_code
+        left join ref.concept concept_ref on concept_ref.concept_id = day_rows.concept_id
+        order by day_rows.concept_id
         limit %s
         offset %s
     """
     return query_dataframe(query, (trade_date, trade_date, limit, offset))
 
 
-def _latest_complete_board_daily_date_cte(existing_columns: set[str]) -> str:
+def _latest_complete_concept_daily_date_cte(existing_columns: set[str]) -> str:
     pre_close_value = "day_rows.pre_close" if "pre_close" in existing_columns else "null"
     pct_chg_value = "day_rows.pct_chg" if "pct_chg" in existing_columns else "null"
     previous_close = f"coalesce({pre_close_value}, day_rows.previous_close)"
@@ -411,13 +411,13 @@ def _latest_complete_board_daily_date_cte(existing_columns: set[str]) -> str:
     return f"""
         historical_rows as (
             select
-                day_rows.board_code,
+                day_rows.concept_id,
                 day_rows.trade_date,
                 day_rows.close,
                 {pre_close_value} as pre_close,
                 {pct_chg_value} as pct_chg,
-                lag(day_rows.close) over (partition by day_rows.board_code order by day_rows.trade_date) as previous_close
-            from fact.board_daily_1d day_rows
+                lag(day_rows.close) over (partition by day_rows.concept_id order by day_rows.trade_date) as previous_close
+            from fact.concept_daily_1d day_rows
             where day_rows.trade_date < %s
         ),
         complete_dates as (
@@ -438,36 +438,36 @@ def _latest_complete_board_daily_date_cte(existing_columns: set[str]) -> str:
     """
 
 
-def load_latest_complete_board_daily_snapshot_codes(trade_date: str, limit: int, offset: int) -> list[str]:
+def load_latest_complete_concept_daily_snapshot_ids(trade_date: str, limit: int, offset: int) -> list[str]:
     if not trade_date:
         return []
-    existing_columns = _existing_columns("fact", "board_daily_1d")
+    existing_columns = _existing_columns("fact", "concept_daily_1d")
     query = f"""
-        with {_latest_complete_board_daily_date_cte(existing_columns)}
-        select day_rows.board_code
-        from fact.board_daily_1d day_rows
+        with {_latest_complete_concept_daily_date_cte(existing_columns)}
+        select day_rows.concept_id
+        from fact.concept_daily_1d day_rows
         join latest_complete_date latest on latest.trade_date = day_rows.trade_date
-        order by day_rows.board_code
+        order by day_rows.concept_id
         limit %s
         offset %s
     """
     frame = query_dataframe(query, (trade_date, limit, offset))
     if frame.empty:
         return []
-    return [str(row["board_code"]) for _, row in frame.iterrows()]
+    return [str(row["concept_id"]) for _, row in frame.iterrows()]
 
 
-def load_latest_complete_board_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
+def load_latest_complete_concept_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
     if not trade_date:
         return pd.DataFrame()
-    existing_columns = _existing_columns("fact", "board_daily_1d")
+    existing_columns = _existing_columns("fact", "concept_daily_1d")
     query = f"""
-        with {_latest_complete_board_daily_date_cte(existing_columns)},
+        with {_latest_complete_concept_daily_date_cte(existing_columns)},
         scoped_rows as (
             select
                 day_rows.*,
-                lag(day_rows.close) over (partition by day_rows.board_code order by day_rows.trade_date) as previous_close
-            from fact.board_daily_1d day_rows
+                lag(day_rows.close) over (partition by day_rows.concept_id order by day_rows.trade_date) as previous_close
+            from fact.concept_daily_1d day_rows
             where day_rows.trade_date <= (select trade_date from latest_complete_date)
         ),
         snapshot_rows as (
@@ -476,8 +476,8 @@ def load_latest_complete_board_daily_snapshot_frame(trade_date: str, limit: int,
             where trade_date = (select trade_date from latest_complete_date)
         )
         select
-            day_rows.board_code,
-            coalesce(board_ref.name, '') as board_name,
+            day_rows.concept_id,
+            coalesce(concept_ref.name, '') as concept_name,
             day_rows.trade_date::text as trade_time,
             day_rows.open,
             day_rows.high,
@@ -491,8 +491,8 @@ def load_latest_complete_board_daily_snapshot_frame(trade_date: str, limit: int,
             {_optional_column(existing_columns, "mism_buy")},
             {_optional_column(existing_columns, "mism_sell")}
         from snapshot_rows day_rows
-        left join ref.board board_ref on board_ref.board_code = day_rows.board_code
-        order by day_rows.board_code
+        left join ref.concept concept_ref on concept_ref.concept_id = day_rows.concept_id
+        order by day_rows.concept_id
         limit %s
         offset %s
     """

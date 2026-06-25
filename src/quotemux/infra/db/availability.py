@@ -22,12 +22,12 @@ OBJECT_SPECS = (
     FactRefObjectSpec("fact", "stock_bar_1m", ("stock_bar_1m_pkey", "stock_bar_1m_code_time_idx", "stock_bar_1m_time_idx"), "bar_time"),
     FactRefObjectSpec("fact", "stock_bar_30m", ("stock_bar_30m_pkey", "stock_bar_30m_code_time_idx", "stock_bar_30m_time_idx"), "bar_time"),
     FactRefObjectSpec("fact", "index_bar_1d", ("index_bar_1d_pkey", "index_bar_1d_date_idx"), "trade_date"),
-    FactRefObjectSpec("fact", "board_daily_1d", ("board_daily_1d_pkey", "board_daily_1d_date_idx"), "trade_date"),
+    FactRefObjectSpec("fact", "concept_daily_1d", ("concept_daily_1d_pkey", "concept_daily_1d_date_idx"), "trade_date"),
     FactRefObjectSpec("ref", "trade_calendar", ("trade_calendar_pkey",), "trade_date"),
     FactRefObjectSpec("ref", "stock", ("stock_pkey", "stock_code_idx"), "listed_date"),
     FactRefObjectSpec("ref", "stock_name_history", ("stock_name_history_pkey",), "valid_from"),
-    FactRefObjectSpec("ref", "board", ("board_pkey",), "listed_date"),
-    FactRefObjectSpec("ref", "board_stock_membership", ("board_stock_membership_pkey", "board_stock_membership_stock_idx"), "valid_from"),
+    FactRefObjectSpec("ref", "concept", ("concept_pkey",), "listed_date"),
+    FactRefObjectSpec("ref", "concept_stock_membership", ("concept_stock_membership_pkey", "concept_stock_membership_stock_idx"), "valid_from"),
     FactRefObjectSpec("ref", "index", ("index_pkey",), "list_date"),
 )
 

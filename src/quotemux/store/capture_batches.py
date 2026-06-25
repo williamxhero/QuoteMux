@@ -33,7 +33,7 @@ FIRST_BATCH_CAPTURE_POLICIES = (
     FirstBatchCapturePolicy("stocks.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：股票日线，每天补最近 30 个交易日"),
     FirstBatchCapturePolicy("stocks.quotes.daily_snapshot", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 5, 1, "第一批：股票全市场日快照，每天补最近 5 个交易日"),
     FirstBatchCapturePolicy("indexes.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：指数日线，每天补最近 30 个交易日"),
-    FirstBatchCapturePolicy("boards.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 1, 100, "第一批：板块日线，只维护最新交易日截面"),
+    FirstBatchCapturePolicy("concepts.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 1, 100, "第一批：题材概念日线，只维护最新交易日截面"),
     FirstBatchCapturePolicy("markets.calendar.trading", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 2, 1, "第一批：交易日历，每月维护当前和下一年度窗口"),
     FirstBatchCapturePolicy("markets.trading.sessions", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：交易时段，低频参考数据"),
     FirstBatchCapturePolicy("stocks.catalog", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：股票目录，采集股票范围依赖"),
@@ -44,11 +44,11 @@ FIRST_BATCH_CAPTURE_POLICIES = (
     FirstBatchCapturePolicy("indexes.catalog", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：指数目录，指数日线采集依赖"),
     FirstBatchCapturePolicy("indexes.profile", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 100, "第一批：指数资料，指数展示依赖"),
     FirstBatchCapturePolicy("indexes.members", CADENCE_WEEKLY, DEFAULT_RUN_TIME, 6, None, None, 1, 100, "第一批：指数成分，每周日维护"),
-    FirstBatchCapturePolicy("boards.catalog", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：板块目录，板块日线采集依赖"),
-    FirstBatchCapturePolicy("boards.reference.categories", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：板块分类，板块展示依赖"),
-    FirstBatchCapturePolicy("boards.profile", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 100, "第一批：板块资料，板块展示依赖"),
-    FirstBatchCapturePolicy("boards.members", CADENCE_WEEKLY, DEFAULT_RUN_TIME, 6, None, None, 1, 100, "第一批：板块成分，每周日维护"),
-    FirstBatchCapturePolicy("boards.members.history", CADENCE_WEEKLY, DEFAULT_RUN_TIME, 6, None, None, 30, 100, "第一批：板块成分历史，每周日维护最近窗口"),
+    FirstBatchCapturePolicy("concepts.catalog", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：题材概念目录，题材概念日线采集依赖"),
+    FirstBatchCapturePolicy("concepts.reference.categories", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：题材概念分类，题材概念展示依赖"),
+    FirstBatchCapturePolicy("concepts.profile", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 100, "第一批：题材概念资料，题材概念展示依赖"),
+    FirstBatchCapturePolicy("concepts.members", CADENCE_WEEKLY, DEFAULT_RUN_TIME, 6, None, None, 1, 100, "第一批：题材概念成分，每周日维护"),
+    FirstBatchCapturePolicy("concepts.members.history", CADENCE_WEEKLY, DEFAULT_RUN_TIME, 6, None, None, 30, 100, "第一批：题材概念成分历史，每周日维护最近窗口"),
 )
 
 

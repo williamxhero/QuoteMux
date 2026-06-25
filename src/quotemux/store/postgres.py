@@ -98,9 +98,9 @@ def _time_field_for_capability(capability_id: str) -> str:
         return "trade_date"
     if capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday", "stocks.quotes.daily_snapshot", "indexes.quotes.daily"}:
         return "trade_time"
-    if capability_id.startswith("boards.quotes.") or capability_id.startswith("markets.trading.open_auctions"):
+    if capability_id.startswith("concepts.quotes.") or capability_id.startswith("markets.trading.open_auctions"):
         return "trade_time"
-    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
+    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
         return "trade_date"
     if capability_id == "stocks.indicators.risk_flags":
         return "start_date"
@@ -140,7 +140,7 @@ def _time_field_for_capability(capability_id: str) -> str:
         return "start_date"
     if capability_id.startswith("stocks.ownership.shareholders.top10"):
         return "report_period"
-    if capability_id == "boards.members":
+    if capability_id == "concepts.members":
         return "join_date"
     if capability_id == "stocks.research.reports":
         return "report_date"
@@ -148,7 +148,7 @@ def _time_field_for_capability(capability_id: str) -> str:
         return "survey_date"
     if capability_id == "markets.events.news":
         return "announcement_time"
-    if capability_id.startswith("boards.members"):
+    if capability_id.startswith("concepts.members"):
         return "effective_date"
     if capability_id.startswith("stocks.reference."):
         return "effective_date"
@@ -166,15 +166,15 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "freq", "adjust")
     if capability_id.startswith("indexes.quotes."):
         return ("index_code", "freq")
-    if capability_id.startswith("boards.quotes."):
-        return ("board_code", "freq")
-    if capability_id.startswith("boards.members"):
-        return ("board_code", "code")
+    if capability_id.startswith("concepts.quotes."):
+        return ("concept_id", "freq")
+    if capability_id.startswith("concepts.members"):
+        return ("concept_id", "code")
     if capability_id == "indexes.members":
         return ("index_code", "code")
     if capability_id.startswith("markets.calendar."):
         return ("exchange", "trade_date")
-    if capability_id == "boards.reference.categories":
+    if capability_id == "concepts.reference.categories":
         return ("category_code",)
     if capability_id == "markets.trading.sessions":
         return ("code",)
@@ -244,8 +244,8 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "trade_date")
     if capability_id == "stocks.indicators.risk_flags":
         return ("code", "flag_type", "start_date", "end_date", "status")
-    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot"}:
-        return ("board_code", "trade_date", "scope")
+    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot"}:
+        return ("concept_id", "trade_date", "scope")
     if capability_id.startswith("stocks.ownership.shareholders.top10"):
         return ("code", "report_period", "rank", "shareholder_name")
     if capability_id == "stocks.research.reports":
@@ -258,10 +258,10 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "direction", "effective_date")
     if capability_id.startswith("stocks."):
         return ("code",)
-    if capability_id.startswith("boards."):
-        if capability_id == "boards.reference.categories":
+    if capability_id.startswith("concepts."):
+        if capability_id == "concepts.reference.categories":
             return ("parent_code",)
-        return ("board_code",)
+        return ("concept_id",)
     if capability_id.startswith("indexes."):
         return ("index_code",)
     if capability_id == "markets.indicators.main_capital_flow":
@@ -296,10 +296,10 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "freq", "adjust")
     if capability_id.startswith("indexes.quotes."):
         return ("index_code", "freq")
-    if capability_id.startswith("boards.quotes."):
-        return ("board_code", "freq")
-    if capability_id.startswith("boards.members"):
-        return ("board_code",)
+    if capability_id.startswith("concepts.quotes."):
+        return ("concept_id", "freq")
+    if capability_id.startswith("concepts.members"):
+        return ("concept_id",)
     if capability_id == "indexes.members":
         return ("index_code",)
     if capability_id == "markets.calendar.trading":
@@ -320,16 +320,16 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("codes", "view")
     if capability_id == "stocks.indicators.risk_flags":
         return ("flag_type", "status")
-    if capability_id in {"boards.indicators.money_flow", "boards.indicators.money_flow.snapshot"}:
-        return ("board_code", "scope")
+    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot"}:
+        return ("concept_id", "scope")
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_type")
     if capability_id == "stocks.finance.main_business":
         return ("code", "classification")
     if capability_id.startswith("stocks."):
         return ("code",)
-    if capability_id.startswith("boards."):
-        return ("board_code",)
+    if capability_id.startswith("concepts."):
+        return ("concept_id",)
     if capability_id.startswith("indexes."):
         return ("index_code",)
     if capability_id == "markets.connect.quotas":
@@ -356,7 +356,7 @@ def _coverage_mode_for_capability(capability_id: str) -> str:
         return "snapshot"
     if capability_id == "stocks.quotes.intraday":
         return "minute_range"
-    if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily", "boards.quotes.daily"}:
+    if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily", "concepts.quotes.daily"}:
         return "trading_day_range"
     if capability_id.startswith("stocks.finance."):
         return "period_range"
@@ -935,6 +935,8 @@ class CacheRowRepository:
 
 def _field_values(request_identity: dict[str, object], field: str) -> tuple[object, ...]:
     value = request_identity.get(field, "")
+    if field == "adjust" and value == "":
+        value = "none"
     if value == "" and field == "code":
         value = request_identity.get("codes", "")
     if value == "" and field == "index_code":
@@ -1041,7 +1043,7 @@ def _request_scopes(policy: CachePolicy, request_identity: dict[str, object]) ->
         next_scopes: list[CacheScope] = []
         for value in _field_values(request_identity, field):
             for scope in scopes:
-                criteria = {**scope.criteria, field: value}
+                criteria = dict(scope.criteria) if _normalize_text(value) == "" else {**scope.criteria, field: value}
                 scope_identity = build_scope_identity(criteria, policy.request_scope_fields)
                 next_scopes.append(CacheScope(scope_identity, criteria, time_start, time_end))
         scopes = next_scopes
@@ -1216,7 +1218,10 @@ class UnifiedPostgresCacheStore:
         seen: set[str] = set()
         never_expires = _policy_ignores_ttl(policy)
         for scope, coverage in coverages:
-            start, end = _coverage_read_range(policy, coverage, scope)
+            if policy.coverage_mode == "snapshot":
+                start, end = datetime.min, datetime.max
+            else:
+                start, end = _coverage_read_range(policy, coverage, scope)
             for payload in self.rows.read(capability_id, start, end, never_expires):
                 marker = repr(sorted(payload.items()))
                 if marker in seen:

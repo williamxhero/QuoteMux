@@ -101,15 +101,15 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/reference/bse-code-mappings", ("stocks.reference.bse_code_mappings",)),
     PublicApiCapabilityBinding("/api/stocks/reference/hk-connect-targets", ("stocks.reference.hk_connect_targets",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/quotes/auctions", ("stocks.quotes.auctions",)),
-    PublicApiCapabilityBinding("/api/boards/quotes", ("boards.quotes.daily",)),
-    PublicApiCapabilityBinding("/api/boards/quotes/daily-snapshot", ("boards.quotes.daily",)),
-    PublicApiCapabilityBinding("/api/boards/catalog", ("boards.catalog",)),
-    PublicApiCapabilityBinding("/api/boards/{board_code}/profile", ("boards.profile",)),
-    PublicApiCapabilityBinding("/api/boards/{board_code}/members", ("boards.members",)),
-    PublicApiCapabilityBinding("/api/boards/{board_code}/members/history", ("boards.members.history",)),
-    PublicApiCapabilityBinding("/api/boards/{board_code}/indicators/money-flow", ("boards.indicators.money_flow",)),
-    PublicApiCapabilityBinding("/api/boards/indicators/money-flow", ("boards.indicators.money_flow.snapshot",)),
-    PublicApiCapabilityBinding("/api/boards/reference/categories", ("boards.reference.categories",)),
+    PublicApiCapabilityBinding("/api/concepts/quotes", ("concepts.quotes.daily",)),
+    PublicApiCapabilityBinding("/api/concepts/quotes/daily-snapshot", ("concepts.quotes.daily",)),
+    PublicApiCapabilityBinding("/api/concepts/catalog", ("concepts.catalog",)),
+    PublicApiCapabilityBinding("/api/concepts/{concept_id}/profile", ("concepts.profile",)),
+    PublicApiCapabilityBinding("/api/concepts/{concept_id}/members", ("concepts.members",)),
+    PublicApiCapabilityBinding("/api/concepts/{concept_id}/members/history", ("concepts.members.history",)),
+    PublicApiCapabilityBinding("/api/concepts/{concept_id}/indicators/money-flow", ("concepts.indicators.money_flow",)),
+    PublicApiCapabilityBinding("/api/concepts/indicators/money-flow", ("concepts.indicators.money_flow.snapshot",)),
+    PublicApiCapabilityBinding("/api/concepts/reference/categories", ("concepts.reference.categories",)),
     PublicApiCapabilityBinding("/api/concepts/alias/resolve", ("concepts.alias.resolve",)),
     PublicApiCapabilityBinding("/api/concepts/alias/groups", ("concepts.alias.groups",)),
     PublicApiCapabilityBinding("/api/concepts/alias/groups/{concept_id}", ("concepts.alias.groups",)),
@@ -138,9 +138,9 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
 )
 
 LEGACY_CAPABILITY_ALIASES = {
-    "boards.money_flow": "boards.indicators.money_flow",
-    "boards.quotes": "boards.quotes.daily",
-    "boards.reference": "boards.reference.categories",
+    "concepts.money_flow": "concepts.indicators.money_flow",
+    "concepts.quotes": "concepts.quotes.daily",
+    "concepts.reference": "concepts.reference.categories",
     "indexes.quotes": "indexes.quotes.daily",
     "stocks.quotes": "stocks.quotes.daily",
     "markets.trading_calendar": "markets.calendar.trading",
@@ -189,9 +189,9 @@ def _infer_result_shape(capability_id: str) -> str:
         return RESULT_SHAPE_EVENT_STREAM
     if capability_id == "concepts.alias.resolve":
         return RESULT_SHAPE_SINGLE_RECORD
-    if capability_id.endswith(".basic") or capability_id.endswith(".company") or capability_id in {"boards.profile", "indexes.profile"}:
+    if capability_id.endswith(".basic") or capability_id.endswith(".company") or capability_id in {"concepts.profile", "indexes.profile"}:
         return RESULT_SHAPE_SINGLE_RECORD
-    if capability_id.endswith(".catalog") or capability_id.endswith(".archive") or capability_id.startswith("stocks.reference.") or capability_id in {"boards.reference.categories", "markets.trading.sessions", "indexes.catalog"}:
+    if capability_id.endswith(".catalog") or capability_id.endswith(".archive") or capability_id.startswith("stocks.reference.") or capability_id in {"concepts.reference.categories", "markets.trading.sessions", "indexes.catalog"}:
         return RESULT_SHAPE_REFERENCE_TABLE
     if (
         ".quotes." in capability_id
@@ -224,16 +224,16 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
         return ("code", "report_period", "report_type")
     if capability_id.startswith("stocks.finance.") or capability_id.startswith("stocks.ownership.") or capability_id.startswith("stocks.corporate_actions.") or capability_id.startswith("stocks.research.") or capability_id.startswith("stocks.indicators.") or capability_id.startswith("stocks.signals.") or capability_id.startswith("stocks.factors."):
         return ("code", "trade_date")
-    if capability_id.startswith("boards.quotes."):
-        return ("board_code", "trade_time", "freq")
-    if capability_id == "boards.indicators.money_flow":
-        return ("board_code", "trade_date", "scope")
-    if capability_id == "boards.indicators.money_flow.snapshot":
-        return ("board_code", "trade_date", "scope")
-    if capability_id.startswith("boards.members"):
-        return ("board_code", "code")
-    if capability_id.startswith("boards."):
-        return ("board_code",)
+    if capability_id.startswith("concepts.quotes."):
+        return ("concept_id", "trade_time", "freq")
+    if capability_id == "concepts.indicators.money_flow":
+        return ("concept_id", "trade_date", "scope")
+    if capability_id == "concepts.indicators.money_flow.snapshot":
+        return ("concept_id", "trade_date", "scope")
+    if capability_id.startswith("concepts.members"):
+        return ("concept_id", "code")
+    if capability_id.startswith("concepts."):
+        return ("concept_id",)
     if capability_id == "concepts.alias.resolve":
         return ("concept_id",)
     if capability_id == "concepts.alias.groups":
@@ -276,13 +276,13 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("tushare", "akshare")
     if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
         return ("tushare", "akshare")
-    if capability_id == "boards.indicators.money_flow":
+    if capability_id == "concepts.indicators.money_flow":
         return ("akshare", "tushare", "derived_core")
-    if capability_id == "boards.members":
+    if capability_id == "concepts.members":
         return ("derived_core", "tushare", "akshare")
-    if capability_id in {"boards.catalog", "boards.profile", "boards.indicators.money_flow.snapshot", "boards.reference.categories"}:
+    if capability_id in {"concepts.catalog", "concepts.profile", "concepts.indicators.money_flow.snapshot", "concepts.reference.categories"}:
         return ("tushare", "akshare")
-    if capability_id == "boards.quotes.daily":
+    if capability_id == "concepts.quotes.daily":
         return ("tushare", "efinance", "akshare")
     if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions", "markets.trading.open_auctions"}:
         return ("tushare", "akshare")
@@ -336,17 +336,17 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "stocks.profile.basic",
         "stocks.profile.name_history",
         "stocks.factors.adj",
-        "boards.catalog",
-        "boards.profile",
-        "boards.members",
-        "boards.members.history",
-        "boards.indicators.money_flow.snapshot",
-        "boards.reference.categories",
+        "concepts.catalog",
+        "concepts.profile",
+        "concepts.members",
+        "concepts.members.history",
+        "concepts.indicators.money_flow.snapshot",
+        "concepts.reference.categories",
         "indexes.catalog",
         "indexes.profile",
         "markets.trading.sessions",
     }:
-        if capability_id == "boards.members":
+        if capability_id == "concepts.members":
             return ("derived_core", "tushare", "akshare")
         return ("tushare",)
     return ("tushare",)

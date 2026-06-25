@@ -4,10 +4,10 @@ from datetime import date
 
 import pandas as pd
 
-from platform_models import BoardCatalogItem, BoardMemberItem, BoardQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
+from platform_models import ConceptCatalogItem, ConceptMemberItem, ConceptQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.market_reads import load_board_daily_frame, load_board_daily_snapshot_frame, load_index_daily_frame, load_latest_complete_board_daily_snapshot_codes, load_latest_complete_board_daily_snapshot_frame, load_stock_intraday_frame
-from quotemux.infra.db.reference_reads import load_board_catalog_frame, load_board_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
+from quotemux.infra.db.market_reads import load_concept_daily_frame, load_concept_daily_snapshot_frame, load_index_daily_frame, load_latest_complete_concept_daily_snapshot_frame, load_latest_complete_concept_daily_snapshot_ids, load_stock_intraday_frame
+from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_concept_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
 def _frame_to_stock_quote_items(frame: pd.DataFrame, freq: str):
@@ -134,18 +134,18 @@ def get_local_index_quotes(index_codes: list[str], freq: str, trade_date: str, s
     return items
 
 
-def _frame_to_board_quote_items(frame: pd.DataFrame) -> list[BoardQuoteItem]:
+def _frame_to_concept_quote_items(frame: pd.DataFrame) -> list[ConceptQuoteItem]:
     if frame.empty:
         return []
     work = frame.copy()
     work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
     work = work.dropna(subset=["trade_time"])
-    items: list[BoardQuoteItem] = []
+    items: list[ConceptQuoteItem] = []
     for _, row in work.iterrows():
         items.append(
-            BoardQuoteItem(
-                board_code=str(row["board_code"]),
-                board_name=str(row["board_name"]) if "board_name" in row and pd.notna(row["board_name"]) else "",
+            ConceptQuoteItem(
+                concept_id=str(row["concept_id"]),
+                concept_name=str(row["concept_name"]) if "concept_name" in row and pd.notna(row["concept_name"]) else "",
                 trade_time=format_datetime_value(row["trade_time"], "1d"),
                 freq="1d",
                 open=float(row["open"]) if pd.notna(row["open"]) else None,
@@ -162,31 +162,31 @@ def _frame_to_board_quote_items(frame: pd.DataFrame) -> list[BoardQuoteItem]:
     return items
 
 
-def get_local_board_quotes(board_codes: list[str], freq: str, trade_date: str, start_date: str, end_date: str, count: int | None) -> list[BoardQuoteItem]:
+def get_local_concept_quotes(concept_ids: list[str], freq: str, trade_date: str, start_date: str, end_date: str, count: int | None) -> list[ConceptQuoteItem]:
     if freq != "1d":
         return []
     request_start_dt, request_end_dt = build_time_bounds(trade_date, start_date, end_date, "", "", count, False)
     start_text = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
     end_text = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
-    frame = load_board_daily_frame(board_codes, start_text, end_text)
-    return _frame_to_board_quote_items(frame)
+    frame = load_concept_daily_frame(concept_ids, start_text, end_text)
+    return _frame_to_concept_quote_items(frame)
 
 
-def get_local_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
+def get_local_concept_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[ConceptQuoteItem]:
     actual_trade_date = format_date_value(trade_date)
     if actual_trade_date == "":
         return []
-    frame = load_board_daily_snapshot_frame(actual_trade_date, limit, offset)
-    return _frame_to_board_quote_items(frame)
+    frame = load_concept_daily_snapshot_frame(actual_trade_date, limit, offset)
+    return _frame_to_concept_quote_items(frame)
 
 
-def get_latest_complete_board_daily_snapshot_codes(trade_date: str, limit: int, offset: int) -> list[str]:
-    return load_latest_complete_board_daily_snapshot_codes(format_date_value(trade_date), limit, offset)
+def get_latest_complete_concept_daily_snapshot_ids(trade_date: str, limit: int, offset: int) -> list[str]:
+    return load_latest_complete_concept_daily_snapshot_ids(format_date_value(trade_date), limit, offset)
 
 
-def get_latest_complete_board_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[BoardQuoteItem]:
-    frame = load_latest_complete_board_daily_snapshot_frame(format_date_value(trade_date), limit, offset)
-    return _frame_to_board_quote_items(frame)
+def get_latest_complete_concept_daily_snapshot(trade_date: str, limit: int, offset: int) -> list[ConceptQuoteItem]:
+    frame = load_latest_complete_concept_daily_snapshot_frame(format_date_value(trade_date), limit, offset)
+    return _frame_to_concept_quote_items(frame)
 
 
 def get_local_trading_calendar(exchange: str, start_date: str, end_date: str, is_open: bool | None) -> list[TradingCalendarItem]:
@@ -251,23 +251,23 @@ def _normalize_list_status(value: str) -> str:
     return value
 
 
-def get_local_board_catalog(status: str) -> list[BoardCatalogItem]:
-    frame = load_board_catalog_frame(status)
+def get_local_concept_catalog(status: str) -> list[ConceptCatalogItem]:
+    frame = load_concept_catalog_frame(status)
     if frame.empty:
         return []
-    return [BoardCatalogItem(board_code=str(row["board_code"]), board_name=str(row["name"]), category=str(row["board_type"]), status="inactive" if format_date_value(row["delisted_date"]) else "active") for _, row in frame.iterrows()]
+    return [ConceptCatalogItem(concept_id=str(row["concept_id"]), concept_name=str(row["name"]), category=str(row["concept_type"]), status="inactive" if format_date_value(row["delisted_date"]) else "active") for _, row in frame.iterrows()]
 
 
-def get_local_board_profile(board_code: str) -> list[BoardCatalogItem]:
-    return [item for item in get_local_board_catalog("") if item.board_code == board_code]
+def get_local_concept_profile(concept_id: str) -> list[ConceptCatalogItem]:
+    return [item for item in get_local_concept_catalog("") if item.concept_id == concept_id]
 
 
-def get_local_board_members(board_code: str, trade_date: str) -> list[BoardMemberItem]:
+def get_local_concept_members(concept_id: str, trade_date: str) -> list[ConceptMemberItem]:
     actual_trade_date = format_date_value(trade_date) or date.today().strftime("%Y-%m-%d")
-    frame = load_board_members_frame(board_code, actual_trade_date)
+    frame = load_concept_members_frame(concept_id, actual_trade_date)
     if frame.empty:
         return []
-    return [BoardMemberItem(board_code=str(row["board_code"]), code=str(row["code"]).zfill(6), name=str(row["name"]), join_date=format_date_value(row["join_date"])) for _, row in frame.iterrows()]
+    return [ConceptMemberItem(concept_id=str(row["concept_id"]), code=str(row["code"]).zfill(6), name=str(row["name"]), join_date=format_date_value(row["join_date"])) for _, row in frame.iterrows()]
 
 
 def get_local_index_catalog(index_codes: list[str]) -> list[IndexCatalogItem]:
