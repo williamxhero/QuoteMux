@@ -628,7 +628,7 @@ def _group_start_date(members: Sequence[ConceptAliasGroupMemberItem]) -> str:
         return ""
     real_values = [value for value in values if value != DEFAULT_CONCEPT_START_DATE]
     if real_values != []:
-        return min(real_values)
+        return max(real_values)
     return min(values)
 
 
