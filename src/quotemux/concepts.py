@@ -31,7 +31,7 @@ CONCEPT_MEMBER_FETCH_WORKERS = 8
 MAX_CANDIDATE_PAIRS = 20
 MEMBER_VERIFY_PAIR_LIMIT = 80
 CONCEPT_ID_PATTERN = re.compile(r"C[1-9][0-9]*")
-BOARD_TYPE_ORDER = ("ths", "dc", "tdx", "kpl", "em")
+CONCEPT_TYPE_ORDER = ("ths", "dc", "tdx", "kpl", "em")
 
 CONCEPT_ALIAS_SCHEMA_SQL = (
     "create schema if not exists derived",
@@ -48,16 +48,48 @@ CONCEPT_ALIAS_SCHEMA_SQL = (
     create table if not exists derived.concept_alias_members (
         concept_id text not null references derived.concept_alias_groups(concept_id) on update cascade on delete cascade,
         provider text not null,
-        board_type text not null,
-        board_code text not null,
-        board_name text not null,
+        provider_concept_type text not null,
+        provider_concept_code text not null,
+        provider_concept_name text not null,
         start_date text not null,
         end_date text not null,
         updated_at timestamp without time zone not null default now(),
-        primary key (concept_id, provider, board_type, board_code)
+        primary key (concept_id, provider, provider_concept_type, provider_concept_code)
     )
     """,
-    "create unique index if not exists ux_concept_alias_members_external on derived.concept_alias_members (provider, board_type, board_code)",
+    "alter table derived.concept_alias_members add column if not exists provider_concept_type text",
+    "alter table derived.concept_alias_members add column if not exists provider_concept_code text",
+    "alter table derived.concept_alias_members add column if not exists provider_concept_name text",
+    """
+    do $$
+    begin
+        if exists (
+            select 1 from information_schema.columns
+            where table_schema = 'derived' and table_name = 'concept_alias_members' and column_name = 'board_type'
+        ) then
+            execute 'update derived.concept_alias_members set provider_concept_type = board_type where provider_concept_type is null';
+        end if;
+        if exists (
+            select 1 from information_schema.columns
+            where table_schema = 'derived' and table_name = 'concept_alias_members' and column_name = 'board_code'
+        ) then
+            execute 'update derived.concept_alias_members set provider_concept_code = board_code where provider_concept_code is null';
+        end if;
+        if exists (
+            select 1 from information_schema.columns
+            where table_schema = 'derived' and table_name = 'concept_alias_members' and column_name = 'board_name'
+        ) then
+            execute 'update derived.concept_alias_members set provider_concept_name = board_name where provider_concept_name is null';
+        end if;
+    end $$;
+    """,
+    "update derived.concept_alias_members set provider_concept_type = '' where provider_concept_type is null",
+    "update derived.concept_alias_members set provider_concept_code = '' where provider_concept_code is null",
+    "update derived.concept_alias_members set provider_concept_name = '' where provider_concept_name is null",
+    "alter table derived.concept_alias_members alter column provider_concept_type set not null",
+    "alter table derived.concept_alias_members alter column provider_concept_code set not null",
+    "alter table derived.concept_alias_members alter column provider_concept_name set not null",
+    "create unique index if not exists ux_concept_alias_members_provider_concept on derived.concept_alias_members (provider, provider_concept_type, provider_concept_code)",
     """
     create table if not exists derived.concept_alias_candidates (
         left_provider text not null,
@@ -175,15 +207,15 @@ class QuoteMuxConcepts:
     def __init__(self, settings: QuoteMuxSettings | None = None) -> None:
         self._settings = settings or QuoteMuxSettings()
 
-    def resolve_alias(self, provider: str, board_type: str, board_code: str, trade_date: str) -> ConceptAliasResolveItem:
+    def resolve_alias(self, provider: str, provider_concept_type: str, provider_concept_code: str, trade_date: str) -> ConceptAliasResolveItem:
         provider_text = provider.strip()
-        board_type_text = board_type.strip()
-        board_code_text = board_code.strip()
-        if provider_text == "" or board_code_text == "":
+        concept_type_text = provider_concept_type.strip()
+        concept_code_text = provider_concept_code.strip()
+        if provider_text == "" or concept_code_text == "":
             return ConceptAliasResolveItem(concept_id="", canonical_name="", confidence=None)
         for group in self.list_alias_groups(trade_date):
             for member in group.members:
-                if member.provider == provider_text and member.board_code == board_code_text and (board_type_text == "" or member.board_type == board_type_text):
+                if member.provider == provider_text and member.provider_concept_code == concept_code_text and (concept_type_text == "" or member.provider_concept_type == concept_type_text):
                     return ConceptAliasResolveItem(concept_id=group.concept_id, canonical_name=group.canonical_name, confidence=1.0)
         return ConceptAliasResolveItem(concept_id="", canonical_name="", confidence=None)
 
@@ -199,7 +231,7 @@ class QuoteMuxConcepts:
     def list_alias_groups(self, trade_date: str) -> list[ConceptAliasGroupItem]:
         return _read_alias_groups(trade_date)
 
-    def list_board_aliases(self, concept_id: str, trade_date: str, source_order: tuple[str, ...]) -> tuple[ConceptBoardAlias, ...]:
+    def list_concept_aliases(self, concept_id: str, trade_date: str, source_order: tuple[str, ...]) -> tuple[ConceptBoardAlias, ...]:
         group = self.get_alias_group(concept_id, trade_date)
         if group.concept_id == "":
             return ()
@@ -208,9 +240,9 @@ class QuoteMuxConcepts:
                 concept_id=group.concept_id,
                 canonical_name=group.canonical_name,
                 provider=member.provider,
-                board_type=member.board_type,
-                board_code=member.board_code,
-                board_name=member.board_name,
+                board_type=member.provider_concept_type,
+                board_code=member.provider_concept_code,
+                board_name=member.provider_concept_name,
             )
             for member in _sort_alias_members(group.members, source_order)
         )
@@ -237,12 +269,12 @@ class QuoteMuxConcepts:
             if not _provider_has_concept_contracts(provider):
                 continue
             try:
-                catalog_handler = registry.get_handler(provider, "get_board_catalog")
-                members_handler = registry.get_handler(provider, "get_board_members")
+                catalog_handler = registry.get_handler(provider, "get_concept_catalog")
+                members_handler = registry.get_handler(provider, "get_concept_members")
             except KeyError:
                 continue
-            catalog_instance = _source_instance(self._settings, "boards.catalog", provider)
-            members_instance = _source_instance(self._settings, "boards.members", provider)
+            catalog_instance = _source_instance(self._settings, "concepts.catalog", provider)
+            members_instance = _source_instance(self._settings, "concepts.members", provider)
             if catalog_instance is None or members_instance is None:
                 continue
             if not _provider_has_member_runtime(provider, members_instance):
@@ -323,7 +355,7 @@ def _collect_catalogs(sources: Sequence[ConceptProviderSource], trade_date: str)
                     board_code=catalog.board_code,
                     board_name=catalog.board_name,
                     category=catalog.category,
-                    start_date=_concept_start_date(catalog.start_date),
+                    start_date=_concept_start_date(catalog.start_date, catalog.board_name),
                     end_date=_normalize_date_text(catalog.end_date),
                 )
             )
@@ -488,7 +520,7 @@ def _canonical_name(snapshots: Sequence[ConceptBoardSnapshot]) -> str:
 def _to_group(concept_id: str, canonical_name: str, snapshots: Sequence[ConceptBoardSnapshot]) -> ConceptAliasGroupItem:
     actual_name = canonical_name if canonical_name != "" else _canonical_name(snapshots)
     members = [
-        ConceptAliasGroupMemberItem(provider=item.provider, board_type=item.board_type, board_code=item.board_code, board_name=item.board_name, start_date=item.start_date, end_date=item.end_date)
+        ConceptAliasGroupMemberItem(provider=item.provider, provider_concept_type=item.board_type, provider_concept_code=item.board_code, provider_concept_name=item.board_name, start_date=item.start_date, end_date=item.end_date)
         for item in sorted(snapshots, key=lambda value: (value.provider, value.board_type, value.board_code))
     ]
     return ConceptAliasGroupItem(concept_id=concept_id, canonical_name=actual_name, start_date=_group_start_date(members), end_date=_group_end_date(members), members=members)
@@ -532,7 +564,7 @@ def is_concept_id(value: str) -> bool:
 
 def _sort_alias_members(members: Sequence[ConceptAliasGroupMemberItem], source_order: tuple[str, ...]) -> list[ConceptAliasGroupMemberItem]:
     package_rank = {source_id.split("-", 1)[0]: index for index, source_id in enumerate(source_order)}
-    type_rank = {board_type: index for index, board_type in enumerate(BOARD_TYPE_ORDER)}
+    type_rank = {concept_type: index for index, concept_type in enumerate(CONCEPT_TYPE_ORDER)}
     return sorted(
         members,
         key=lambda member: (
@@ -600,11 +632,31 @@ def _group_start_date(members: Sequence[ConceptAliasGroupMemberItem]) -> str:
     return min(values)
 
 
-def _concept_start_date(value: str) -> str:
+def _concept_start_date(value: str, board_name: str) -> str:
+    name_start_date = _concept_name_start_date(board_name)
+    if name_start_date != "":
+        return name_start_date
     normalized = _normalize_date_text(value)
     if normalized != "":
         return normalized
     return DEFAULT_CONCEPT_START_DATE
+
+
+def _concept_name_start_date(board_name: str) -> str:
+    match = re.search(r"(20[0-9]{2}).*?(年报|四季|一季|中报|二季|三季)", board_name)
+    if match is None:
+        return ""
+    year = int(match.group(1))
+    period = match.group(2)
+    if period in {"年报", "四季"}:
+        return f"{year + 1}0101"
+    if period == "一季":
+        return f"{year}0401"
+    if period in {"中报", "二季"}:
+        return f"{year}0701"
+    if period == "三季":
+        return f"{year}1001"
+    return ""
 
 
 def _group_end_date(members: Sequence[ConceptAliasGroupMemberItem]) -> str:
@@ -631,9 +683,9 @@ def _read_alias_groups(trade_date: str) -> list[ConceptAliasGroupItem]:
         return []
     members_frame = query_dataframe(
         """
-        select concept_id, provider, board_type, board_code, board_name, start_date, end_date
+        select concept_id, provider, provider_concept_type, provider_concept_code, provider_concept_name, start_date, end_date
         from derived.concept_alias_members
-        order by concept_id asc, provider asc, board_type asc, board_code asc
+        order by concept_id asc, provider asc, provider_concept_type asc, provider_concept_code asc
         """,
         (),
     )
@@ -644,9 +696,9 @@ def _read_alias_groups(trade_date: str) -> list[ConceptAliasGroupItem]:
             members_by_id.setdefault(concept_id, []).append(
                 ConceptAliasGroupMemberItem(
                     provider=str(row.get("provider", "")),
-                    board_type=str(row.get("board_type", "")),
-                    board_code=str(row.get("board_code", "")),
-                    board_name=str(row.get("board_name", "")),
+                    provider_concept_type=str(row.get("provider_concept_type", "")),
+                    provider_concept_code=str(row.get("provider_concept_code", "")),
+                    provider_concept_name=str(row.get("provider_concept_name", "")),
                     start_date=str(row.get("start_date", "")),
                     end_date=str(row.get("end_date", "")),
                 )
@@ -692,7 +744,7 @@ def _write_alias_asset(asset: ConceptAliasAsset, registry: ConceptIdRegistry) ->
         return
     group_rows = [(item.concept_id, item.canonical_name, item.start_date, item.end_date) for item in asset.groups]
     member_rows = [
-        (group.concept_id, member.provider, member.board_type, member.board_code, member.board_name, member.start_date, member.end_date)
+        (group.concept_id, member.provider, member.provider_concept_type, member.provider_concept_code, member.provider_concept_name, member.start_date, member.end_date)
         for group in asset.groups
         for member in group.members
     ]
@@ -756,7 +808,7 @@ def _write_alias_tables(
             )
             cursor.executemany(
                 """
-                insert into derived.concept_alias_members (concept_id, provider, board_type, board_code, board_name, start_date, end_date)
+                insert into derived.concept_alias_members (concept_id, provider, provider_concept_type, provider_concept_code, provider_concept_name, start_date, end_date)
                 values (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 member_rows,
@@ -800,7 +852,7 @@ def _provider_has_concept_contracts(provider: str) -> bool:
         manifest = registry.get_manifest(provider)
     except KeyError:
         return False
-    return manifest.supports_capability("boards.catalog") and manifest.supports_capability("boards.members")
+    return manifest.supports_capability("concepts.catalog") and manifest.supports_capability("concepts.members")
 
 
 def _typed_sources(
