@@ -16,13 +16,14 @@ from quotemux.reports import ContractReport
 from quotemux.store import load_store_result, store_result
 
 
-CONCEPT_CATALOG_SOURCE_ORDER = ("tushare", "akshare")
-CONCEPT_MEMBERS_SOURCE_ORDER = ("derived_core", "tushare", "akshare")
+CONCEPT_CATALOG_SOURCE_ORDER = ("crawler_provider", "tushare", "akshare")
+CONCEPT_MEMBERS_SOURCE_ORDER = ("crawler_provider", "derived_core", "tushare", "akshare")
 CONCEPT_MEMBER_HISTORY_SOURCE_ORDER = ("tushare", "akshare")
-CONCEPT_QUOTES_SOURCE_ORDER = ("tushare", "efinance", "akshare", "derived_core")
+CONCEPT_QUOTES_SOURCE_ORDER = ("crawler_provider", "tushare", "efinance", "akshare", "derived_core")
 CONCEPT_MONEY_FLOW_SOURCE_ORDER = ("akshare", "tushare", "derived_core")
 CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER = ("tushare", "akshare", "derived_core")
 CONCEPT_CATEGORIES_SOURCE_ORDER = ("tushare", "akshare")
+CRAWLER_PROVIDER_CONCEPT_TYPES = {"ths", "em"}
 
 
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
@@ -284,6 +285,34 @@ def _rewrite_provider_member_items(items: list[BoardMemberItem], alias: ConceptB
     return [ConceptMemberItem(concept_id=alias.concept_id, code=item.code, name=item.name, weight=item.weight, join_date=item.join_date) for item in items]
 
 
+def _crawler_provider_alias(alias: ConceptBoardAlias) -> ConceptBoardAlias | None:
+    if alias.board_type not in CRAWLER_PROVIDER_CONCEPT_TYPES:
+        return None
+    return ConceptBoardAlias(
+        concept_id=alias.concept_id,
+        canonical_name=alias.canonical_name,
+        provider="crawler_provider",
+        board_type=alias.board_type,
+        board_code=alias.board_code,
+        board_name=alias.board_name,
+    )
+
+
+def _crawler_provider_aliases(aliases: tuple[ConceptBoardAlias, ...]) -> tuple[ConceptBoardAlias, ...]:
+    items: list[ConceptBoardAlias] = []
+    seen: set[tuple[str, str]] = set()
+    for alias in aliases:
+        crawler_alias = _crawler_provider_alias(alias)
+        if crawler_alias is None:
+            continue
+        key = (crawler_alias.board_type, crawler_alias.board_code)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(crawler_alias)
+    return tuple(items)
+
+
 def _rewrite_provider_member_history_items(items: list[BoardMemberHistoryItem], alias: ConceptBoardAlias) -> list[ConceptMemberHistoryItem]:
     return [ConceptMemberHistoryItem(concept_id=alias.concept_id, code=item.code, name=item.name, effective_date=item.effective_date, action=item.action) for item in items]
 
@@ -437,8 +466,15 @@ class QuoteMuxConceptRuntime:
         for concept_id in concept_ids:
             concept_items: list[ConceptQuoteItem] = []
             aliases = self._concept_aliases(concept_id, trade_date or start_date or end_date, "concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
+            for alias in _crawler_provider_aliases(aliases):
+                raw_items = _source_package_call("crawler_provider", "get_concept_quotes", [f"{alias.board_type}:{alias.board_code}"], freq, trade_date, start_date, end_date, start_time, end_time, count)
+                if isinstance(raw_items, list):
+                    concept_items.extend(_rewrite_provider_quote_items([item for item in raw_items if isinstance(item, BoardQuoteItem)], alias))
+            if concept_items != []:
+                items.extend(_merge_time_series_items(concept_items))
+                continue
             for alias in aliases:
-                if alias.provider == "derived_core":
+                if alias.provider in {"derived_core", "crawler_provider"}:
                     continue
                 raw_items = _source_package_call(alias.provider, "get_concept_quotes", [alias.board_code], freq, trade_date, start_date, end_date, start_time, end_time, count)
                 if isinstance(raw_items, list):
@@ -472,7 +508,15 @@ class QuoteMuxConceptRuntime:
     def get_members(self, concept_id: str, trade_date: str) -> list[ConceptMemberItem]:
         aliases = self._concept_aliases(concept_id, trade_date, "concepts.members", CONCEPT_MEMBERS_SOURCE_ORDER)
         items: list[ConceptMemberItem] = []
+        for alias in _crawler_provider_aliases(aliases):
+            raw_items = _source_package_call("crawler_provider", "get_concept_members", f"{alias.board_type}:{alias.board_code}", trade_date)
+            if isinstance(raw_items, list):
+                items.extend(_rewrite_provider_member_items([item for item in raw_items if isinstance(item, BoardMemberItem)], alias))
+        if items != []:
+            return _dedupe_member_union(items)
         for alias in aliases:
+            if alias.provider == "crawler_provider":
+                continue
             raw_items = _source_package_call(alias.provider, "get_concept_members", alias.board_code, trade_date)
             if isinstance(raw_items, list):
                 items.extend(_rewrite_provider_member_items([item for item in raw_items if isinstance(item, BoardMemberItem)], alias))

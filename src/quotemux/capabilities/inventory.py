@@ -279,13 +279,15 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "concepts.indicators.money_flow":
         return ("akshare", "tushare", "derived_core")
     if capability_id == "concepts.members":
-        return ("derived_core", "tushare", "akshare")
+        return ("crawler_provider", "derived_core", "tushare", "akshare")
     if capability_id == "concepts.indicators.money_flow.snapshot":
         return ("tushare", "akshare", "derived_core")
     if capability_id in {"concepts.catalog", "concepts.profile", "concepts.reference.categories"}:
+        if capability_id == "concepts.catalog":
+            return ("crawler_provider", "tushare", "akshare")
         return ("tushare", "akshare")
     if capability_id == "concepts.quotes.daily":
-        return ("tushare", "efinance", "akshare", "derived_core")
+        return ("crawler_provider", "tushare", "efinance", "akshare", "derived_core")
     if capability_id in {"markets.connect.capital_flow", "markets.events.block_trades", "markets.indicators.main_capital_flow", "markets.participants.dragon_tiger.institutions", "markets.trading.open_auctions"}:
         return ("tushare", "akshare")
     if capability_id == "markets.participants.hot_money.details":
@@ -324,7 +326,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "stocks.signals.hl":
         return ("derived_core", "tushare", "opentdx", "efinance", "mootdx", "akshare")
     if capability_id == "stocks.signals.limit_order_amount":
-        return ("akshare", "crawler_provider")
+        return ("crawler_provider", "akshare")
     if capability_id == "stocks.signals.nine_turn":
         return ("tushare", "derived_core")
     if capability_id == "stocks.factors.technical":
@@ -338,9 +340,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "stocks.profile.basic",
         "stocks.profile.name_history",
         "stocks.factors.adj",
-        "concepts.catalog",
         "concepts.profile",
-        "concepts.members",
         "concepts.members.history",
         "concepts.indicators.money_flow.snapshot",
         "concepts.reference.categories",
@@ -348,8 +348,6 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "indexes.profile",
         "markets.trading.sessions",
     }:
-        if capability_id == "concepts.members":
-            return ("derived_core", "tushare", "akshare")
         return ("tushare",)
     return ("tushare",)
 

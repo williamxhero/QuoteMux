@@ -1202,6 +1202,15 @@ class QuoteMuxStocks:
             raise ValueError("trade_date 不能为空")
         store_identity = {"trade_date": actual_trade_date}
         items, _ = load_store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, store_identity, LimitOrderAmountItem)
+        if items == [] and self._settings.is_source_enabled("crawler_provider"):
+            raw_items = _source_package_call("crawler_provider", "get_limit_order_amount", actual_trade_date)
+            if not isinstance(raw_items, list):
+                raise RuntimeError("crawler_provider 涨跌停封单额返回值不是列表")
+            items = [item for item in raw_items if isinstance(item, LimitOrderAmountItem)]
+            if items != []:
+                report = ContractReport(contract_name=LIMIT_ORDER_AMOUNT_CAPABILITY, source_hit_counts={"crawler_provider": 1}, source_request_counts={"crawler_provider": 1})
+                write_result = store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, store_identity, items, report, report.quarantine_count)
+                report.with_store_stats(miss=True, write=write_result.status == "write")
         if items == [] and self._settings.is_source_enabled("akshare"):
             raw_items = _source_package_call("akshare", "get_limit_order_amount", actual_trade_date)
             if not isinstance(raw_items, list):
@@ -1224,35 +1233,20 @@ class QuoteMuxStocks:
 
     def run_limit_order_amount_capture(self, trade_date: str) -> dict[str, object]:
         actual_trade_date = format_date_value(trade_date) or datetime.now().strftime("%Y-%m-%d")
-        candidates = self.build_limit_order_amount_candidates(actual_trade_date)
-        handlers = {
-            "get_limit_order_amount": lambda instance: lambda code, request_trade_date, limit_side, close, limit_price: _source_package_call(instance.package_id, "get_limit_order_amount", code, request_trade_date, limit_side, close, limit_price),
-        }
-        capture_settings = QuoteMuxSettings(enabled_sources=("crawler_provider",))
-        steps = SourceInstanceExecutor(capture_settings).build_steps(LIMIT_ORDER_AMOUNT_CAPABILITY, handlers, ("crawler_provider",))
-        source_order = capture_settings.get_contract_source_order(LIMIT_ORDER_AMOUNT_CAPABILITY, ("crawler_provider",))
-        items, fallback_report = run_fallback_chain_with_report(
-            LIMIT_ORDER_AMOUNT_CAPABILITY,
-            [],
-            ("code", "trade_date", "limit_side"),
-            lambda current_items: [
-                (item.code, item.trade_date, item.limit_side, item.close, item.limit_price)
-                for item in candidates
-                if not any(current.code == item.code and current.trade_date == item.trade_date and current.limit_side == item.limit_side for current in current_items)
-            ],
-            steps,
-            source_order,
-        )
+        raw_items = _source_package_call("crawler_provider", "get_limit_order_amount", actual_trade_date)
+        if not isinstance(raw_items, list):
+            raise RuntimeError("crawler_provider 涨跌停封单额返回值不是列表")
+        items = [item for item in raw_items if isinstance(item, LimitOrderAmountItem)]
         sorted_items = sorted(items, key=lambda item: (item.limit_side, item.code))
-        report = ContractReport.from_fallback_report(LIMIT_ORDER_AMOUNT_CAPABILITY, fallback_report)
-        if len(sorted_items) != len(candidates):
+        report = ContractReport(contract_name=LIMIT_ORDER_AMOUNT_CAPABILITY, source_hit_counts={"crawler_provider": 1}, source_request_counts={"crawler_provider": 1})
+        if sorted_items == []:
             return {
                 "status": "failed",
                 "trade_date": actual_trade_date,
-                "candidate_count": len(candidates),
+                "candidate_count": 0,
                 "row_count": len(sorted_items),
                 "items": [item.model_dump() for item in sorted_items],
-                "error_message": "封单额采集结果不完整，已跳过写入",
+                "error_message": "crawler_provider 运行库未找到涨跌停封单额数据，已跳过写入",
                 "report": report.to_dict(),
             }
         write_result = store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, {"trade_date": actual_trade_date}, sorted_items, report, report.quarantine_count)
@@ -1260,7 +1254,7 @@ class QuoteMuxStocks:
         return {
             "status": "success",
             "trade_date": actual_trade_date,
-            "candidate_count": len(candidates),
+            "candidate_count": len(sorted_items),
             "row_count": len(sorted_items),
             "items": [item.model_dump() for item in sorted_items],
             "report": report.to_dict(),
