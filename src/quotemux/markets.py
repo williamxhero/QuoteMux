@@ -13,6 +13,7 @@ from quotemux.reports import ContractReport
 from quotemux.requests.markets import NextTradingDaysRequest, PreviousTradingDaysRequest, TradingCalendarRequest, YearlyTradingCalendarRequest
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.settings import QuoteMuxSettings
+from quotemux.store import load_store_result
 
 
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
@@ -196,49 +197,16 @@ class QuoteMuxMarkets:
         return sorted(merged_items, key=lambda item: item.trade_date), report
 
     def get_previous_trading_days(self, request: PreviousTradingDaysRequest) -> list[TradingCalendarItem]:
-        handlers = {
-            "get_previous_trading_days": lambda instance: lambda: _source_package_call(instance.package_id, "get_previous_trading_days", request.exchange, request.trade_date, request.n),
-        }
-        derived_settings = QuoteMuxSettings(enabled_sources=("derived_core",))
-        items, _ = run_fallback_chain_with_report(
-            "markets.calendar.trading.previous",
-            [],
-            ("exchange", "trade_date"),
-            lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(derived_settings).build_steps("markets.calendar.trading.previous", handlers, ("derived_core",)),
-            ("derived_core",),
-        )
-        return items
+        items = _source_package_call("derived_core", "get_previous_trading_days", request.exchange, request.trade_date, request.n)
+        return items if isinstance(items, list) else []
 
     def get_next_trading_days(self, request: NextTradingDaysRequest) -> list[TradingCalendarItem]:
-        handlers = {
-            "get_next_trading_days": lambda instance: lambda: _source_package_call(instance.package_id, "get_next_trading_days", request.exchange, request.trade_date, request.n),
-        }
-        derived_settings = QuoteMuxSettings(enabled_sources=("derived_core",))
-        items, _ = run_fallback_chain_with_report(
-            "markets.calendar.trading.next",
-            [],
-            ("exchange", "trade_date"),
-            lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(derived_settings).build_steps("markets.calendar.trading.next", handlers, ("derived_core",)),
-            ("derived_core",),
-        )
-        return items
+        items = _source_package_call("derived_core", "get_next_trading_days", request.exchange, request.trade_date, request.n)
+        return items if isinstance(items, list) else []
 
     def get_yearly_trading_calendar(self, request: YearlyTradingCalendarRequest) -> list[TradingCalendarItem]:
-        handlers = {
-            "get_yearly_trading_calendar": lambda instance: lambda: _source_package_call(instance.package_id, "get_yearly_trading_calendar", request.exchange, request.start_year, request.end_year),
-        }
-        derived_settings = QuoteMuxSettings(enabled_sources=("derived_core",))
-        items, _ = run_fallback_chain_with_report(
-            "markets.calendar.trading.yearly",
-            [],
-            ("exchange", "trade_date"),
-            lambda current_items: [()] if current_items == [] else [],
-            SourceInstanceExecutor(derived_settings).build_steps("markets.calendar.trading.yearly", handlers, ("derived_core",)),
-            ("derived_core",),
-        )
-        return items
+        items = _source_package_call("derived_core", "get_yearly_trading_calendar", request.exchange, request.start_year, request.end_year)
+        return items if isinstance(items, list) else []
 
     def get_connect_capital_flow(self, trade_date: str, start_date: str, end_date: str) -> list[ConnectCapitalFlowItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date}
@@ -359,8 +327,9 @@ class QuoteMuxMarkets:
 
     def get_hot_money_details(self, trade_date: str, start_date: str, end_date: str, name: str, limit: int, offset: int) -> list[HotMoneyDetailItem]:
         store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "name": name, "limit": limit, "offset": offset}
+        actual_limit = ensure_limit(limit)
         handlers = {
-            "get_hot_money_details": lambda instance: lambda: _source_package_call(instance.package_id, "get_hot_money_details", trade_date, start_date, end_date, name, ensure_limit(limit)),
+            "get_hot_money_details": lambda instance: lambda: _source_package_call(instance.package_id, "get_hot_money_details", trade_date, start_date, end_date, name, actual_limit),
         }
         items = self._store_list(
             "markets.participants.hot_money.details",
@@ -370,14 +339,18 @@ class QuoteMuxMarkets:
             ("trade_date", "name", "code"),
             lambda: self._source_list("markets.participants.hot_money.details", handlers, ("akshare", "tushare"), ("trade_date", "name", "code")),
         )
-        return items[offset: offset + ensure_limit(limit)]
+        if items == [] and self._settings.is_source_enabled("akshare"):
+            raw_items = _source_package_call("akshare", "get_hot_money_details", trade_date, start_date, end_date, name, actual_limit)
+            if isinstance(raw_items, list):
+                items = [item for item in raw_items if isinstance(item, HotMoneyDetailItem)]
+        return items[offset: offset + actual_limit]
 
     def get_open_auctions(self, codes: str, trade_date: str) -> list[AuctionItem]:
         store_identity = {"code": codes, "trade_date": trade_date}
         handlers = {
             "get_market_open_auctions": lambda instance: lambda: _source_package_call(instance.package_id, "get_market_open_auctions", codes, trade_date),
         }
-        return self._store_list(
+        items = self._store_list(
             "markets.trading.open_auctions",
             store_identity,
             AuctionItem,
@@ -385,6 +358,19 @@ class QuoteMuxMarkets:
             ("trade_date", "code", "auction_time"),
             lambda: self._source_list("markets.trading.open_auctions", handlers, ("tushare", "akshare"), ("code", "trade_date", "auction_time", "session")),
         )
+        if items != [] or codes.strip() != "":
+            return items
+        candidate_codes = list(dict.fromkeys(item.code for item in self.get_dragon_tiger(trade_date, "", "", "", 200) if item.code != ""))
+        fallback_items: list[AuctionItem] = []
+        seen_keys: set[tuple[str, str, str, str]] = set()
+        for candidate_code in candidate_codes:
+            cached_items, _ = load_store_result("markets.trading.open_auctions", {"code": candidate_code, "trade_date": trade_date}, AuctionItem)
+            for item in cached_items:
+                key = (item.code, item.trade_date, item.auction_time, item.session)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    fallback_items.append(item)
+        return fallback_items
 
     def get_sessions(self, codes: str) -> list[TradingSessionItem]:
         store_identity = {"codes": codes}

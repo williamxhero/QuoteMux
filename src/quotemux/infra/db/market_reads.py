@@ -20,6 +20,20 @@ def _existing_columns(table_schema: str, table_name: str) -> set[str]:
     return {str(row["column_name"]) for _, row in frame.iterrows()}
 
 
+def _table_exists(table_schema: str, table_name: str) -> bool:
+    frame = query_dataframe(
+        """
+        select 1
+        from information_schema.tables
+        where table_schema = %s
+          and table_name = %s
+        limit 1
+        """,
+        (table_schema, table_name),
+    )
+    return not frame.empty
+
+
 def _optional_column(existing_columns: set[str], column_name: str) -> str:
     if column_name in existing_columns:
         return f"day_rows.{column_name}"
@@ -320,6 +334,8 @@ def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:
 def load_concept_daily_frame(concept_ids: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     if not concept_ids and not start_date and not end_date:
         return pd.DataFrame()
+    if not _table_exists("fact", "concept_daily_1d"):
+        return pd.DataFrame()
     existing_columns = _existing_columns("fact", "concept_daily_1d")
     where_clauses: list[str] = []
     params: list[object] = []
@@ -364,6 +380,8 @@ def load_concept_daily_frame(concept_ids: list[str], start_date: str, end_date: 
 
 def load_concept_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
     if not trade_date:
+        return pd.DataFrame()
+    if not _table_exists("fact", "concept_daily_1d"):
         return pd.DataFrame()
     existing_columns = _existing_columns("fact", "concept_daily_1d")
     query = f"""
@@ -441,6 +459,8 @@ def _latest_complete_concept_daily_date_cte(existing_columns: set[str]) -> str:
 def load_latest_complete_concept_daily_snapshot_ids(trade_date: str, limit: int, offset: int) -> list[str]:
     if not trade_date:
         return []
+    if not _table_exists("fact", "concept_daily_1d"):
+        return []
     existing_columns = _existing_columns("fact", "concept_daily_1d")
     query = f"""
         with {_latest_complete_concept_daily_date_cte(existing_columns)}
@@ -459,6 +479,8 @@ def load_latest_complete_concept_daily_snapshot_ids(trade_date: str, limit: int,
 
 def load_latest_complete_concept_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
     if not trade_date:
+        return pd.DataFrame()
+    if not _table_exists("fact", "concept_daily_1d"):
         return pd.DataFrame()
     existing_columns = _existing_columns("fact", "concept_daily_1d")
     query = f"""

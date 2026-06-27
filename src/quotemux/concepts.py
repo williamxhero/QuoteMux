@@ -355,7 +355,7 @@ def _collect_catalogs(sources: Sequence[ConceptProviderSource], trade_date: str)
                     board_code=catalog.board_code,
                     board_name=catalog.board_name,
                     category=catalog.category,
-                    start_date=_concept_start_date(catalog.start_date, catalog.board_name),
+                    start_date=_concept_start_date(catalog.start_date),
                     end_date=_normalize_date_text(catalog.end_date),
                 )
             )
@@ -523,7 +523,18 @@ def _to_group(concept_id: str, canonical_name: str, snapshots: Sequence[ConceptB
         ConceptAliasGroupMemberItem(provider=item.provider, provider_concept_type=item.board_type, provider_concept_code=item.board_code, provider_concept_name=item.board_name, start_date=item.start_date, end_date=item.end_date)
         for item in sorted(snapshots, key=lambda value: (value.provider, value.board_type, value.board_code))
     ]
-    return ConceptAliasGroupItem(concept_id=concept_id, canonical_name=actual_name, start_date=_group_start_date(members), end_date=_group_end_date(members), members=members)
+    group_start = _group_start_date(members)
+    if group_start == "":
+        group_start = _concept_name_start_date(actual_name)
+        if group_start == "":
+            for member in members:
+                member_name_start = _concept_name_start_date(member.provider_concept_name)
+                if member_name_start != "":
+                    group_start = member_name_start
+                    break
+    if group_start == "":
+        group_start = DEFAULT_CONCEPT_START_DATE
+    return ConceptAliasGroupItem(concept_id=concept_id, canonical_name=actual_name, start_date=group_start, end_date=_group_end_date(members), members=members)
 
 
 def _snapshot_key(item: ConceptBoardCatalog | ConceptBoardSnapshot) -> tuple[str, str, str]:
@@ -531,16 +542,25 @@ def _snapshot_key(item: ConceptBoardCatalog | ConceptBoardSnapshot) -> tuple[str
 
 
 def _assign_concept_ids(groups: Sequence[ConceptAliasGroupItem], registry: ConceptIdRegistry) -> tuple[ConceptAliasGroupItem, ...]:
+    sorted_groups = sorted(
+        groups,
+        key=lambda item: (
+            item.start_date if item.start_date != "" else "99999999",
+            _canonical_group_sort_name(item),
+            _group_signature(item)
+        )
+    )
     assigned_groups: list[ConceptAliasGroupItem] = []
-    for group in sorted(groups, key=lambda item: (_canonical_group_sort_name(item), _group_signature(item))):
+    registry.signature_to_id.clear()
+    next_id = 1
+    for group in sorted_groups:
         signature = _group_signature(group)
-        concept_id = registry.signature_to_id.get(signature, "")
-        if concept_id == "":
-            concept_id = f"C{registry.next_id}"
-            registry.next_id += 1
-            registry.signature_to_id[signature] = concept_id
+        concept_id = f"C{next_id}"
+        next_id += 1
+        registry.signature_to_id[signature] = concept_id
         assigned_groups.append(group.model_copy(update={"concept_id": concept_id}))
-    return tuple(sorted(assigned_groups, key=lambda item: _concept_id_number(item.concept_id)))
+    registry.next_id = next_id
+    return tuple(assigned_groups)
 
 
 def _canonical_group_sort_name(group: ConceptAliasGroupItem) -> str:
@@ -632,14 +652,8 @@ def _group_start_date(members: Sequence[ConceptAliasGroupMemberItem]) -> str:
     return min(values)
 
 
-def _concept_start_date(value: str, board_name: str) -> str:
-    name_start_date = _concept_name_start_date(board_name)
-    if name_start_date != "":
-        return name_start_date
-    normalized = _normalize_date_text(value)
-    if normalized != "":
-        return normalized
-    return DEFAULT_CONCEPT_START_DATE
+def _concept_start_date(value: str) -> str:
+    return _normalize_date_text(value)
 
 
 def _concept_name_start_date(board_name: str) -> str:

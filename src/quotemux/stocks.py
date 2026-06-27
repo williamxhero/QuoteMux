@@ -1200,7 +1200,17 @@ class QuoteMuxStocks:
         actual_trade_date = format_date_value(trade_date)
         if actual_trade_date == "":
             raise ValueError("trade_date 不能为空")
-        items, _ = load_store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, {"trade_date": actual_trade_date}, LimitOrderAmountItem)
+        store_identity = {"trade_date": actual_trade_date}
+        items, _ = load_store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, store_identity, LimitOrderAmountItem)
+        if items == [] and self._settings.is_source_enabled("akshare"):
+            raw_items = _source_package_call("akshare", "get_limit_order_amount", actual_trade_date)
+            if not isinstance(raw_items, list):
+                raise RuntimeError("akshare 涨跌停封单额返回值不是列表")
+            items = [item for item in raw_items if isinstance(item, LimitOrderAmountItem)]
+            if items != []:
+                report = ContractReport(contract_name=LIMIT_ORDER_AMOUNT_CAPABILITY, source_hit_counts={"akshare": 1}, source_request_counts={"akshare": 1})
+                write_result = store_result(LIMIT_ORDER_AMOUNT_CAPABILITY, store_identity, items, report, report.quarantine_count)
+                report.with_store_stats(miss=True, write=write_result.status == "write")
         return sorted(items, key=lambda item: (item.trade_date, item.limit_side, item.code))
 
     def build_limit_order_amount_candidates(self, trade_date: str) -> list[LimitOrderAmountItem]:

@@ -24,6 +24,20 @@ def _existing_columns(table_schema: str, table_name: str) -> set[str]:
     return {str(row["column_name"]) for _, row in frame.iterrows()}
 
 
+def _table_exists(table_schema: str, table_name: str) -> bool:
+    frame = query_dataframe(
+        """
+        select 1
+        from information_schema.tables
+        where table_schema = %s
+          and table_name = %s
+        limit 1
+        """,
+        (table_schema, table_name),
+    )
+    return not frame.empty
+
+
 def _optional_update_assignments(existing_columns: set[str], column_names: tuple[str, ...]) -> str:
     assignments = [f"{column_name} = excluded.{column_name}" for column_name in column_names if column_name in existing_columns]
     if assignments == []:
@@ -179,6 +193,8 @@ def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
 
 
 def _upsert_concept_daily(items: Sequence[ConceptQuoteItem]) -> bool:
+    if not _table_exists("fact", "concept_daily_1d"):
+        return False
     existing_columns = _existing_columns("fact", "concept_daily_1d")
     optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
     params: list[tuple[object, ...]] = []

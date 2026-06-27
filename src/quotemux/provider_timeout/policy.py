@@ -12,6 +12,12 @@ TIMEOUT_SAMPLE_WINDOW_SIZE = 200
 TIMEOUT_MIN_SAMPLE_COUNT = 20
 TIMEOUT_P95_MULTIPLIER = 1.5
 
+LIMIT_ORDER_AMOUNT_CAPABILITY = "stocks.signals.limit_order_amount"
+LIMIT_ORDER_AMOUNT_CAPABILITY_TIMEOUT_SECONDS = 120.0
+LIMIT_ORDER_AMOUNT_CAPABILITY_MAX_SECONDS = 180.0
+LIMIT_ORDER_AMOUNT_PROVIDER = "crawler_provider"
+LIMIT_ORDER_AMOUNT_PROVIDER_TIMEOUT_SECONDS = 20.0
+
 TIMEOUT_STATUS_SUCCESS = "success"
 TIMEOUT_STATUS_EMPTY = "empty"
 TIMEOUT_STATUS_ERROR = "error"
@@ -73,6 +79,15 @@ class CapabilityTimeoutMetric:
 
 
 def default_capability_timeout_policy(capability_id: str) -> CapabilityTimeoutPolicy:
+    if capability_id == LIMIT_ORDER_AMOUNT_CAPABILITY:
+        return CapabilityTimeoutPolicy(
+            capability_id=capability_id,
+            default_timeout_seconds=LIMIT_ORDER_AMOUNT_CAPABILITY_TIMEOUT_SECONDS,
+            min_timeout_seconds=TIMEOUT_MIN_SECONDS,
+            max_timeout_seconds=LIMIT_ORDER_AMOUNT_CAPABILITY_MAX_SECONDS,
+            sample_window_size=TIMEOUT_SAMPLE_WINDOW_SIZE,
+            min_sample_count=TIMEOUT_MIN_SAMPLE_COUNT,
+        )
     return CapabilityTimeoutPolicy(
         capability_id=capability_id,
         default_timeout_seconds=CAPABILITY_TIMEOUT_DEFAULT_SECONDS,
@@ -84,6 +99,16 @@ def default_capability_timeout_policy(capability_id: str) -> CapabilityTimeoutPo
 
 
 def default_provider_timeout_policy(capability_id: str, provider: str) -> ProviderTimeoutPolicy:
+    if capability_id == LIMIT_ORDER_AMOUNT_CAPABILITY and provider == LIMIT_ORDER_AMOUNT_PROVIDER:
+        return ProviderTimeoutPolicy(
+            capability_id=capability_id,
+            provider=provider,
+            default_timeout_seconds=LIMIT_ORDER_AMOUNT_PROVIDER_TIMEOUT_SECONDS,
+            min_timeout_seconds=TIMEOUT_MIN_SECONDS,
+            max_timeout_seconds=TIMEOUT_MAX_SECONDS,
+            sample_window_size=TIMEOUT_SAMPLE_WINDOW_SIZE,
+            min_sample_count=TIMEOUT_MIN_SAMPLE_COUNT,
+        )
     return ProviderTimeoutPolicy(
         capability_id=capability_id,
         provider=provider,

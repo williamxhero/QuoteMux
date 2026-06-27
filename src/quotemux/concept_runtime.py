@@ -19,9 +19,9 @@ from quotemux.store import load_store_result, store_result
 CONCEPT_CATALOG_SOURCE_ORDER = ("tushare", "akshare")
 CONCEPT_MEMBERS_SOURCE_ORDER = ("derived_core", "tushare", "akshare")
 CONCEPT_MEMBER_HISTORY_SOURCE_ORDER = ("tushare", "akshare")
-CONCEPT_QUOTES_SOURCE_ORDER = ("tushare", "efinance", "akshare")
+CONCEPT_QUOTES_SOURCE_ORDER = ("tushare", "efinance", "akshare", "derived_core")
 CONCEPT_MONEY_FLOW_SOURCE_ORDER = ("akshare", "tushare", "derived_core")
-CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER = ("tushare", "akshare")
+CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER = ("tushare", "akshare", "derived_core")
 CONCEPT_CATEGORIES_SOURCE_ORDER = ("tushare", "akshare")
 
 
@@ -305,8 +305,14 @@ def _dedupe_member_union(items: list[ConceptMemberItem]) -> list[ConceptMemberIt
 def _merge_time_series_items(items: list[ConceptQuoteItem]) -> list[ConceptQuoteItem]:
     by_key: dict[tuple[str, str], ConceptQuoteItem] = {}
     for item in items:
-        key = (item.trade_time, item.freq)
+        key = (item.concept_id, item.trade_time, item.freq)
         if key not in by_key:
+            by_key[key] = item
+            continue
+        current = by_key[key]
+        current_score = sum(value is not None for value in (current.close, current.pre_close, current.pct_chg, current.volume, current.amount))
+        item_score = sum(value is not None for value in (item.close, item.pre_close, item.pct_chg, item.volume, item.amount))
+        if item_score > current_score:
             by_key[key] = item
     return sorted(by_key.values(), key=lambda item: (item.concept_id, item.trade_time, item.freq))
 
@@ -345,6 +351,52 @@ class QuoteMuxConceptRuntime:
         if not is_concept_id(normalized):
             return ()
         return self._concepts.list_concept_aliases(normalized, trade_date, self._source_order(capability_id, fallback))
+
+    def _get_derived_quote_items(
+        self,
+        concept_id: str,
+        freq: str,
+        trade_date: str,
+        start_date: str,
+        end_date: str,
+        start_time: str,
+        end_time: str,
+        count: int | None,
+    ) -> list[ConceptQuoteItem]:
+        if not self._settings.is_source_enabled("derived_core"):
+            return []
+        aliases = self._concept_aliases(concept_id, trade_date or start_date or end_date, "concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
+        items: list[ConceptQuoteItem] = []
+        for alias in aliases:
+            raw_items = _source_package_call("derived_core", "get_concept_quotes", [alias.board_code], freq, trade_date, start_date, end_date, start_time, end_time, count)
+            if isinstance(raw_items, list):
+                items.extend(_rewrite_provider_quote_items([item for item in raw_items if isinstance(item, BoardQuoteItem)], alias))
+        return items
+
+    def _get_derived_snapshot_items(self, concept_ids: list[str], trade_date: str) -> list[ConceptQuoteItem]:
+        if not self._settings.is_source_enabled("derived_core"):
+            return []
+        aliases_by_board_code: dict[str, ConceptBoardAlias] = {}
+        for concept_id in concept_ids:
+            aliases = self._concept_aliases(concept_id, trade_date, "concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
+            for alias in aliases:
+                board_code = alias.board_code.upper()
+                if board_code not in aliases_by_board_code:
+                    aliases_by_board_code[board_code] = alias
+        if aliases_by_board_code == {}:
+            return []
+        raw_items = _source_package_call("derived_core", "get_concept_quotes", list(aliases_by_board_code), "1d", trade_date, "", "", "", "", None)
+        if not isinstance(raw_items, list):
+            return []
+        items: list[ConceptQuoteItem] = []
+        for item in raw_items:
+            if not isinstance(item, BoardQuoteItem):
+                continue
+            alias = aliases_by_board_code.get(item.board_code.upper())
+            if alias is None:
+                continue
+            items.extend(_rewrite_provider_quote_items([item], alias))
+        return _merge_time_series_items(items)
 
     def _build_money_flow_requests(self, items: list[ConceptMoneyFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[str, str]]:
         actual_trade_date = format_date_value(trade_date)
@@ -386,9 +438,12 @@ class QuoteMuxConceptRuntime:
             concept_items: list[ConceptQuoteItem] = []
             aliases = self._concept_aliases(concept_id, trade_date or start_date or end_date, "concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
             for alias in aliases:
+                if alias.provider == "derived_core":
+                    continue
                 raw_items = _source_package_call(alias.provider, "get_concept_quotes", [alias.board_code], freq, trade_date, start_date, end_date, start_time, end_time, count)
                 if isinstance(raw_items, list):
                     concept_items.extend(_rewrite_provider_quote_items([item for item in raw_items if isinstance(item, BoardQuoteItem)], alias))
+            concept_items.extend(self._get_derived_quote_items(concept_id, freq, trade_date, start_date, end_date, start_time, end_time, count))
             items.extend(_merge_time_series_items(concept_items))
         if count:
             items = trim_items_per_key(items, "concept_id", "trade_time", count)
@@ -567,6 +622,11 @@ class QuoteMuxConceptRuntime:
             return []
         if _has_concept_daily_snapshot_for_ids(local_items, concept_ids):
             return sorted([item for item in local_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[:actual_limit]
+        derived_items = self._get_derived_snapshot_items(concept_ids, actual_trade_date)
+        merged_derived_items = _merge_concept_snapshot_items(local_items, derived_items)
+        if merged_derived_items != []:
+            _write_concept_daily_snapshot_items(merged_derived_items, actual_trade_date)
+            return sorted([item for item in merged_derived_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[:actual_limit]
         request_codes = concept_ids
         quote_items = self.get_quotes(request_codes, "1d", actual_trade_date, "", "", "", "", None, max(actual_limit, len(request_codes)))
         if _has_concept_daily_snapshot_for_ids(quote_items, concept_ids):
