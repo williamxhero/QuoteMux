@@ -19,9 +19,9 @@ from quotemux.store import load_store_result, store_result
 CONCEPT_CATALOG_SOURCE_ORDER = ("crawler_provider", "tushare", "akshare")
 CONCEPT_MEMBERS_SOURCE_ORDER = ("crawler_provider", "derived_core", "tushare", "akshare")
 CONCEPT_MEMBER_HISTORY_SOURCE_ORDER = ("tushare", "akshare")
-CONCEPT_QUOTES_SOURCE_ORDER = ("crawler_provider", "tushare", "efinance", "akshare", "derived_core")
+CONCEPT_QUOTES_SOURCE_ORDER = ("crawler_provider", "derived_core", "tushare", "efinance", "akshare")
 CONCEPT_MONEY_FLOW_SOURCE_ORDER = ("akshare", "tushare", "derived_core")
-CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER = ("tushare", "akshare", "derived_core")
+CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER = ("akshare", "tushare", "derived_core")
 CONCEPT_CATEGORIES_SOURCE_ORDER = ("tushare", "akshare")
 CRAWLER_PROVIDER_CONCEPT_TYPES = {"ths", "em"}
 
@@ -347,9 +347,9 @@ def _merge_time_series_items(items: list[ConceptQuoteItem]) -> list[ConceptQuote
 
 
 def _merge_money_flow_items(items: list[ConceptMoneyFlowItem]) -> list[ConceptMoneyFlowItem]:
-    by_key: dict[tuple[str, str], ConceptMoneyFlowItem] = {}
+    by_key: dict[tuple[str, str, str], ConceptMoneyFlowItem] = {}
     for item in items:
-        key = (item.trade_date, item.scope)
+        key = (item.concept_id, item.trade_date, item.scope)
         if key not in by_key:
             by_key[key] = item
     return sorted(by_key.values(), key=lambda item: (item.concept_id, item.trade_date, item.scope))
@@ -405,13 +405,36 @@ class QuoteMuxConceptRuntime:
     def _get_derived_snapshot_items(self, concept_ids: list[str], trade_date: str) -> list[ConceptQuoteItem]:
         if not self._settings.is_source_enabled("derived_core"):
             return []
+        source_order = self._source_order("concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
+        source_rank = {source_id: index for index, source_id in enumerate(source_order)}
+        groups_by_id = {group.concept_id: group for group in self._concepts.list_alias_groups(trade_date)}
         aliases_by_board_code: dict[str, ConceptBoardAlias] = {}
         for concept_id in concept_ids:
-            aliases = self._concept_aliases(concept_id, trade_date, "concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
-            for alias in aliases:
-                board_code = alias.board_code.upper()
+            group = groups_by_id.get(concept_id)
+            if group is None:
+                continue
+            members = sorted(
+                group.members,
+                key=lambda member: (
+                    source_rank.get(member.provider, len(source_rank)),
+                    member.provider,
+                    member.provider_concept_type,
+                    member.provider_concept_code,
+                ),
+            )
+            for member in members:
+                if not self._settings.is_source_enabled(member.provider):
+                    continue
+                board_code = member.provider_concept_code.upper()
                 if board_code not in aliases_by_board_code:
-                    aliases_by_board_code[board_code] = alias
+                    aliases_by_board_code[board_code] = ConceptBoardAlias(
+                        concept_id=group.concept_id,
+                        canonical_name=group.canonical_name,
+                        provider=member.provider,
+                        board_type=member.provider_concept_type,
+                        board_code=member.provider_concept_code,
+                        board_name=member.provider_concept_name,
+                    )
         if aliases_by_board_code == {}:
             return []
         raw_items = _source_package_call("derived_core", "get_concept_quotes", list(aliases_by_board_code), "1d", trade_date, "", "", "", "", None)
@@ -596,6 +619,19 @@ class QuoteMuxConceptRuntime:
         snapshot_range_items = _load_money_flow_snapshot_range_items(concept_id, start_date, end_date, scope)
         if snapshot_range_items != []:
             return snapshot_range_items
+        stock_flow_items = self._get_concept_money_flow_from_stock_flows(concept_id, trade_date, start_date, end_date, scope)
+        if stock_flow_items != []:
+            store_result(
+                "concepts.indicators.money_flow",
+                {"concept_id": concept_id, "trade_date": trade_date, "start_date": start_date, "end_date": end_date, "scope": scope},
+                stock_flow_items,
+                ContractReport(
+                    contract_name="concepts.indicators.money_flow",
+                    source_hit_counts={"stocks.indicators.money_flow.batch": 1},
+                    source_request_counts={"stocks.indicators.money_flow.batch": 1},
+                ),
+            )
+            return stock_flow_items
         snapshot_items, _ = self._get_money_flow_from_market_snapshot(concept_id, trade_date, scope)
         if snapshot_items != []:
             return sorted(snapshot_items, key=lambda item: (item.concept_id, item.trade_date))
@@ -619,19 +655,6 @@ class QuoteMuxConceptRuntime:
                 ContractReport(contract_name="concepts.indicators.money_flow"),
             )
             return merged_items
-        stock_flow_items = self._get_concept_money_flow_from_stock_flows(concept_id, trade_date, start_date, end_date, scope)
-        if stock_flow_items != []:
-            store_result(
-                "concepts.indicators.money_flow",
-                store_identity,
-                stock_flow_items,
-                ContractReport(
-                    contract_name="concepts.indicators.money_flow",
-                    source_hit_counts={"stocks.indicators.money_flow.batch": 1},
-                    source_request_counts={"stocks.indicators.money_flow.batch": 1},
-                ),
-            )
-            return stock_flow_items
         return []
 
     def get_market_money_flow(self, trade_date: str, scope: str, limit: int, offset: int) -> list[ConceptMoneyFlowItem]:
@@ -660,6 +683,9 @@ class QuoteMuxConceptRuntime:
             return []
         actual_limit = ensure_limit(limit)
         local_items = [item for item in get_local_concept_daily_snapshot(actual_trade_date, actual_limit + offset, 0) if is_concept_id(item.concept_id)]
+        complete_local_items = [item for item in local_items if _has_concept_snapshot_metrics(item)]
+        if complete_local_items != []:
+            return sorted(complete_local_items, key=lambda item: item.concept_id)[offset: offset + actual_limit]
         catalog_items = self.get_catalog("", "", "active", actual_limit, offset)
         concept_ids = [item.concept_id for item in catalog_items]
         if concept_ids == []:

@@ -337,24 +337,31 @@ def load_concept_daily_frame(concept_ids: list[str], start_date: str, end_date: 
     if not _table_exists("fact", "concept_daily_1d"):
         return pd.DataFrame()
     existing_columns = _existing_columns("fact", "concept_daily_1d")
-    where_clauses: list[str] = []
-    params: list[object] = []
+    source_where_clauses: list[str] = []
+    source_params: list[object] = []
     if concept_ids:
-        where_clauses.append("day_rows.concept_id = any(%s)")
-        params.append(concept_ids)
-    if start_date:
-        where_clauses.append("day_rows.trade_date >= %s")
-        params.append(start_date)
+        source_where_clauses.append("day_rows.concept_id = any(%s)")
+        source_params.append(concept_ids)
     if end_date:
-        where_clauses.append("day_rows.trade_date <= %s")
-        params.append(end_date)
+        source_where_clauses.append("day_rows.trade_date <= %s")
+        source_params.append(end_date)
+    outer_where_clauses: list[str] = []
+    outer_params: list[object] = []
+    if start_date:
+        outer_where_clauses.append("day_rows.trade_date >= %s")
+        outer_params.append(start_date)
+    if end_date:
+        outer_where_clauses.append("day_rows.trade_date <= %s")
+        outer_params.append(end_date)
+    source_where_sql = f"where {' and '.join(source_where_clauses)}" if source_where_clauses else ""
+    outer_where_sql = f"where {' and '.join(outer_where_clauses)}" if outer_where_clauses else ""
     query = f"""
         with scoped_rows as (
             select
                 day_rows.*,
                 lag(day_rows.close) over (partition by day_rows.concept_id order by day_rows.trade_date) as previous_close
             from fact.concept_daily_1d day_rows
-            where {' and '.join(where_clauses)}
+            {source_where_sql}
         )
         select
             day_rows.concept_id,
@@ -373,9 +380,10 @@ def load_concept_daily_frame(concept_ids: list[str], start_date: str, end_date: 
             {_optional_column(existing_columns, "mism_sell")}
         from scoped_rows day_rows
         left join ref.concept concept_ref on concept_ref.concept_id = day_rows.concept_id
+        {outer_where_sql}
         order by day_rows.concept_id, day_rows.trade_date
     """
-    return query_dataframe(query, tuple(params))
+    return query_dataframe(query, tuple(source_params + outer_params))
 
 
 def load_concept_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:

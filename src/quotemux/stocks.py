@@ -833,7 +833,7 @@ class QuoteMuxStocks:
             missing_codes = [code for code in normalized_codes if code not in existing_codes]
             return [(code_batch,) for code_batch in _chunk_money_flow_codes(missing_codes)]
 
-        store_identity = {"codes": ",".join(code_list), "trade_date": trade_date, "view": view}
+        store_identity = {"code": normalized_codes, "trade_date": trade_date, "view": view}
         handlers = {
             "get_stock_money_flow_batch": lambda instance: lambda code_batch: _source_package_call(instance.package_id, "get_stock_money_flow_batch", ",".join(code_batch), trade_date, view),
         }

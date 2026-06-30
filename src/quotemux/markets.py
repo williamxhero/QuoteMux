@@ -97,10 +97,14 @@ def _dedupe_connect_flow_items(items: list[ConnectCapitalFlowItem]) -> list[Conn
     return [keyed_items[key] for key in sorted(keyed_items)]
 
 
+def _connect_active_top10_needs_refresh(items: list[ConnectActiveTop10Item]) -> bool:
+    return any(item.market.startswith("northbound") and item.net_amount is None for item in items)
+
+
 def _connect_flow_source_order(settings: QuoteMuxSettings) -> tuple[str, ...]:
     if settings.enabled_sources != ():
-        return tuple(source_name for source_name in ("tushare", "akshare") if source_name in settings.enabled_sources)
-    return ("tushare", "akshare")
+        return tuple(source_name for source_name in ("akshare", "tushare") if source_name in settings.enabled_sources)
+    return ("akshare", "tushare")
 
 
 class QuoteMuxMarkets:
@@ -256,6 +260,12 @@ class QuoteMuxMarkets:
             ("trade_date", "market", "rank", "code"),
             lambda: self._source_list("markets.connect.active_top10", handlers, ("tushare",), ("market", "trade_date", "code", "rank")),
         )
+        if _connect_active_top10_needs_refresh(items) and self._settings.is_source_enabled("tushare"):
+            raw_items = _source_package_call("tushare", "get_connect_active_top10", trade_date, start_date, end_date, market_type, ensure_limit(limit))
+            if isinstance(raw_items, list):
+                refreshed_items = [item for item in raw_items if isinstance(item, ConnectActiveTop10Item)]
+                if refreshed_items != []:
+                    items = refreshed_items
         return items[: ensure_limit(limit)]
 
     def get_block_trades(self, trade_date: str, start_date: str, end_date: str, code: str, limit: int) -> list[BlockTradeItem]:
@@ -337,12 +347,8 @@ class QuoteMuxMarkets:
             HotMoneyDetailItem,
             ("trade_date", "name", "code"),
             ("trade_date", "name", "code"),
-            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("akshare", "tushare"), ("trade_date", "name", "code")),
+            lambda: self._source_list("markets.participants.hot_money.details", handlers, ("tushare",), ("trade_date", "name", "code")),
         )
-        if items == [] and self._settings.is_source_enabled("akshare"):
-            raw_items = _source_package_call("akshare", "get_hot_money_details", trade_date, start_date, end_date, name, actual_limit)
-            if isinstance(raw_items, list):
-                items = [item for item in raw_items if isinstance(item, HotMoneyDetailItem)]
         return items[offset: offset + actual_limit]
 
     def get_open_auctions(self, codes: str, trade_date: str) -> list[AuctionItem]:
