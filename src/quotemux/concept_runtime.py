@@ -5,9 +5,10 @@ from datetime import timedelta
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, ConceptCatalogItem, ConceptCategoryItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptMoneyFlowItem, ConceptQuoteItem, StockMoneyFlowItem
 from quotemux.infra.common import format_date_value, parse_date_text
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, trim_items_per_key
-from quotemux.concepts import ConceptBoardAlias, QuoteMuxConcepts, is_concept_id
+from quotemux.concepts import ConceptBoardAlias, QuoteMuxConcepts, _source_instance, is_concept_id
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_store import get_local_concept_daily_snapshot
+from quotemux.local_store import get_local_concept_daily_snapshot, get_local_concept_member_history, get_local_concept_members, get_local_concept_quotes
+from quotemux.provider_timeout.runtime import run_provider_request
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.runtime_core.executor import SourceInstanceExecutor
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -29,6 +30,21 @@ CRAWLER_PROVIDER_CONCEPT_TYPES = {"ths", "em"}
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
     handler = get_default_source_package_registry().get_handler(package_id, handler_name)
     return handler(*args)
+
+
+def _timed_source_package_call(settings: QuoteMuxSettings, capability_id: str, package_id: str, handler_name: str, *args: object) -> object:
+    handler = get_default_source_package_registry().get_handler(package_id, handler_name)
+    source_instance = _source_instance(settings, capability_id, package_id)
+    step_id = package_id if source_instance is None or source_instance.instance_id == "" else source_instance.instance_id
+    return run_provider_request(
+        capability_id,
+        package_id,
+        step_id,
+        handler_name,
+        source_instance,
+        lambda: handler(*args),
+        None,
+    )
 
 
 def _concept_key(value: str) -> str:
@@ -485,6 +501,13 @@ class QuoteMuxConceptRuntime:
         if any(not is_concept_id(item) for item in normalized_codes):
             return []
         concept_ids = list(dict.fromkeys(normalized_codes))
+        local_items = get_local_concept_quotes(concept_ids, freq, trade_date, start_date, end_date, count)
+        missing_requests = _build_missing_quote_requests(concept_ids, local_items, freq, trade_date, start_date, end_date, count, self._settings)
+        if missing_requests == []:
+            items = local_items
+            if count:
+                items = trim_items_per_key(items, "concept_id", "trade_time", count)
+            return sorted(items, key=lambda item: (item.concept_id, item.trade_time))[: ensure_limit(limit)]
         items: list[ConceptQuoteItem] = []
         for concept_id in concept_ids:
             concept_items: list[ConceptQuoteItem] = []
@@ -504,6 +527,7 @@ class QuoteMuxConceptRuntime:
                     concept_items.extend(_rewrite_provider_quote_items([item for item in raw_items if isinstance(item, BoardQuoteItem)], alias))
             concept_items.extend(self._get_derived_quote_items(concept_id, freq, trade_date, start_date, end_date, start_time, end_time, count))
             items.extend(_merge_time_series_items(concept_items))
+        items = _merge_time_series_items([*local_items, *items])
         if count:
             items = trim_items_per_key(items, "concept_id", "trade_time", count)
         return sorted(items, key=lambda item: (item.concept_id, item.trade_time))[: ensure_limit(limit)]
@@ -529,10 +553,16 @@ class QuoteMuxConceptRuntime:
         return ConceptCatalogItem(concept_id=group.concept_id, concept_name=group.canonical_name, category="concept", market="a_share", status="active", start_date=group.start_date, end_date=group.end_date)
 
     def get_members(self, concept_id: str, trade_date: str) -> list[ConceptMemberItem]:
+        local_items = get_local_concept_members(concept_id, trade_date)
+        if local_items != [] and not any(item.name == "" for item in local_items):
+            return local_items
         aliases = self._concept_aliases(concept_id, trade_date, "concepts.members", CONCEPT_MEMBERS_SOURCE_ORDER)
         items: list[ConceptMemberItem] = []
         for alias in _crawler_provider_aliases(aliases):
-            raw_items = _source_package_call("crawler_provider", "get_concept_members", f"{alias.board_type}:{alias.board_code}", trade_date)
+            try:
+                raw_items = _timed_source_package_call(self._settings, "concepts.members", "crawler_provider", "get_concept_members", f"{alias.board_type}:{alias.board_code}", trade_date)
+            except Exception:
+                continue
             if isinstance(raw_items, list):
                 items.extend(_rewrite_provider_member_items([item for item in raw_items if isinstance(item, BoardMemberItem)], alias))
         if items != []:
@@ -540,20 +570,30 @@ class QuoteMuxConceptRuntime:
         for alias in aliases:
             if alias.provider == "crawler_provider":
                 continue
-            raw_items = _source_package_call(alias.provider, "get_concept_members", alias.board_code, trade_date)
+            try:
+                raw_items = _timed_source_package_call(self._settings, "concepts.members", alias.provider, "get_concept_members", alias.board_code, trade_date)
+            except Exception:
+                continue
             if isinstance(raw_items, list):
                 items.extend(_rewrite_provider_member_items([item for item in raw_items if isinstance(item, BoardMemberItem)], alias))
-        return _dedupe_member_union(items)
+        if items != []:
+            return _dedupe_member_union([*local_items, *items])
+        return local_items
 
     def get_member_history(self, concept_id: str, start_date: str, end_date: str) -> list[ConceptMemberHistoryItem]:
         aliases = self._concept_aliases(concept_id, start_date or end_date, "concepts.members.history", CONCEPT_MEMBER_HISTORY_SOURCE_ORDER)
         for alias in aliases:
-            raw_items = _source_package_call(alias.provider, "get_concept_member_history", alias.board_code, start_date, end_date)
+            if not get_default_source_package_registry().has_handler(alias.provider, "get_concept_member_history"):
+                continue
+            try:
+                raw_items = _timed_source_package_call(self._settings, "concepts.members.history", alias.provider, "get_concept_member_history", alias.board_code, start_date, end_date)
+            except Exception:
+                continue
             if isinstance(raw_items, list):
                 items = _rewrite_provider_member_history_items([item for item in raw_items if isinstance(item, BoardMemberHistoryItem)], alias)
                 if items != []:
                     return sorted(items, key=lambda item: (item.effective_date, item.code, item.action))
-        return []
+        return get_local_concept_member_history(concept_id, start_date, end_date)
 
     def _get_concept_money_flow_from_stock_flows(self, concept_id: str, trade_date: str, start_date: str, end_date: str, scope: str) -> list[ConceptMoneyFlowItem]:
         if scope != "concept":
@@ -585,7 +625,10 @@ class QuoteMuxConceptRuntime:
         for alias in aliases:
             if alias.provider != "tushare":
                 continue
-            items = _source_package_call("tushare", "get_concept_members", alias.board_code, trade_date)
+            try:
+                items = _timed_source_package_call(self._settings, "concepts.members", "tushare", "get_concept_members", alias.board_code, trade_date)
+            except Exception:
+                continue
             if isinstance(items, list):
                 return _rewrite_provider_member_items([item for item in items if isinstance(item, BoardMemberItem)], alias)
         return []

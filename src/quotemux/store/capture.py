@@ -18,12 +18,14 @@ from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_i
 from quotemux.capabilities import get_capability_config_root, is_independently_configurable_capability_id
 from quotemux.capabilities.inventory import list_capability_ids
 from quotemux.concepts import QuoteMuxConcepts
+from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.reports import ContractReport
 from quotemux.requests.indexes import IndexMembersRequest, IndexQuotesRequest
 from quotemux.requests.markets import TradingCalendarRequest
 from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
+from quotemux.store.planner import CacheMissingPlanner, CacheMissingRange
 from quotemux.store.default_update_policy import get_capability_update_policy_default
-from quotemux.store.postgres import _ensure_schema, get_postgres_cache_store
+from quotemux.store.postgres import _ensure_schema, _field_values, _is_fresh, _time_range_from_request, build_scope_identity, get_postgres_cache_store
 from quotemux.store.runtime import store_result
 
 
@@ -283,6 +285,9 @@ CAPTURE_SCHEMA_SQL = (
     "create index if not exists idx_capture_runs_capability_time on capability_capture_runs (capability_id, started_at desc)",
     "create index if not exists idx_capture_runs_status_time on capability_capture_runs (status, started_at desc)",
 )
+
+
+_CACHE_MISSING_PLANNER = CacheMissingPlanner()
 
 
 _CAPTURE_SCHEMA_READY = False
@@ -647,6 +652,13 @@ def _chunk(items: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
     return tuple(tuple(items[index: index + actual_size]) for index in range(0, len(items), actual_size))
 
 
+def _normalized_capture_items(capability_id: str, request_identity: dict[str, object], items: Sequence[object]) -> list[object]:
+    if capability_id == "concepts.members":
+        trade_date = format_date_value(request_identity.get("trade_date", ""))
+        return [item.model_copy(update={"join_date": trade_date}) if getattr(item, "join_date", "") == "" and trade_date != "" and hasattr(item, "model_copy") else item for item in items]
+    return list(items)
+
+
 def _date_range_end_text(now: datetime) -> str:
     return now.strftime("%Y-%m-%d")
 
@@ -659,6 +671,13 @@ def _recent_trading_days(window_count: int, now: datetime) -> tuple[str, ...]:
         return ()
     values = [format_date_value(row["trade_date"]) for row in frame.to_dict("records")]
     return tuple(item for item in values if item != "")[-window_count:]
+
+
+def _recent_calendar_days(window_count: int, now: datetime) -> tuple[str, ...]:
+    if window_count < 1:
+        return ()
+    start_day = now.date() - timedelta(days=window_count - 1)
+    return tuple((start_day + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(window_count))
 
 
 def _active_stock_codes(trade_date: str) -> tuple[str, ...]:
@@ -675,6 +694,133 @@ def _index_codes() -> tuple[str, ...]:
     return tuple(str(row["index_code"]) for row in frame.to_dict("records") if str(row["index_code"]) != "")
 
 
+def _scope_identities(capability_id: str, request_identity: dict[str, object]) -> tuple[str, ...]:
+    policy = get_postgres_cache_store().get_policy(capability_id)
+    if policy is None:
+        return ("",)
+    if policy.request_scope_fields == ():
+        return ("",)
+    scope_ids: list[str] = [""]
+    for field in policy.request_scope_fields:
+        next_scope_ids: list[str] = []
+        for value in _field_values(request_identity, field):
+            for current_scope_id in scope_ids:
+                if str(value) == "":
+                    next_scope_ids.append(current_scope_id)
+                    continue
+                criteria: dict[str, object] = {}
+                if current_scope_id != "":
+                    for pair in current_scope_id.split("|"):
+                        if pair == "" or "=" not in pair:
+                            continue
+                        key, current_value = pair.split("=", 1)
+                        criteria[key] = current_value
+                criteria[field] = value
+                next_scope_ids.append(build_scope_identity(criteria, policy.request_scope_fields))
+        scope_ids = next_scope_ids
+    unique_scope_ids = tuple(dict.fromkeys(scope_ids))
+    return unique_scope_ids if unique_scope_ids != () else ("",)
+
+
+def _cached_coverages(capability_id: str, request_identity: dict[str, object]) -> tuple[CacheMissingRange, ...]:
+    policy = get_postgres_cache_store().get_policy(capability_id)
+    if policy is None:
+        return ()
+    time_start, time_end = _time_range_from_request(request_identity)
+    now = datetime.now()
+    coverage_ranges: list[CacheMissingRange] = []
+    for scope_identity in _scope_identities(capability_id, request_identity):
+        coverages = get_postgres_cache_store().coverage.find_for_scope(capability_id, scope_identity)
+        for coverage in coverages:
+            if not _is_fresh(policy, coverage.fresh_until, now):
+                continue
+            if coverage.time_end < time_start or coverage.time_start > time_end:
+                continue
+            coverage_ranges.append(
+                CacheMissingRange(
+                    max(time_start, coverage.time_start),
+                    min(time_end, coverage.time_end),
+                )
+            )
+    return tuple(coverage_ranges)
+
+
+def _date_missing_ranges(capability_id: str, request_identity: dict[str, object], expected_dates: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    time_start, time_end = _time_range_from_request(request_identity)
+    missing_ranges = _CACHE_MISSING_PLANNER.plan(
+        "date_range",
+        time_start,
+        time_end,
+        _cached_coverages(capability_id, request_identity),
+        tuple(datetime.strptime(item, "%Y-%m-%d") for item in expected_dates if item != ""),
+    )
+    return tuple((item.time_start.strftime("%Y-%m-%d"), item.time_end.strftime("%Y-%m-%d")) for item in missing_ranges)
+
+
+def _single_date_missing(capability_id: str, request_identity: dict[str, object]) -> bool:
+    trade_date = format_date_value(request_identity.get("trade_date", ""))
+    if trade_date == "":
+        return True
+    return _date_missing_ranges(capability_id, request_identity, (trade_date,)) != ()
+
+
+def _single_point_missing(capability_id: str, request_identity: dict[str, object]) -> bool:
+    time_start, time_end = _time_range_from_request(request_identity)
+    if time_start != time_end:
+        return True
+    return _date_missing_ranges(capability_id, request_identity, (time_start.strftime("%Y-%m-%d"),)) != ()
+
+
+def _report_period_dates(periods: Sequence[str]) -> tuple[str, ...]:
+    return tuple(format_date_value(item) for item in periods if format_date_value(item) != "")
+
+
+def _report_period_missing_periods(capability_id: str, request_identity: dict[str, object], periods: Sequence[str]) -> tuple[str, ...]:
+    expected_dates = _report_period_dates(periods)
+    if expected_dates == ():
+        return ()
+    missing_ranges = _date_missing_ranges(capability_id, request_identity, expected_dates)
+    missing_periods: list[str] = []
+    for range_start, range_end in missing_ranges:
+        for expected_date in expected_dates:
+            if range_start <= expected_date <= range_end:
+                missing_periods.append(expected_date.replace("-", ""))
+    return tuple(dict.fromkeys(missing_periods))
+
+
+def _month_first_days(months: Sequence[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    for month_text in months:
+        if len(month_text) != 6 or not month_text.isdigit():
+            continue
+        values.append(f"{month_text[:4]}-{month_text[4:6]}-01")
+    return tuple(values)
+
+
+def _missing_months(capability_id: str, months: Sequence[str]) -> tuple[str, ...]:
+    expected_days = _month_first_days(months)
+    if expected_days == ():
+        return ()
+    missing_ranges = _date_missing_ranges(capability_id, {"start_date": expected_days[0], "end_date": expected_days[-1]}, expected_days)
+    missing_days: list[str] = []
+    for range_start, range_end in missing_ranges:
+        for expected_day in expected_days:
+            if range_start <= expected_day <= range_end:
+                missing_days.append(expected_day)
+    missing_months = [item[:4] + item[5:7] for item in missing_days]
+    return tuple(dict.fromkeys(missing_months))
+
+
+def _append_missing_range_requests(
+    requests: list[CaptureRequest],
+    capability_id: str,
+    request_identity: dict[str, object],
+    expected_dates: Sequence[str],
+) -> None:
+    for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, expected_dates):
+        requests.append(CaptureRequest(capability_id, {**request_identity, "start_date": missing_start, "end_date": missing_end}))
+
+
 def _concept_ids() -> tuple[str, ...]:
     return tuple(group.concept_id for group in QuoteMuxConcepts().list_alias_groups("") if group.concept_id != "")
 
@@ -686,27 +832,36 @@ def _active_stock_requests(policy: CapturePolicy, capability_id: str, now: datet
     codes = _active_stock_codes(trading_days[-1])
     if codes == ():
         return ()
-    start_date = trading_days[0]
-    end_date = trading_days[-1]
     freq = "1d" if capability_id == "stocks.quotes.daily" else "1m"
-    return tuple(
-        CaptureRequest(
-            capability_id,
-            {
-                "codes": list(batch),
-                "freq": freq,
-                "trade_date": "",
-                "start_date": start_date,
-                "end_date": end_date,
-                "start_time": "",
-                "end_time": "",
-                "count": None,
-                "adjust": "none",
-                "limit": 5000,
-            },
-        )
-        for batch in _chunk(codes, policy.batch_size)
-    )
+    requests: list[CaptureRequest] = []
+    for batch in _chunk(codes, policy.batch_size):
+        request_identity = {
+            "codes": list(batch),
+            "freq": freq,
+            "trade_date": "",
+            "start_date": trading_days[0],
+            "end_date": trading_days[-1],
+            "start_time": "",
+            "end_time": "",
+            "count": None,
+            "adjust": "none",
+            "limit": 5000,
+        }
+        if capability_id == "stocks.quotes.intraday":
+            requests.append(CaptureRequest(capability_id, request_identity))
+            continue
+        for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, trading_days):
+            requests.append(
+                CaptureRequest(
+                    capability_id,
+                    {
+                        **request_identity,
+                        "start_date": missing_start,
+                        "end_date": missing_end,
+                    },
+                )
+            )
+    return tuple(requests)
 
 
 def _index_quote_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -716,28 +871,38 @@ def _index_quote_requests(policy: CapturePolicy, capability_id: str, now: dateti
     codes = _index_codes()
     if codes == ():
         return ()
-    start_date = trading_days[0]
-    end_date = trading_days[-1]
-    return tuple(
-        CaptureRequest(
-            capability_id,
-            {
-                "index_codes": list(batch),
-                "freq": "1d",
-                "trade_date": "",
-                "start_date": start_date,
-                "end_date": end_date,
-                "count": None,
-                "limit": 5000,
-            },
-        )
-        for batch in _chunk(codes, policy.batch_size)
-    )
+    requests: list[CaptureRequest] = []
+    for batch in _chunk(codes, policy.batch_size):
+        request_identity = {
+            "index_codes": list(batch),
+            "freq": "1d",
+            "trade_date": "",
+            "start_date": trading_days[0],
+            "end_date": trading_days[-1],
+            "count": None,
+            "limit": 5000,
+        }
+        for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, trading_days):
+            requests.append(
+                CaptureRequest(
+                    capability_id,
+                    {
+                        **request_identity,
+                        "start_date": missing_start,
+                        "end_date": missing_end,
+                    },
+                )
+            )
+    return tuple(requests)
 
 
 def _daily_snapshot_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
-    return tuple(CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0}) for trade_date in trading_days)
+    return tuple(
+        CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
+        for trade_date in trading_days
+        if _single_date_missing(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
+    )
 
 
 def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -763,25 +928,31 @@ def _concept_quote_requests(policy: CapturePolicy, capability_id: str, now: date
     concept_ids = _concept_ids()
     if concept_ids == ():
         return ()
-    start_date = trading_days[0]
-    end_date = trading_days[-1]
-    return tuple(
-        CaptureRequest(
-            capability_id,
-            {
-                "concept_ids": list(batch),
-                "freq": "1d",
-                "trade_date": "",
-                "start_date": start_date,
-                "end_date": end_date,
-                "start_time": "",
-                "end_time": "",
-                "count": None,
-                "limit": 5000,
-            },
-        )
-        for batch in _chunk(concept_ids, policy.batch_size)
-    )
+    requests: list[CaptureRequest] = []
+    for batch in _chunk(concept_ids, policy.batch_size):
+        request_identity = {
+            "concept_ids": list(batch),
+            "freq": "1d",
+            "trade_date": "",
+            "start_date": trading_days[0],
+            "end_date": trading_days[-1],
+            "start_time": "",
+            "end_time": "",
+            "count": None,
+            "limit": 5000,
+        }
+        for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, trading_days):
+            requests.append(
+                CaptureRequest(
+                    capability_id,
+                    {
+                        **request_identity,
+                        "start_date": missing_start,
+                        "end_date": missing_end,
+                    },
+                )
+            )
+    return tuple(requests)
 
 
 def _index_member_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -793,6 +964,7 @@ def _index_member_requests(policy: CapturePolicy, capability_id: str, now: datet
         CaptureRequest(capability_id, {"index_code": index_code, "trade_date": trade_date})
         for trade_date in trading_days
         for index_code in index_codes
+        if _single_date_missing(capability_id, {"index_code": index_code, "trade_date": trade_date})
     )
 
 
@@ -805,6 +977,7 @@ def _concept_member_requests(policy: CapturePolicy, capability_id: str, now: dat
         CaptureRequest(capability_id, {"concept_id": concept_id, "trade_date": trade_date})
         for trade_date in trading_days
         for concept_id in concept_ids
+        if _single_date_missing(capability_id, {"concept_id": concept_id, "trade_date": trade_date})
     )
 
 
@@ -885,8 +1058,13 @@ def _single_entity_snapshot_requests(policy: CapturePolicy, capability_id: str, 
 
 def _market_recent_trading_day_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_date, end_date = _date_window(policy, now)
+    recent_days = _recent_trading_days(policy.window_count, now)
     if capability_id == "concepts.indicators.money_flow.snapshot":
-        return tuple(CaptureRequest(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0}) for trade_date in _recent_trading_days(policy.window_count, now))
+        return tuple(
+            CaptureRequest(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0})
+            for trade_date in recent_days
+            if _single_date_missing(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0})
+        )
     identities = {
         "markets.indicators.main_capital_flow": {"trade_date": "", "start_date": start_date, "end_date": end_date},
         "markets.connect.capital_flow": {"trade_date": "", "start_date": start_date, "end_date": end_date},
@@ -898,19 +1076,37 @@ def _market_recent_trading_day_requests(policy: CapturePolicy, capability_id: st
         "markets.participants.hot_money.details": {"trade_date": "", "start_date": start_date, "end_date": end_date, "name": "", "limit": 10000, "offset": 0},
     }
     if capability_id == "markets.trading.open_auctions":
-        return tuple(CaptureRequest(capability_id, {"codes": "", "trade_date": trade_date}) for trade_date in _recent_trading_days(policy.window_count, now))
+        return tuple(
+            CaptureRequest(capability_id, {"codes": "", "trade_date": trade_date})
+            for trade_date in recent_days
+            if _single_date_missing(capability_id, {"codes": "", "trade_date": trade_date})
+        )
     identity = identities.get(capability_id)
     if identity is None:
         return ()
-    return (CaptureRequest(capability_id, identity),)
+    if recent_days == ():
+        return (CaptureRequest(capability_id, identity),)
+    return tuple(
+        CaptureRequest(capability_id, {**identity, "start_date": missing_start, "end_date": missing_end})
+        for missing_start, missing_end in _date_missing_ranges(capability_id, identity, recent_days)
+    )
 
 
 def _stock_trading_day_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_date, end_date = _date_window(policy, now)
-    trading_days = _recent_trading_days(1, now)
-    codes = _active_stock_codes(trading_days[-1]) if trading_days != () else ()
+    recent_days = _recent_trading_days(policy.window_count, now)
+    active_days = _recent_trading_days(1, now)
+    codes = _active_stock_codes(active_days[-1]) if active_days != () else ()
     if codes == ():
         return ()
+    if capability_id == "stocks.indicators.risk_flags":
+        request_identity = {"trade_date": "", "start_date": start_date, "end_date": end_date, "flag_type": "", "status": "", "limit": 10000, "offset": 0}
+        if recent_days == ():
+            return (CaptureRequest(capability_id, request_identity),)
+        return tuple(
+            CaptureRequest(capability_id, {**request_identity, "start_date": missing_start, "end_date": missing_end})
+            for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, recent_days)
+        )
     batch_requests = {
         "stocks.indicators.daily_basic": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.indicators.daily_valuation": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
@@ -919,7 +1115,20 @@ def _stock_trading_day_requests(policy: CapturePolicy, capability_id: str, now: 
     }
     batch_builder = batch_requests.get(capability_id)
     if batch_builder is not None:
-        return tuple(CaptureRequest(capability_id, batch_builder(batch)) for batch in _chunk(codes, policy.batch_size))
+        requests: list[CaptureRequest] = []
+        for batch in _chunk(codes, policy.batch_size):
+            if capability_id == "stocks.indicators.money_flow.batch":
+                for trade_date in recent_days:
+                    request_identity = {"codes": ",".join(batch), "trade_date": trade_date, "view": "main"}
+                    if _single_date_missing(capability_id, request_identity):
+                        requests.append(CaptureRequest(capability_id, request_identity))
+                continue
+            request_identity = batch_builder(batch)
+            if recent_days == ():
+                requests.append(CaptureRequest(capability_id, request_identity))
+                continue
+            _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
+        return tuple(requests)
     per_code = {
         "stocks.quotes.auctions": lambda code: {"code": code, "session": "", "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.factors.adj": lambda code: {"code": code, "start_date": start_date, "end_date": end_date, "base_date": ""},
@@ -931,14 +1140,40 @@ def _stock_trading_day_requests(policy: CapturePolicy, capability_id: str, now: 
         "stocks.indicators.ah_comparisons": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date, "limit": 10000, "offset": 0},
         "stocks.signals.hl": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.signals.nine_turn": lambda code: {"code": code, "freq": "D", "trade_date": "", "start_date": start_date, "end_date": end_date},
-        "stocks.indicators.risk_flags": lambda code: {"trade_date": "", "start_date": start_date, "end_date": end_date, "flag_type": "", "status": "", "limit": 10000, "offset": 0},
     }
     builder = per_code.get(capability_id)
     if builder is None:
         return ()
-    if capability_id == "stocks.indicators.risk_flags":
-        return (CaptureRequest(capability_id, builder("")),)
-    return tuple(CaptureRequest(capability_id, builder(code)) for code in codes)
+    requests: list[CaptureRequest] = []
+    for code in codes:
+        request_identity = builder(code)
+        if recent_days == ():
+            requests.append(CaptureRequest(capability_id, request_identity))
+            continue
+        _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
+    return tuple(requests)
+
+
+def _concept_member_history_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
+    trading_days = _recent_trading_days(policy.window_count, now)
+    if trading_days == ():
+        return ()
+    requests: list[CaptureRequest] = []
+    for concept_id in _concept_ids():
+        request_identity = {"concept_id": concept_id, "start_date": trading_days[0], "end_date": trading_days[-1]}
+        _append_missing_range_requests(requests, capability_id, request_identity, trading_days)
+    return tuple(requests)
+
+
+def _concept_money_flow_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
+    trading_days = _recent_trading_days(policy.window_count, now)
+    if trading_days == ():
+        return ()
+    requests: list[CaptureRequest] = []
+    for concept_id in _concept_ids():
+        request_identity = {"concept_id": concept_id, "trade_date": "", "start_date": trading_days[0], "end_date": trading_days[-1], "scope": "concept"}
+        _append_missing_range_requests(requests, capability_id, request_identity, trading_days)
+    return tuple(requests)
 
 
 def _report_period_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -947,29 +1182,47 @@ def _report_period_requests(policy: CapturePolicy, capability_id: str, now: date
     periods = _recent_report_periods(policy.window_count, now)
     if codes == () or periods == ():
         return ()
-    start_period = periods[-1]
-    end_period = periods[0]
+    window_start = periods[-1]
+    window_end = periods[0]
     if capability_id == "stocks.finance.statements":
-        return tuple(CaptureRequest(capability_id, {"codes": list(batch), "report_period": "", "start_period": start_period, "end_period": end_period, "report_type": ""}) for batch in _chunk(codes, policy.batch_size))
+        requests: list[CaptureRequest] = []
+        for batch in _chunk(codes, policy.batch_size):
+            request_identity = {"codes": list(batch), "report_period": "", "start_period": window_start, "end_period": window_end, "report_type": ""}
+            for report_period in _report_period_missing_periods(capability_id, request_identity, periods):
+                requests.append(CaptureRequest(capability_id, {"codes": list(batch), "report_period": report_period, "start_period": "", "end_period": "", "report_type": ""}))
+        return tuple(requests)
     if capability_id == "stocks.finance.indicators":
-        return tuple(CaptureRequest(capability_id, {"code": "", "codes": ",".join(batch), "report_period": "", "start_period": start_period, "end_period": end_period}) for batch in _chunk(codes, policy.batch_size))
+        requests: list[CaptureRequest] = []
+        for batch in _chunk(codes, policy.batch_size):
+            request_identity = {"code": "", "codes": ",".join(batch), "report_period": "", "start_period": window_start, "end_period": window_end}
+            for report_period in _report_period_missing_periods(capability_id, request_identity, periods):
+                requests.append(CaptureRequest(capability_id, {"code": "", "codes": ",".join(batch), "report_period": report_period, "start_period": "", "end_period": ""}))
+        return tuple(requests)
     per_code = {
-        "stocks.finance.audits": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period},
-        "stocks.finance.disclosure_dates": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period},
-        "stocks.finance.express": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period},
-        "stocks.finance.forecasts": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period},
-        "stocks.finance.main_business": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period, "classification": ""},
-        "stocks.ownership.shareholders.top10": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period},
-        "stocks.ownership.shareholders.top10_float": lambda code: {"code": code, "report_period": "", "start_period": start_period, "end_period": end_period},
+        "stocks.finance.audits": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end},
+        "stocks.finance.disclosure_dates": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end},
+        "stocks.finance.express": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end},
+        "stocks.finance.forecasts": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end},
+        "stocks.finance.main_business": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end, "classification": ""},
+        "stocks.ownership.shareholders.top10": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end},
+        "stocks.ownership.shareholders.top10_float": lambda code: {"code": code, "report_period": "", "start_period": window_start, "end_period": window_end},
     }
     builder = per_code.get(capability_id)
     if builder is None:
         return ()
-    return tuple(CaptureRequest(capability_id, builder(code)) for code in codes)
+    requests: list[CaptureRequest] = []
+    for code in codes:
+        request_identity = builder(code)
+        for report_period in _report_period_missing_periods(capability_id, request_identity, periods):
+            requests.append(CaptureRequest(capability_id, {**request_identity, "report_period": report_period, "start_period": "", "end_period": ""}))
+    return tuple(requests)
 
 
 def _corporate_action_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
-    start_date, end_date = _date_window(policy, now)
+    recent_days = _recent_calendar_days(policy.window_count, now)
+    if recent_days == ():
+        return ()
+    start_date, end_date = recent_days[0], recent_days[-1]
     trading_days = _recent_trading_days(1, now)
     codes = _active_stock_codes(trading_days[-1]) if trading_days != () else ()
     builders = {
@@ -982,32 +1235,57 @@ def _corporate_action_requests(policy: CapturePolicy, capability_id: str, now: d
     builder = builders.get(capability_id)
     if builder is None:
         return ()
-    return tuple(CaptureRequest(capability_id, builder(code)) for code in codes)
+    requests: list[CaptureRequest] = []
+    for code in codes:
+        request_identity = builder(code)
+        _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
+    return tuple(requests)
 
 
 def _ownership_trading_day_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
+    recent_trading_days = _recent_trading_days(policy.window_count, now)
+    recent_calendar_days = _recent_calendar_days(policy.window_count, now)
     start_date, end_date = _date_window(policy, now)
     trading_days = _recent_trading_days(1, now)
     codes = _active_stock_codes(trading_days[-1]) if trading_days != () else ()
-    builders = {
+    range_builders = {
         "stocks.ownership.ccass_holdings": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.ownership.ccass_holding_details": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.ownership.hk_connect_holdings": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.ownership.pledges.stats": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
-        "stocks.ownership.pledges.details": lambda code: {"code": code, "start_date": start_date, "end_date": end_date, "status": ""},
         "stocks.ownership.shareholders.count": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.ownership.shareholders.changes": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date},
     }
-    builder = builders.get(capability_id)
-    if builder is None:
-        return ()
-    return tuple(CaptureRequest(capability_id, builder(code)) for code in codes)
+    if capability_id in range_builders:
+        if recent_trading_days == ():
+            return ()
+        requests: list[CaptureRequest] = []
+        builder = range_builders[capability_id]
+        for code in codes:
+            request_identity = builder(code)
+            _append_missing_range_requests(requests, capability_id, request_identity, recent_trading_days)
+        return tuple(requests)
+    if capability_id == "stocks.ownership.pledges.details":
+        if recent_calendar_days == ():
+            return ()
+        requests: list[CaptureRequest] = []
+        for code in codes:
+            request_identity = {"code": code, "start_date": recent_calendar_days[0], "end_date": recent_calendar_days[-1], "status": ""}
+            _append_missing_range_requests(requests, capability_id, request_identity, recent_calendar_days)
+        return tuple(requests)
+    return ()
 
 
 def _research_date_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
-    start_date, end_date = _date_window(policy, now)
+    recent_days = _recent_calendar_days(policy.window_count, now)
+    if recent_days == ():
+        return ()
+    start_date, end_date = recent_days[0], recent_days[-1]
     if capability_id == "rankings.research.reports":
-        return (CaptureRequest(capability_id, {"trade_date": "", "start_date": start_date, "end_date": end_date, "limit": 10000}),)
+        requests: list[CaptureRequest] = []
+        request_identity = {"trade_date": "", "start_date": start_date, "end_date": end_date, "limit": 10000}
+        _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
+        return tuple(requests)
     trading_days = _recent_trading_days(1, now)
     codes = _active_stock_codes(trading_days[-1]) if trading_days != () else ()
     builders = {
@@ -1017,13 +1295,18 @@ def _research_date_requests(policy: CapturePolicy, capability_id: str, now: date
     builder = builders.get(capability_id)
     if builder is None:
         return ()
-    return tuple(CaptureRequest(capability_id, builder(code)) for code in codes)
+    requests: list[CaptureRequest] = []
+    for code in codes:
+        request_identity = builder(code)
+        _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
+    return tuple(requests)
 
 
 def _research_month_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     if capability_id != "rankings.research.broker_monthly_picks":
         return ()
-    return tuple(CaptureRequest(capability_id, {"trade_month": month_text, "limit": 10000}) for month_text in _recent_months(policy.window_count, now))
+    recent_months = _recent_months(policy.window_count, now)
+    return tuple(CaptureRequest(capability_id, {"trade_month": month_text, "limit": 10000}) for month_text in _missing_months(capability_id, recent_months))
 
 
 def _stock_reference_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -1043,6 +1326,7 @@ def _trading_session_requests(policy: CapturePolicy, capability_id: str, now: da
 def _news_event_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     if capability_id != "markets.events.news":
         return ()
+    recent_days = _recent_calendar_days(policy.window_count, now)
     return tuple(
         CaptureRequest(
             capability_id,
@@ -1060,7 +1344,23 @@ def _news_event_requests(policy: CapturePolicy, capability_id: str, now: datetim
                 "include_content_text": False,
             },
         )
-        for trade_date in _recent_trading_days(policy.window_count, now)
+        for trade_date in recent_days
+        if _single_point_missing(
+            capability_id,
+            {
+                "trade_date": trade_date,
+                "announcement_date": "",
+                "crawl_date": "",
+                "stock_code": "",
+                "event_type": "",
+                "min_importance_score": None,
+                "sort_by": "announcement_time",
+                "limit": 10000,
+                "offset": 0,
+                "include_sources": True,
+                "include_content_text": False,
+            },
+        )
     )
 
 
@@ -1082,11 +1382,9 @@ def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[Captur
     if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.members":
         return _concept_member_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.members.history":
-        start_date, end_date = _date_window(policy, now)
-        return tuple(CaptureRequest(policy.capability_id, {"concept_id": concept_id, "start_date": start_date, "end_date": end_date}) for concept_id in _concept_ids())
+        return _concept_member_history_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_CONCEPTS_RECENT_TRADING_DAYS and policy.capability_id == "concepts.indicators.money_flow":
-        start_date, end_date = _date_window(policy, now)
-        return tuple(CaptureRequest(policy.capability_id, {"concept_id": concept_id, "trade_date": "", "start_date": start_date, "end_date": end_date, "scope": "concept"}) for concept_id in _concept_ids())
+        return _concept_money_flow_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_CATALOG_SNAPSHOT:
         return _catalog_snapshot_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_SINGLE_ENTITY_SNAPSHOT:
@@ -1339,11 +1637,17 @@ class QuoteMuxCaptureJob:
         if request.capability_id == "indexes.members":
             return self._runtime.indexes.get_members_with_report(IndexMembersRequest(**request.request_identity))
         if request.capability_id == "concepts.quotes.daily":
-            items = self._runtime.concepts.get_quotes(**request.request_identity)
-            return items, _CaptureRuntimeReport("concepts.quotes.daily")
+            items = self._normalize_runtime_items(self._runtime.concepts.get_quotes(**request.request_identity))
+            normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
+            write_result = store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
+            self._write_fact_ref_items(request.capability_id, normalized_items)
+            return normalized_items, _CaptureRuntimeReport("concepts.quotes.daily", write_result.coverage_count)
         if request.capability_id == "concepts.members":
-            items = self._runtime.concepts.get_members(**request.request_identity)
-            return items, _CaptureRuntimeReport("concepts.members")
+            items = self._normalize_runtime_items(self._runtime.concepts.get_members(**request.request_identity))
+            normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
+            write_result = store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
+            self._write_fact_ref_items(request.capability_id, normalized_items)
+            return normalized_items, _CaptureRuntimeReport("concepts.members", write_result.coverage_count)
         if request.capability_id == "markets.events.news":
             return self._run_news_update(request)
         method_spec = RUNTIME_METHODS.get(request.capability_id)
@@ -1351,6 +1655,8 @@ class QuoteMuxCaptureJob:
             component_name, method_name = method_spec
             component = getattr(self._runtime, component_name)
             items = getattr(component, method_name)(**request.request_identity)
+            if request.capability_id == "concepts.members.history":
+                return items, _CaptureRuntimeReport(request.capability_id, self._write_fact_ref_items(request.capability_id, items))
             normalized_items = self._normalize_runtime_items(items)
             write_result = store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
             return normalized_items, _CaptureRuntimeReport(request.capability_id, write_result.coverage_count)
@@ -1376,6 +1682,15 @@ class QuoteMuxCaptureJob:
         if isinstance(value, tuple):
             return list(value)
         return [value]
+
+    def _write_fact_ref_items(self, capability_id: str, items: object) -> int:
+        normalized_items = self._normalize_runtime_items(items)
+        if normalized_items == []:
+            return 0
+        writer = get_fact_ref_writer(capability_id)
+        if writer is None:
+            return 0
+        return len(normalized_items) if writer(normalized_items) else 0
 
     def _precheck_skip(self, policy: CapturePolicy, planned_time: datetime) -> CaptureRun | None:
         if not policy.enabled:

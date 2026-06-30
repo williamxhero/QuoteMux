@@ -4,10 +4,10 @@ from datetime import date
 
 import pandas as pd
 
-from platform_models import ConceptCatalogItem, ConceptMemberItem, ConceptQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
+from platform_models import ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
 from quotemux.infra.db.market_reads import load_concept_daily_frame, load_concept_daily_snapshot_frame, load_index_daily_frame, load_latest_complete_concept_daily_snapshot_frame, load_latest_complete_concept_daily_snapshot_ids, load_stock_intraday_frame
-from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_concept_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
+from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_concept_member_history_frame, load_concept_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
 def _frame_to_stock_quote_items(frame: pd.DataFrame, freq: str):
@@ -268,6 +268,26 @@ def get_local_concept_members(concept_id: str, trade_date: str) -> list[ConceptM
     if frame.empty:
         return []
     return [ConceptMemberItem(concept_id=str(row["concept_id"]), code=str(row["code"]).zfill(6), name=str(row["name"]), join_date=format_date_value(row["join_date"])) for _, row in frame.iterrows()]
+
+
+def get_local_concept_member_history(concept_id: str, start_date: str, end_date: str) -> list[ConceptMemberHistoryItem]:
+    actual_start_date = format_date_value(start_date)
+    actual_end_date = format_date_value(end_date)
+    frame = load_concept_member_history_frame(concept_id)
+    if frame.empty:
+        return []
+    items: list[ConceptMemberHistoryItem] = []
+    for _, row in frame.iterrows():
+        valid_from = format_date_value(row["valid_from"])
+        valid_to = format_date_value(row["valid_to"])
+        if actual_end_date != "" and valid_from != "" and valid_from > actual_end_date:
+            continue
+        if actual_start_date != "" and valid_to != "" and valid_to < actual_start_date:
+            continue
+        items.append(ConceptMemberHistoryItem(concept_id=str(row["concept_id"]), code=str(row["code"]).zfill(6), name=str(row["name"]), effective_date=valid_from, action="in"))
+        if valid_to != "":
+            items.append(ConceptMemberHistoryItem(concept_id=str(row["concept_id"]), code=str(row["code"]).zfill(6), name=str(row["name"]), effective_date=valid_to, action="out"))
+    return sorted(items, key=lambda item: (item.effective_date, item.code, item.action))
 
 
 def get_local_index_catalog(index_codes: list[str]) -> list[IndexCatalogItem]:

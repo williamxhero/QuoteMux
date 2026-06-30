@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from platform_models import ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.client import execute_many, query_dataframe
+from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 
 
 def _existing_columns(table_schema: str, table_name: str) -> set[str]:
@@ -43,6 +43,29 @@ def _optional_update_assignments(existing_columns: set[str], column_names: tuple
     if assignments == []:
         return ""
     return ",\n            " + ",\n            ".join(assignments)
+
+
+def _ensure_concept_membership_table() -> bool:
+    statements = (
+        "create schema if not exists ref",
+        """
+        create table if not exists ref.concept_stock_membership (
+            concept_id character varying not null,
+            stock_market character varying not null,
+            stock_code character varying not null,
+            valid_from date not null,
+            valid_to date,
+            weight double precision,
+            updated_at timestamp with time zone not null default now(),
+            primary key (concept_id, stock_market, stock_code, valid_from)
+        )
+        """,
+        "create index if not exists concept_stock_membership_stock_idx on ref.concept_stock_membership (stock_code, valid_from, valid_to)",
+    )
+    for statement in statements:
+        if not execute_sql(statement):
+            return False
+    return True
 
 
 def _stock_market(code: str) -> str:
@@ -310,6 +333,8 @@ def _upsert_concept_catalog(items: Sequence[ConceptCatalogItem]) -> bool:
 
 
 def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
+    if not _ensure_concept_membership_table():
+        return False
     params: list[tuple[object, ...]] = []
     stock_params: list[tuple[object, ...]] = []
     for item in items:
@@ -346,6 +371,8 @@ def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
 
 
 def _upsert_concept_member_history(items: Sequence[ConceptMemberHistoryItem]) -> bool:
+    if not _ensure_concept_membership_table():
+        return False
     in_params: list[tuple[object, ...]] = []
     out_params: list[tuple[object, ...]] = []
     for item in items:
