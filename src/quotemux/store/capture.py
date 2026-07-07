@@ -834,7 +834,8 @@ def _active_stock_requests(policy: CapturePolicy, capability_id: str, now: datet
         return ()
     freq = "1d" if capability_id == "stocks.quotes.daily" else "1m"
     requests: list[CaptureRequest] = []
-    for batch in _chunk(codes, policy.batch_size):
+    actual_batch_size = min(policy.batch_size, 20) if capability_id == "stocks.quotes.intraday" else policy.batch_size
+    for batch in _chunk(codes, actual_batch_size):
         request_identity = {
             "codes": list(batch),
             "freq": freq,
@@ -848,7 +849,8 @@ def _active_stock_requests(policy: CapturePolicy, capability_id: str, now: datet
             "limit": 5000,
         }
         if capability_id == "stocks.quotes.intraday":
-            requests.append(CaptureRequest(capability_id, request_identity))
+            for trade_date in trading_days:
+                requests.append(CaptureRequest(capability_id, {**request_identity, "start_date": trade_date, "end_date": trade_date}))
             continue
         for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, trading_days):
             requests.append(
@@ -1413,23 +1415,29 @@ def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[Captur
 def _scheduled_time(policy: CapturePolicy, now: datetime) -> datetime | None:
     local_now = now.astimezone(ZoneInfo(policy.timezone)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(policy.timezone))
     local_date = local_now.date()
+    if local_now.time() < policy.run_time:
+        return None
     if policy.cadence == CADENCE_DAILY:
         scheduled_day = local_date
     elif policy.cadence == CADENCE_WEEKLY:
-        if local_date.weekday() != 6:
+        expected_weekday = 6 if policy.weekday is None else policy.weekday
+        if local_date.weekday() != expected_weekday:
             return None
         scheduled_day = local_date
     elif policy.cadence == CADENCE_MONTHLY:
-        if local_date.day != monthrange(local_date.year, local_date.month)[1]:
+        expected_day = monthrange(local_date.year, local_date.month)[1] if policy.month_day is None else min(policy.month_day, monthrange(local_date.year, local_date.month)[1])
+        if local_date.day != expected_day:
             return None
         scheduled_day = local_date
     elif policy.cadence == CADENCE_YEARLY:
-        if local_date.month != 12 or local_date.day != 31:
+        expected_month = 12 if policy.month is None else policy.month
+        expected_day = monthrange(local_date.year, expected_month)[1] if policy.month_day is None else min(policy.month_day, monthrange(local_date.year, expected_month)[1])
+        if local_date.month != expected_month or local_date.day != expected_day:
             return None
         scheduled_day = local_date
     else:
         scheduled_day = local_date
-    scheduled = datetime.combine(scheduled_day, time(0, 0), ZoneInfo(policy.timezone))
+    scheduled = datetime.combine(scheduled_day, policy.run_time, ZoneInfo(policy.timezone))
     return scheduled.replace(tzinfo=None)
 
 

@@ -13,6 +13,7 @@ CADENCE_MONTHLY = "monthly"
 CADENCE_YEARLY = "yearly"
 TIMEZONE = "Asia/Shanghai"
 DEFAULT_RUN_TIME = time(0, 0)
+INTRADAY_RUN_TIME = time(20, 0)
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class FirstBatchCapturePolicy:
 
 
 FIRST_BATCH_CAPTURE_POLICIES = (
-    FirstBatchCapturePolicy("stocks.quotes.intraday", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 5, 100, "第一批：分钟 K 线，每天补最近 5 个交易日"),
+    FirstBatchCapturePolicy("stocks.quotes.intraday", CADENCE_DAILY, INTRADAY_RUN_TIME, None, None, None, 5, 100, "第一批：分钟 K 线，每天 20:00 补最近 5 个交易日"),
     FirstBatchCapturePolicy("stocks.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：股票日线，每天补最近 30 个交易日"),
     FirstBatchCapturePolicy("stocks.quotes.daily_snapshot", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 5, 1, "第一批：股票全市场日快照，每天补最近 5 个交易日"),
     FirstBatchCapturePolicy("indexes.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 100, "第一批：指数日线，每天补最近 30 个交易日"),

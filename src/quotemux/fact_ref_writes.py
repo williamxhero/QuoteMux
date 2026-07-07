@@ -183,14 +183,24 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
         trade_time = format_datetime_value(item.trade_time, item.freq)
         if code == "" or trade_time == "":
             continue
+        open_price, high_price, low_price, close_price = item.open, item.high, item.low, item.close
+        if open_price is not None and high_price is not None and low_price is not None and close_price is not None:
+            open_price, high_price, low_price, close_price = _normalized_ohlc(
+                float(open_price),
+                float(high_price),
+                float(low_price),
+                float(close_price),
+                int(item.volume) if item.volume is not None else 0,
+                float(item.amount) if item.amount is not None else 0,
+            )
         params = (
             _stock_market(code),
             code,
             trade_time,
-            item.open,
-            item.high,
-            item.low,
-            item.close,
+            open_price,
+            high_price,
+            low_price,
+            close_price,
             int(item.volume) if item.volume is not None else 0,
             item.amount,
         )
@@ -212,6 +222,14 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
     """
     query_30m = query_1m.replace("fact.stock_bar_1m", "fact.stock_bar_30m")
     return execute_many(query_1m, params_1m) and execute_many(query_30m, params_30m)
+
+
+def _normalized_ohlc(open_price: float, high_price: float, low_price: float, close_price: float, volume: int, amount: float) -> tuple[float, float, float, float]:
+    if volume == 0 and amount == 0 and open_price == high_price == low_price and close_price > high_price:
+        return open_price, high_price, low_price, open_price
+    if open_price == 0 and low_price <= close_price <= high_price and close_price > 0:
+        return close_price, high_price, low_price, close_price
+    return open_price, high_price, low_price, close_price
 
 
 def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:

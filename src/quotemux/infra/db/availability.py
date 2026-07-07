@@ -58,6 +58,24 @@ def _existing_indexes() -> set[str]:
     return {str(row["indexname"]) for _, row in frame.iterrows()}
 
 
+def _existing_columns() -> dict[str, set[str]]:
+    frame = query_dataframe(
+        """
+        select table_schema || '.' || table_name as full_name, column_name
+        from information_schema.columns
+        where table_schema in ('fact', 'ref')
+        """
+    )
+    columns: dict[str, set[str]] = {}
+    if frame.empty:
+        return columns
+    for _, row in frame.iterrows():
+        full_name = str(row["full_name"])
+        column_name = str(row["column_name"])
+        columns.setdefault(full_name, set()).add(column_name)
+    return columns
+
+
 def _estimated_row_count(spec: FactRefObjectSpec) -> int:
     frame = query_dataframe("select greatest(reltuples::bigint, 0) as row_count from pg_class where oid = %s::regclass", (spec.full_name,))
     if frame.empty:
@@ -74,7 +92,9 @@ def _boundary_value(spec: FactRefObjectSpec, direction: str) -> str:
     return "" if value is None else str(value)
 
 
-def _coverage(spec: FactRefObjectSpec) -> dict[str, object]:
+def _coverage(spec: FactRefObjectSpec, columns: set[str]) -> dict[str, object]:
+    if spec.coverage_column not in columns:
+        return {"row_count": _estimated_row_count(spec), "min_value": "", "max_value": ""}
     return {
         "row_count": _estimated_row_count(spec),
         "min_value": _boundary_value(spec, "asc"),
@@ -85,12 +105,13 @@ def _coverage(spec: FactRefObjectSpec) -> dict[str, object]:
 def get_fact_ref_availability() -> dict[str, object]:
     tables = _existing_tables()
     indexes = _existing_indexes()
+    columns = _existing_columns()
     objects: list[dict[str, object]] = []
     warnings: list[str] = []
     for spec in OBJECT_SPECS:
         exists = spec.full_name in tables
         missing_indexes = [index_name for index_name in spec.required_indexes if index_name not in indexes]
-        coverage = _coverage(spec) if exists else {"row_count": 0, "min_value": "", "max_value": ""}
+        coverage = _coverage(spec, columns.get(spec.full_name, set())) if exists else {"row_count": 0, "min_value": "", "max_value": ""}
         if not exists:
             warnings.append(f"缺少本地表 {spec.full_name}")
         if exists and missing_indexes != []:
