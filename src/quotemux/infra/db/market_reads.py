@@ -54,12 +54,22 @@ def _daily_metric_selects(existing_columns: set[str], row_alias: str) -> str:
     """
 
 
+def _canonical_stock_market_condition(row_alias: str) -> str:
+    return f"""
+                (
+                    ({row_alias}.market = 'SHSE' and left({row_alias}.code, 1) = '6')
+                    or ({row_alias}.market = 'BJSE' and left({row_alias}.code, 1) in ('4', '8', '9'))
+                    or ({row_alias}.market = 'SZSE' and left({row_alias}.code, 1) not in ('4', '6', '8', '9'))
+                )
+    """
+
+
 def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     """读取正式股票日线表。"""
     if not codes:
         return pd.DataFrame()
     existing_columns = _existing_columns("fact", "stock_daily_1d")
-    source_where_clauses = ["day_rows.code = any(%s)"]
+    source_where_clauses = ["day_rows.code = any(%s)", _canonical_stock_market_condition("day_rows")]
     source_params: list[object] = [codes]
     if end_date:
         source_where_clauses.append("day_rows.trade_date <= %s")
@@ -143,6 +153,7 @@ def _stock_daily_snapshot_query() -> str:
                 lag(day_rows.close) over (partition by day_rows.code order by day_rows.trade_date) as previous_close
             from fact.stock_daily_1d day_rows
             where trade_date <= %s
+              and {_canonical_stock_market_condition("day_rows")}
         )
         select
             day_rows.code,
@@ -205,6 +216,7 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
                 lag(day_rows.close) over (partition by day_rows.code order by day_rows.trade_date) as previous_close
             from fact.stock_daily_1d day_rows
             where day_rows.trade_date <= %s
+              and {_canonical_stock_market_condition("day_rows")}
         )
         select
             raw_rows.code,

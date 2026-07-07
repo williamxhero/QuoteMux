@@ -146,7 +146,7 @@ def _expected_trade_dates(start_date: str, end_date: str, settings: QuoteMuxSett
     items = QuoteMuxMarkets(settings).get_trading_calendar(
         TradingCalendarRequest(exchange="SSE", start_date=start_date, end_date=end_date, is_open=True)
     )
-    return [item.trade_date for item in items]
+    return list(dict.fromkeys(format_date_value(item.trade_date) for item in items if format_date_value(item.trade_date) != ""))
 
 
 def _chunk_quote_codes(codes: list[str]) -> list[list[str]]:
@@ -265,6 +265,10 @@ def _missing_quote_time_keys(code: str, freq: str, expected_trade_times: list[st
     return missing_expected_keys(expected_keys, existing_keys)
 
 
+def _quote_item_date(item: StockQuoteItem) -> str:
+    return format_date_value(item.trade_time)
+
+
 def _quote_expected_dates(
     trade_date: str,
     start_date: str,
@@ -333,7 +337,7 @@ def _build_quote_code_summaries(
                 )
             )
             continue
-        actual_dates = {item.trade_time[:10] for item in code_coverage_items}
+        actual_dates = {_quote_item_date(item) for item in code_coverage_items}
         missing_time_keys = _missing_quote_time_keys(code, freq, expected_trade_times, code_coverage_items)
         missing_trade_dates = [trade_date for trade_date in expected_dates if trade_date not in actual_dates]
         missing_trade_times = [str(key[1]) for key in missing_time_keys]
@@ -506,7 +510,7 @@ def _build_missing_quote_requests(
         expected_trade_times = _expected_quote_trade_times(freq, expected_trade_dates)
         for code in codes:
             code_items = [item for item in current_items if item.code == code and item.freq == freq]
-            existing_dates = {item.trade_time[:10] for item in code_items}
+            existing_dates = {_quote_item_date(item) for item in code_items}
             if expected_trade_times:
                 missing_times = [str(key[1]) for key in _missing_quote_time_keys(code, freq, expected_trade_times, code_items)]
                 missing_ranges = _build_missing_time_date_ranges(expected_trade_dates, missing_times)
@@ -532,7 +536,7 @@ def _build_missing_quote_requests(
     expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings)
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
-        existing_dates = {item.trade_time for item in current_items if item.code == code and item.freq == "1d"}
+        existing_dates = {_quote_item_date(item) for item in current_items if item.code == code and item.freq == "1d"}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
             missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
@@ -564,6 +568,64 @@ def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit
     if any(not _has_complete_stock_snapshot_item(item) for item in items):
         return [([], trade_date)]
     return [([], trade_date)] if items == [] else []
+
+
+def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem], limit: int, offset: int) -> None:
+    active_frame = load_stock_active_codes_frame(trade_date)
+    if active_frame.empty:
+        return
+    active_codes = {normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")}
+    actual_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
+    expected_count = min(len(active_codes), offset + limit)
+    if len(actual_codes) < expected_count:
+        raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected_min={expected_count} actual={len(actual_codes)}")
+
+
+def _build_missing_snapshot_placeholders(trade_date: str, items: list[StockQuoteItem]) -> list[StockQuoteItem]:
+    active_frame = load_stock_active_codes_frame(trade_date)
+    if active_frame.empty:
+        return []
+    active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
+    existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date}
+    missing_codes = [code for code in dict.fromkeys(active_codes) if code != "" and code not in existing_codes]
+    if missing_codes == []:
+        return []
+    history_items = get_local_stock_quotes(missing_codes, "1d", "", "", trade_date, "", "", None, "none")
+    latest_by_code: dict[str, StockQuoteItem] = {}
+    for item in history_items:
+        item_date = format_date_value(item.trade_time)
+        code = normalize_stock_code(item.code).zfill(6)
+        if code == "" or item_date == "" or item_date >= trade_date:
+            continue
+        current = latest_by_code.get(code)
+        if current is None or format_date_value(current.trade_time) < item_date:
+            latest_by_code[code] = item
+    placeholders: list[StockQuoteItem] = []
+    for code in missing_codes:
+        previous = latest_by_code.get(code)
+        if previous is None or previous.close is None:
+            continue
+        close = previous.close
+        placeholders.append(
+            StockQuoteItem(
+                code=code,
+                trade_time=trade_date,
+                freq="1d",
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                pre_close=close,
+                change=0.0,
+                pct_chg=0.0,
+                volume=0.0,
+                amount=0.0,
+                adjust="none",
+                is_suspended=True,
+                is_st=previous.is_st,
+            )
+        )
+    return placeholders
 
 
 def _build_steps(freq: str, request_freq: str, request_count: int | None, actual_adjust: str, settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
@@ -761,7 +823,14 @@ class QuoteMuxStocks:
                 fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
             )
         )
+        placeholder_items = _build_missing_snapshot_placeholders(actual_trade_date, items)
+        if placeholder_items != []:
+            writer = get_fact_ref_writer("stocks.quotes.daily_snapshot")
+            if writer is not None:
+                writer(placeholder_items)
+            items = sort_items([*items, *placeholder_items], ("code", "trade_time"))
         filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
+        _assert_daily_snapshot_coverage(actual_trade_date, items, request.limit, request.offset)
         return filtered_items[request.offset: request.offset + request.limit], report
     def get_daily_local_window(self, request: StockDailyLocalWindowRequest) -> list[StockQuoteItem]:
         actual_start_date = format_date_value(request.start_date)

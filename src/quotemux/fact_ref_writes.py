@@ -99,6 +99,7 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
     existing_columns = _existing_columns("fact", "stock_daily_1d")
     optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
     params: list[tuple[object, ...]] = []
+    daily_codes: list[str] = []
     for item in items:
         if item.freq != "1d":
             continue
@@ -106,6 +107,7 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
         trade_date = format_date_value(item.trade_time)
         if code == "" or trade_date == "":
             continue
+        daily_codes.append(code)
         optional_values = tuple(getattr(item, column_name) for column_name in optional_columns)
         params.append((
             _stock_market(code),
@@ -123,7 +125,7 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
         ))
     optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
     optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
-    return execute_many(
+    upsert_ok = execute_many(
         f"""
         insert into fact.stock_daily_1d (market, code, trade_date, open, high, low, close, volume, amount, is_suspended, is_st{optional_column_sql})
         values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
@@ -139,6 +141,35 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             loaded_at = now()
         """,
         params,
+    )
+    if not upsert_ok:
+        return False
+    return _repair_stock_listed_dates_from_daily(list(dict.fromkeys(daily_codes)))
+
+
+def _repair_stock_listed_dates_from_daily(codes: Sequence[str]) -> bool:
+    if not codes:
+        return True
+    return execute_sql(
+        """
+        with target_codes as (
+            select unnest(%s::text[]) as code
+        ),
+        first_daily as (
+            select day_rows.market, day_rows.code, min(day_rows.trade_date) as listed_date
+            from fact.stock_daily_1d day_rows
+            join target_codes target on target.code = day_rows.code
+            group by day_rows.market, day_rows.code
+        )
+        update ref.stock stock_ref
+        set listed_date = first_daily.listed_date,
+            updated_at = now()
+        from first_daily
+        where stock_ref.market = first_daily.market
+          and stock_ref.code = first_daily.code
+          and stock_ref.listed_date is null
+        """,
+        (list(codes),),
     )
 
 
