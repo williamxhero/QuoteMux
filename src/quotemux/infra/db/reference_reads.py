@@ -37,7 +37,8 @@ def load_stock_catalog_frame(codes: list[str], name: str, market: str, listed_fi
             market,
             code,
             name,
-            board_type,
+            industry,
+            listing_board,
             listed_date::text as listed_date,
             delisted_date::text as delisted_date
         from ref.stock

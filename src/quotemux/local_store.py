@@ -210,11 +210,12 @@ def get_local_stock_catalog(codes: list[str], name: str, exchange: str, list_sta
                 code=str(row["code"]).zfill(6),
                 name=str(row["name"]),
                 exchange=str(row["market"]),
-                market=str(row["market"]),
+                market=str(row["listing_board"]),
                 list_status=list_status_text,
                 list_date=format_date_value(row["listed_date"]),
                 delist_date=delist_date,
-                industry=str(row["board_type"]),
+                industry=str(row["industry"]),
+                listing_board=str(row["listing_board"]),
                 area="",
             )
         )

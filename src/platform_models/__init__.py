@@ -241,6 +241,7 @@ class StockBasicInfo(ApiModel):
     list_date: str
     delist_date: str
     industry: str = ""
+    listing_board: str = ""
     area: str = ""
 
 
@@ -267,6 +268,7 @@ class BoardCatalogItem(ApiModel):
     category: str = ""
     market: str = "a_share"
     status: str = "active"
+    url_id: str = ""
     start_date: str = ""
     end_date: str = ""
 

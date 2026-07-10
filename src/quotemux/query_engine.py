@@ -91,6 +91,14 @@ def _changed_items(before_items: Sequence[T], after_items: Sequence[T], key_fiel
     return changed
 
 
+def _write_fact_ref_items(capability_id: str, writer: Callable[[list[T]], bool], items: list[T]) -> bool:
+    if items == []:
+        return False
+    if not writer(items):
+        raise RuntimeError(f"fact ref 写入失败: {capability_id}")
+    return True
+
+
 def execute_capability_query(spec: CapabilityQuerySpec[T]) -> tuple[list[T], ContractReport]:
     store_items: list[T] = []
     store_status = "skip"
@@ -128,9 +136,8 @@ def execute_capability_query(spec: CapabilityQuerySpec[T]) -> tuple[list[T], Con
     report = ContractReport.from_fallback_report(spec.capability_id, fallback_report, spec.base_source_name, _has_items(spec.base_items))
     if spec.fact_ref_writer is not None:
         provider_items = _changed_items(base_items, sorted_items, spec.key_fields)
-        if provider_items != []:
-            spec.fact_ref_writer(provider_items)
-        report = report.with_store_stats(partial_hit=store_status == "partial_hit", miss=store_status in {"miss", "skip"}, stale=store_status == "stale")
+        fact_ref_written = _write_fact_ref_items(spec.capability_id, spec.fact_ref_writer, provider_items)
+        report = report.with_store_stats(partial_hit=store_status == "partial_hit", miss=store_status in {"miss", "skip"}, stale=store_status == "stale", write=fact_ref_written)
     elif cache_enabled and (sorted_items != [] or spec.write_empty_coverage):
         store_write = store_result(spec.capability_id, spec.store_identity, _store_payload(spec, sorted_items), report, report.quarantine_count)
         report = report.with_store_stats(partial_hit=store_status == "partial_hit", miss=store_status in {"miss", "skip"}, stale=store_status == "stale", write=store_write.status == "write")

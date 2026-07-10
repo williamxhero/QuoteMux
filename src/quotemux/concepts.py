@@ -21,7 +21,7 @@ from quotemux.source_packages.registry import get_default_source_package_registr
 
 
 CONCEPT_CATEGORY = "concept"
-CONCEPT_ALIAS_PROVIDERS = ("tushare", "akshare")
+CONCEPT_ALIAS_PROVIDERS = ("crawler_provider", "tushare", "akshare")
 DEFAULT_CONCEPT_START_DATE = "20000101"
 HIGH_CONFIDENCE_THRESHOLD = 0.70
 REVIEW_CONFIDENCE_THRESHOLD = 0.62
@@ -32,6 +32,16 @@ MAX_CANDIDATE_PAIRS = 20
 MEMBER_VERIFY_PAIR_LIMIT = 80
 CONCEPT_ID_PATTERN = re.compile(r"C[1-9][0-9]*")
 CONCEPT_TYPE_ORDER = ("ths", "dc", "tdx", "kpl", "em")
+FINANCIAL_REPORT_CONCEPT_NAME_PATTERN = re.compile(r"20[0-9]{2}.*(?:年报|一季报|中报|二季报|三季报|四季报|一季度|二季度|三季度|四季度).*(?:预增|预减|扭亏|续亏|续盈|首亏|略增|略减)")
+MANUAL_CONFIRMED_ALIAS_PAIRS = frozenset(
+    {
+        (("crawler_provider", "em", "BK1156"), ("crawler_provider", "ths", "309105")),
+        (("crawler_provider", "em", "BK0843"), ("crawler_provider", "em", "BK1649")),
+        (("crawler_provider", "em", "BK0581"), ("crawler_provider", "em", "BK1647")),
+        (("crawler_provider", "em", "BK1050"), ("crawler_provider", "em", "BK1630")),
+        (("crawler_provider", "em", "BK0816"), ("crawler_provider", "em", "BK1051")),
+    }
+)
 
 CONCEPT_ALIAS_SCHEMA_SQL = (
     "create schema if not exists derived",
@@ -128,6 +138,7 @@ class ConceptBoardCatalog:
     provider: str
     board_type: str
     board_code: str
+    url_id: str
     board_name: str
     category: str
     start_date: str
@@ -139,6 +150,7 @@ class ConceptBoardSnapshot:
     provider: str
     board_type: str
     board_code: str
+    url_id: str
     board_name: str
     category: str
     member_stock_codes: frozenset[str]
@@ -315,6 +327,7 @@ def _collect_snapshots(sources: Sequence[ConceptProviderSource], trade_date: str
             provider=item.provider,
             board_type=item.board_type,
             board_code=item.board_code,
+            url_id=item.url_id,
             board_name=item.board_name,
             category=item.category,
             member_stock_codes=frozenset(),
@@ -348,11 +361,14 @@ def _collect_catalogs(sources: Sequence[ConceptProviderSource], trade_date: str)
                 continue
             if catalog.board_code == "":
                 continue
+            if _is_financial_report_concept_name(catalog.board_name):
+                continue
             catalogs.append(
                 ConceptBoardCatalog(
                     provider=source.provider,
                     board_type=source.board_type,
                     board_code=catalog.board_code,
+                    url_id=catalog.url_id,
                     board_name=catalog.board_name,
                     category=catalog.category,
                     start_date=_concept_start_date(catalog.start_date),
@@ -396,6 +412,7 @@ def _build_snapshot(source: ConceptProviderSource, catalog: ConceptBoardCatalog,
         provider=source.provider,
         board_type=catalog.board_type,
         board_code=catalog.board_code,
+        url_id=catalog.url_id,
         board_name=catalog.board_name,
         category=catalog.category,
         member_stock_codes=member_codes,
@@ -442,10 +459,14 @@ def _build_auto_groups(
                 continue
             if _snapshot_key(left) == _snapshot_key(right):
                 continue
+            direct_alias = _is_direct_provider_alias_pair(left, right)
             confidence = _match_confidence(left, right)
+            if direct_alias:
+                confidence = 1.0
             if confidence < HIGH_CONFIDENCE_THRESHOLD and _name_similarity(left.board_name, right.board_name) == 1.0:
                 confidence = HIGH_CONFIDENCE_THRESHOLD
-            status = "confirmed" if confidence >= HIGH_CONFIDENCE_THRESHOLD else "review" if confidence >= REVIEW_CONFIDENCE_THRESHOLD else "ignored"
+            manual_confirmed = _is_manual_confirmed_alias_pair(left, right)
+            status = "confirmed" if confidence >= HIGH_CONFIDENCE_THRESHOLD or manual_confirmed or direct_alias else "review" if confidence >= REVIEW_CONFIDENCE_THRESHOLD else "ignored"
             if status != "ignored":
                 candidates.append(
                     ConceptAliasCandidate(
@@ -468,12 +489,29 @@ def _build_auto_groups(
     return groups, candidates
 
 
+def _is_manual_confirmed_alias_pair(left: ConceptBoardSnapshot, right: ConceptBoardSnapshot) -> bool:
+    pair = tuple(sorted((_snapshot_key(left), _snapshot_key(right))))
+    return pair in MANUAL_CONFIRMED_ALIAS_PAIRS
+
+
+def _is_direct_provider_alias_pair(left: ConceptBoardSnapshot, right: ConceptBoardSnapshot) -> bool:
+    if left.provider == right.provider:
+        return False
+    if left.board_type != right.board_type:
+        return False
+    return len(_snapshot_identity_keys(left) & _snapshot_identity_keys(right)) > 0
+
+
+def _snapshot_identity_keys(snapshot: ConceptBoardSnapshot) -> frozenset[str]:
+    return frozenset(value for value in (snapshot.board_code, snapshot.url_id) if value != "")
+
+
 def _match_confidence(left: ConceptBoardSnapshot, right: ConceptBoardSnapshot) -> float:
     member_score = _jaccard(left.member_stock_codes, right.member_stock_codes)
     name_score = _name_similarity(left.board_name, right.board_name)
     if member_score == 1.0:
         return 1.0
-    return round(member_score * 0.78 + name_score * 0.22, 6)
+    return round(member_score * 0.8 + name_score * 0.2, 6)
 
 
 def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
@@ -534,6 +572,7 @@ def _to_group(concept_id: str, canonical_name: str, snapshots: Sequence[ConceptB
                     break
     if group_start == "":
         group_start = DEFAULT_CONCEPT_START_DATE
+    members = [member.model_copy(update={"start_date": group_start}) if member.start_date == "" else member for member in members]
     return ConceptAliasGroupItem(concept_id=concept_id, canonical_name=actual_name, start_date=group_start, end_date=_group_end_date(members), members=members)
 
 
@@ -542,6 +581,8 @@ def _snapshot_key(item: ConceptBoardCatalog | ConceptBoardSnapshot) -> tuple[str
 
 
 def _assign_concept_ids(groups: Sequence[ConceptAliasGroupItem], registry: ConceptIdRegistry) -> tuple[ConceptAliasGroupItem, ...]:
+    existing_signature_to_id = dict(registry.signature_to_id)
+    existing_signature_keys = {signature: _signature_member_keys(signature) for signature in existing_signature_to_id}
     sorted_groups = sorted(
         groups,
         key=lambda item: (
@@ -551,16 +592,51 @@ def _assign_concept_ids(groups: Sequence[ConceptAliasGroupItem], registry: Conce
         )
     )
     assigned_groups: list[ConceptAliasGroupItem] = []
-    registry.signature_to_id.clear()
-    next_id = 1
+    used_concept_ids: set[str] = set()
+    reserved_concept_ids = set(existing_signature_to_id.values())
+    next_id = registry.next_id
     for group in sorted_groups:
         signature = _group_signature(group)
-        concept_id = f"C{next_id}"
-        next_id += 1
+        concept_id = _registry_concept_id_for_group(signature, existing_signature_to_id, existing_signature_keys, used_concept_ids)
+        if concept_id == "":
+            concept_id = _next_available_concept_id(next_id, used_concept_ids | reserved_concept_ids)
+            next_id = _concept_id_number(concept_id) + 1
+        used_concept_ids.add(concept_id)
         registry.signature_to_id[signature] = concept_id
         assigned_groups.append(group.model_copy(update={"concept_id": concept_id}))
-    registry.next_id = next_id
+    registry.next_id = _next_registry_id(next_id, registry.signature_to_id)
     return tuple(assigned_groups)
+
+
+def _registry_concept_id_for_group(
+    signature: str,
+    existing_signature_to_id: dict[str, str],
+    existing_signature_keys: dict[str, frozenset[str]],
+    used_concept_ids: set[str],
+) -> str:
+    exact_id = existing_signature_to_id.get(signature, "")
+    if exact_id != "" and exact_id not in used_concept_ids:
+        return exact_id
+    group_keys = _signature_member_keys(signature)
+    candidates: list[tuple[int, int, str]] = []
+    for existing_signature, concept_id in existing_signature_to_id.items():
+        if concept_id in used_concept_ids:
+            continue
+        existing_keys = existing_signature_keys[existing_signature]
+        if existing_keys != frozenset() and existing_keys.issubset(group_keys):
+            candidates.append((0, -len(existing_keys), concept_id))
+        elif group_keys != frozenset() and group_keys.issubset(existing_keys):
+            candidates.append((1, -len(group_keys), concept_id))
+    if candidates == []:
+        return ""
+    return sorted(candidates, key=lambda item: (item[0], item[1], _concept_id_number(item[2])))[0][2]
+
+
+def _next_available_concept_id(next_id: int, used_concept_ids: set[str]) -> str:
+    candidate = max(next_id, 1)
+    while f"C{candidate}" in used_concept_ids:
+        candidate += 1
+    return f"C{candidate}"
 
 
 def _canonical_group_sort_name(group: ConceptAliasGroupItem) -> str:
@@ -570,6 +646,10 @@ def _canonical_group_sort_name(group: ConceptAliasGroupItem) -> str:
 def _group_signature(group: ConceptAliasGroupItem) -> str:
     keys = sorted(f"{member.provider}|{member.board_type}|{member.board_code}" for member in group.members)
     return "\n".join(keys)
+
+
+def _signature_member_keys(signature: str) -> frozenset[str]:
+    return frozenset(item for item in signature.splitlines() if item != "")
 
 
 def _concept_id_number(concept_id: str) -> int:
@@ -656,19 +736,23 @@ def _concept_start_date(value: str) -> str:
     return _normalize_date_text(value)
 
 
+def _is_financial_report_concept_name(board_name: str) -> bool:
+    return FINANCIAL_REPORT_CONCEPT_NAME_PATTERN.search(board_name.strip()) is not None
+
+
 def _concept_name_start_date(board_name: str) -> str:
-    match = re.search(r"(20[0-9]{2}).*?(年报|四季|一季|中报|二季|三季)", board_name)
+    match = re.search(r"(20[0-9]{2}).*?(年报|四季报|一季报|中报|二季报|三季报)", board_name)
     if match is None:
         return ""
     year = int(match.group(1))
     period = match.group(2)
-    if period in {"年报", "四季"}:
+    if period in {"年报", "四季报"}:
         return f"{year + 1}0101"
-    if period == "一季":
+    if period == "一季报":
         return f"{year}0401"
-    if period in {"中报", "二季"}:
+    if period in {"中报", "二季报"}:
         return f"{year}0701"
-    if period == "三季":
+    if period == "三季报":
         return f"{year}1001"
     return ""
 
@@ -777,6 +861,7 @@ def _write_alias_asset(asset: ConceptAliasAsset, registry: ConceptIdRegistry) ->
     ]
     signature_rows = [(signature, concept_id) for signature, concept_id in sorted(registry.signature_to_id.items(), key=lambda item: _concept_id_number(item[1]))]
     _write_alias_tables(group_rows, member_rows, candidate_rows, registry.next_id, signature_rows)
+    _sync_concept_reference_tables(group_rows)
 
 
 def _ensure_alias_schema() -> bool:
@@ -860,6 +945,245 @@ def _write_alias_tables(
         connection.close()
 
 
+
+def _sync_concept_reference_tables(group_rows: list[tuple[str, str, str, str]]) -> None:
+    if group_rows == []:
+        return
+    connection = psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=DB_CONNECT_TIMEOUT,
+        row_factory=dict_row,
+    )
+    try:
+        with connection.cursor() as cursor:
+            _ensure_ref_concept_table(cursor)
+            _load_current_concept_groups(cursor, group_rows)
+            _build_stale_concept_id_map(cursor)
+            if _relation_exists(cursor, "fact", "concept_daily_1d"):
+                _migrate_concept_fact_rows(cursor)
+                _delete_stale_concept_fact_rows(cursor)
+            if _relation_exists(cursor, "ref", "concept_stock_membership"):
+                _migrate_concept_membership_rows(cursor)
+                _delete_stale_concept_membership_rows(cursor)
+            _sync_ref_concept_rows(cursor)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _ensure_ref_concept_table(cursor) -> None:
+    cursor.execute("create schema if not exists ref")
+    cursor.execute(
+        """
+        create table if not exists ref.concept (
+            concept_id text primary key,
+            concept_type text not null,
+            name text not null,
+            market text not null,
+            status text not null,
+            updated_at timestamp without time zone not null default now()
+        )
+        """
+    )
+
+
+def _load_current_concept_groups(cursor, group_rows: list[tuple[str, str, str, str]]) -> None:
+    cursor.execute(
+        """
+        create temporary table current_concept_groups (
+            concept_id text primary key,
+            canonical_name text not null,
+            start_date text not null,
+            end_date text not null
+        ) on commit drop
+        """
+    )
+    cursor.executemany(
+        """
+        insert into current_concept_groups (concept_id, canonical_name, start_date, end_date)
+        values (%s, %s, %s, %s)
+        """,
+        group_rows,
+    )
+
+
+def _build_stale_concept_id_map(cursor) -> None:
+    cursor.execute(
+        """
+        create temporary table unique_current_concept_names as
+        select min(concept_id) as concept_id, canonical_name
+        from current_concept_groups
+        group by canonical_name
+        having count(*) = 1
+        """
+    )
+    cursor.execute(
+        """
+        create temporary table stale_concept_id_map as
+        select old_ref.concept_id as old_concept_id,
+               current_names.concept_id as new_concept_id
+        from ref.concept old_ref
+        join unique_current_concept_names current_names on current_names.canonical_name = old_ref.name
+        left join current_concept_groups current_groups on current_groups.concept_id = old_ref.concept_id
+        where current_groups.concept_id is null
+          and old_ref.concept_id <> current_names.concept_id
+          and old_ref.concept_id ~ '^C[1-9][0-9]*$'
+        """
+    )
+    cursor.execute("create index on stale_concept_id_map (old_concept_id)")
+
+
+def _migrate_concept_fact_rows(cursor) -> None:
+    columns = _table_columns(cursor, "fact", "concept_daily_1d")
+    if "concept_id" not in columns or "trade_date" not in columns:
+        return
+    value_columns = [column for column in columns if column != "concept_id"]
+    insert_columns = ["concept_id", *value_columns]
+    insert_sql = ", ".join(_quote_ident(column) for column in insert_columns)
+    select_sql = ", ".join(["id_map.new_concept_id", *[f"fact_rows.{_quote_ident(column)}" for column in value_columns]])
+    cursor.execute(
+        f"""
+        insert into fact.concept_daily_1d ({insert_sql})
+        select {select_sql}
+        from fact.concept_daily_1d fact_rows
+        join stale_concept_id_map id_map on id_map.old_concept_id = fact_rows.concept_id
+        on conflict (concept_id, trade_date) do nothing
+        """
+    )
+    cursor.execute(
+        """
+        delete from fact.concept_daily_1d fact_rows
+        using stale_concept_id_map id_map
+        where fact_rows.concept_id = id_map.old_concept_id
+        """
+    )
+
+
+def _delete_stale_concept_fact_rows(cursor) -> None:
+    cursor.execute(
+        """
+        delete from fact.concept_daily_1d fact_rows
+        where not exists (
+            select 1
+            from current_concept_groups current_groups
+            where current_groups.concept_id = fact_rows.concept_id
+        )
+        """
+    )
+
+
+def _migrate_concept_membership_rows(cursor) -> None:
+    columns = _table_columns(cursor, "ref", "concept_stock_membership")
+    required_columns = {"concept_id", "stock_market", "stock_code", "valid_from"}
+    if not required_columns.issubset(set(columns)):
+        return
+    value_columns = [column for column in columns if column != "concept_id"]
+    insert_columns = ["concept_id", *value_columns]
+    insert_sql = ", ".join(_quote_ident(column) for column in insert_columns)
+    select_values = []
+    for column in value_columns:
+        if column == "updated_at":
+            select_values.append("now()")
+        else:
+            select_values.append(f"membership_rows.{_quote_ident(column)}")
+    select_sql = ", ".join(["id_map.new_concept_id", *select_values])
+    cursor.execute(
+        f"""
+        insert into ref.concept_stock_membership ({insert_sql})
+        select {select_sql}
+        from ref.concept_stock_membership membership_rows
+        join stale_concept_id_map id_map on id_map.old_concept_id = membership_rows.concept_id
+        on conflict (concept_id, stock_market, stock_code, valid_from) do nothing
+        """
+    )
+    cursor.execute(
+        """
+        delete from ref.concept_stock_membership membership_rows
+        using stale_concept_id_map id_map
+        where membership_rows.concept_id = id_map.old_concept_id
+        """
+    )
+
+
+def _delete_stale_concept_membership_rows(cursor) -> None:
+    cursor.execute(
+        """
+        delete from ref.concept_stock_membership membership_rows
+        where not exists (
+            select 1
+            from current_concept_groups current_groups
+            where current_groups.concept_id = membership_rows.concept_id
+        )
+        """
+    )
+
+
+def _sync_ref_concept_rows(cursor) -> None:
+    cursor.execute(
+        """
+        delete from ref.concept concept_ref
+        where not exists (
+            select 1
+            from current_concept_groups current_groups
+            where current_groups.concept_id = concept_ref.concept_id
+        )
+          and concept_ref.concept_id ~ '^C[1-9][0-9]*$'
+        """
+    )
+    cursor.execute(
+        """
+        insert into ref.concept (concept_id, concept_type, name, market, status, updated_at)
+        select concept_id, 'concept', canonical_name, 'CN', 'active', now()
+        from current_concept_groups
+        on conflict (concept_id) do update set
+            concept_type = excluded.concept_type,
+            name = excluded.name,
+            market = excluded.market,
+            status = excluded.status,
+            updated_at = now()
+        """
+    )
+
+
+def _relation_exists(cursor, schema_name: str, table_name: str) -> bool:
+    cursor.execute(
+        """
+        select exists (
+            select 1
+            from information_schema.tables
+            where table_schema = %s and table_name = %s
+        )
+        """,
+        (schema_name, table_name),
+    )
+    row = cursor.fetchone()
+    return bool(row["exists"])
+
+
+def _table_columns(cursor, schema_name: str, table_name: str) -> list[str]:
+    cursor.execute(
+        """
+        select column_name
+        from information_schema.columns
+        where table_schema = %s and table_name = %s
+        order by ordinal_position
+        """,
+        (schema_name, table_name),
+    )
+    return [str(row["column_name"]) for row in cursor.fetchall()]
+
+
+def _quote_ident(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
 def _provider_has_concept_contracts(provider: str) -> bool:
     registry = get_default_source_package_registry()
     try:
@@ -877,6 +1201,8 @@ def _typed_sources(
     members_instance: SourceInstanceConfig,
     trade_date: str,
 ) -> tuple[ConceptProviderSource, ...]:
+    if provider == "crawler_provider":
+        return _crawler_provider_typed_sources(catalog_handler, members_handler, catalog_instance, members_instance)
     if provider == "tushare":
         return _tushare_typed_sources(catalog_instance, trade_date)
     if provider == "akshare":
@@ -889,6 +1215,45 @@ def _typed_sources(
             fetch_members=_with_instance(members_handler, members_instance),
         ),
     )
+
+
+def _crawler_provider_typed_sources(
+    catalog_handler,
+    members_handler,
+    catalog_instance: SourceInstanceConfig,
+    members_instance: SourceInstanceConfig,
+) -> tuple[ConceptProviderSource, ...]:
+    return (
+        ConceptProviderSource(
+            provider="crawler_provider",
+            board_type="ths",
+            fetch_catalog=_crawler_provider_fetch_catalog(catalog_handler, catalog_instance, "ths"),
+            fetch_members=_crawler_provider_fetch_members(members_handler, members_instance, "ths"),
+        ),
+        ConceptProviderSource(
+            provider="crawler_provider",
+            board_type="em",
+            fetch_catalog=_crawler_provider_fetch_catalog(catalog_handler, catalog_instance, "em"),
+            fetch_members=_crawler_provider_fetch_members(members_handler, members_instance, "em"),
+        ),
+    )
+
+
+def _crawler_provider_fetch_catalog(catalog_handler, source_instance: SourceInstanceConfig, board_type: str):
+    def fetcher(category: str, market: str, status: str, limit: int, offset: int) -> list[BoardCatalogItem]:
+        del market
+        with use_source_instance(source_instance):
+            return catalog_handler(category, board_type, status, limit, offset)
+
+    return fetcher
+
+
+def _crawler_provider_fetch_members(members_handler, source_instance: SourceInstanceConfig, board_type: str):
+    def fetcher(board_code: str, trade_date: str) -> list[BoardMemberItem]:
+        with use_source_instance(source_instance):
+            return members_handler(f"{board_type}:{board_code}", trade_date)
+
+    return fetcher
 
 
 def _tushare_typed_sources(catalog_instance: SourceInstanceConfig, trade_date: str) -> tuple[ConceptProviderSource, ...]:

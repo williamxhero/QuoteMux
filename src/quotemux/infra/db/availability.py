@@ -22,6 +22,7 @@ OBJECT_SPECS = (
     FactRefObjectSpec("fact", "stock_bar_1m", ("stock_bar_1m_pkey", "stock_bar_1m_code_time_idx", "stock_bar_1m_time_idx"), "bar_time"),
     FactRefObjectSpec("fact", "stock_bar_30m", ("stock_bar_30m_pkey", "stock_bar_30m_code_time_idx", "stock_bar_30m_time_idx"), "bar_time"),
     FactRefObjectSpec("fact", "index_bar_1d", ("index_bar_1d_pkey", "index_bar_1d_date_idx"), "trade_date"),
+    FactRefObjectSpec("fact", "board_daily_1d", ("board_daily_1d_pkey", "board_daily_1d_date_idx"), "trade_date"),
     FactRefObjectSpec("fact", "concept_daily_1d", ("concept_daily_1d_pkey", "concept_daily_1d_date_idx"), "trade_date"),
     FactRefObjectSpec("ref", "trade_calendar", ("trade_calendar_pkey",), "trade_date"),
     FactRefObjectSpec("ref", "stock", ("stock_pkey", "stock_code_idx"), "listed_date"),

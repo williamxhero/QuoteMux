@@ -421,49 +421,37 @@ class QuoteMuxConceptRuntime:
     def _get_derived_snapshot_items(self, concept_ids: list[str], trade_date: str) -> list[ConceptQuoteItem]:
         if not self._settings.is_source_enabled("derived_core"):
             return []
-        source_order = self._source_order("concepts.quotes.daily", CONCEPT_QUOTES_SOURCE_ORDER)
-        source_rank = {source_id: index for index, source_id in enumerate(source_order)}
         groups_by_id = {group.concept_id: group for group in self._concepts.list_alias_groups(trade_date)}
-        aliases_by_board_code: dict[str, ConceptBoardAlias] = {}
-        for concept_id in concept_ids:
-            group = groups_by_id.get(concept_id)
-            if group is None:
-                continue
-            members = sorted(
-                group.members,
-                key=lambda member: (
-                    source_rank.get(member.provider, len(source_rank)),
-                    member.provider,
-                    member.provider_concept_type,
-                    member.provider_concept_code,
-                ),
-            )
-            for member in members:
-                if not self._settings.is_source_enabled(member.provider):
-                    continue
-                board_code = member.provider_concept_code.upper()
-                if board_code not in aliases_by_board_code:
-                    aliases_by_board_code[board_code] = ConceptBoardAlias(
-                        concept_id=group.concept_id,
-                        canonical_name=group.canonical_name,
-                        provider=member.provider,
-                        board_type=member.provider_concept_type,
-                        board_code=member.provider_concept_code,
-                        board_name=member.provider_concept_name,
-                    )
-        if aliases_by_board_code == {}:
+        requested_ids = [concept_id for concept_id in concept_ids if concept_id in groups_by_id]
+        if requested_ids == []:
             return []
-        raw_items = _source_package_call("derived_core", "get_concept_quotes", list(aliases_by_board_code), "1d", trade_date, "", "", "", "", None)
+        raw_items = _source_package_call("derived_core", "get_concept_quotes", requested_ids, "1d", trade_date, "", "", "", "", None)
         if not isinstance(raw_items, list):
             return []
         items: list[ConceptQuoteItem] = []
         for item in raw_items:
             if not isinstance(item, BoardQuoteItem):
                 continue
-            alias = aliases_by_board_code.get(item.board_code.upper())
-            if alias is None:
+            group = groups_by_id.get(item.board_code.upper())
+            if group is None:
                 continue
-            items.extend(_rewrite_provider_quote_items([item], alias))
+            items.append(
+                ConceptQuoteItem(
+                    concept_id=group.concept_id,
+                    concept_name=group.canonical_name,
+                    trade_time=item.trade_time,
+                    freq=item.freq,
+                    open=item.open,
+                    high=item.high,
+                    low=item.low,
+                    close=item.close,
+                    pre_close=item.pre_close,
+                    change=item.change,
+                    pct_chg=item.pct_chg,
+                    volume=item.volume,
+                    amount=item.amount,
+                )
+            )
         return _merge_time_series_items(items)
 
     def _build_money_flow_requests(self, items: list[ConceptMoneyFlowItem], trade_date: str, start_date: str, end_date: str) -> list[tuple[str, str]]:
@@ -725,31 +713,28 @@ class QuoteMuxConceptRuntime:
         if actual_trade_date == "":
             return []
         actual_limit = ensure_limit(limit)
-        local_items = [item for item in get_local_concept_daily_snapshot(actual_trade_date, actual_limit + offset, 0) if is_concept_id(item.concept_id)]
-        complete_local_items = [item for item in local_items if _has_concept_snapshot_metrics(item)]
-        if complete_local_items != []:
-            return sorted(complete_local_items, key=lambda item: item.concept_id)[offset: offset + actual_limit]
-        catalog_items = self.get_catalog("", "", "active", actual_limit, offset)
+        catalog_items = self.get_catalog("", "", "active", MARKET_DAILY_SNAPSHOT_LIMIT, 0)
         concept_ids = [item.concept_id for item in catalog_items]
         if concept_ids == []:
             return []
+        local_items = [item for item in get_local_concept_daily_snapshot(actual_trade_date, MARKET_DAILY_SNAPSHOT_LIMIT, 0) if is_concept_id(item.concept_id)]
         if _has_concept_daily_snapshot_for_ids(local_items, concept_ids):
-            return sorted([item for item in local_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[:actual_limit]
+            return sorted([item for item in local_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
         derived_items = self._get_derived_snapshot_items(concept_ids, actual_trade_date)
         merged_derived_items = _merge_concept_snapshot_items(local_items, derived_items)
         if merged_derived_items != []:
             _write_concept_daily_snapshot_items(merged_derived_items, actual_trade_date)
-            return sorted([item for item in merged_derived_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[:actual_limit]
+            return sorted([item for item in merged_derived_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
         request_codes = concept_ids
         quote_items = self.get_quotes(request_codes, "1d", actual_trade_date, "", "", "", "", None, max(actual_limit, len(request_codes)))
         if _has_concept_daily_snapshot_for_ids(quote_items, concept_ids):
             _write_concept_daily_snapshot_items(quote_items, actual_trade_date)
-            return sorted([item for item in quote_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)
+            return sorted([item for item in quote_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
         merged_items = _merge_concept_snapshot_items(local_items, quote_items)
         _write_concept_daily_snapshot_items(merged_items, actual_trade_date)
         if _has_concept_snapshot_metrics_for_ids(merged_items, concept_ids):
-            return sorted([item for item in merged_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[:actual_limit]
-        return sorted([item for item in merged_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[:actual_limit]
+            return sorted([item for item in merged_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
+        return sorted([item for item in merged_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
 
     def get_categories(self, parent_code: str, level: int | None) -> list[ConceptCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}

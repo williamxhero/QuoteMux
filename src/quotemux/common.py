@@ -9,7 +9,20 @@ from pydantic import BaseModel
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 5000
 MARKET_DAILY_SNAPSHOT_LIMIT = 10000
+
+
+def _bar_times(start_hour: int, start_minute: int, end_hour: int, end_minute: int) -> tuple[str, ...]:
+    current = start_hour * 60 + start_minute
+    end = end_hour * 60 + end_minute
+    items: list[str] = []
+    while current <= end:
+        items.append(f"{current // 60:02d}:{current % 60:02d}:00")
+        current += 1
+    return tuple(items)
+
+
 EXPECTED_INTRADAY_BAR_TIMES = {
+    "1m": _bar_times(9, 31, 11, 30) + _bar_times(13, 1, 15, 0),
     "30m": ("09:30:00", "10:00:00", "10:30:00", "11:00:00", "11:30:00", "13:00:00", "13:30:00", "14:00:00", "14:30:00", "15:00:00"),
 }
 

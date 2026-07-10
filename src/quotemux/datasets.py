@@ -157,8 +157,8 @@ class QuoteMuxDatasets:
             [],
             ("code", "trade_time", "freq"),
             lambda current_items: [([normalize_stock_code(code)], _trade_date_text(start_date), _trade_date_text(end_date))] if current_items == [] else [],
-            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_STOCK_INTRADAY, handlers, ("opentdx", "efinance", "mootdx", "akshare")),
-            self._settings.get_contract_source_order(CONTRACT_STOCK_INTRADAY, ("opentdx", "efinance", "mootdx", "akshare")),
+            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_STOCK_INTRADAY, handlers, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order(CONTRACT_STOCK_INTRADAY, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
         )
         frame = _stock_items_to_frame(items)
         if frame.empty:
@@ -211,8 +211,8 @@ class QuoteMuxDatasets:
             base_items,
             ("code", "trade_time", "freq"),
             lambda items: [([str(request.code).zfill(6)], _trade_date_text(request.start_date), _trade_date_text(request.end_date))] if _needs_more(items) else [],
-            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_STOCK_INTRADAY, handlers, ("opentdx", "efinance", "mootdx", "akshare")),
-            self._settings.get_contract_source_order(CONTRACT_STOCK_INTRADAY, ("opentdx", "efinance", "mootdx", "akshare")),
+            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_STOCK_INTRADAY, handlers, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
+            self._settings.get_contract_source_order(CONTRACT_STOCK_INTRADAY, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
         )
         out = _stock_items_to_frame(merged_items)
         out = out[["bar_time", "open", "high", "low", "close", "volume", "amount"]]

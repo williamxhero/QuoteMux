@@ -22,6 +22,7 @@ def _policy(capability_id: str, capture_enabled: bool, capture_cadence: str, cac
 
 
 CAPABILITY_UPDATE_POLICY_DEFAULTS = (
+    _policy("boards.quotes.daily", True, "daily", 30),
     _policy("concepts.catalog", True, "monthly", 365),
     _policy("concepts.indicators.money_flow", True, "daily", 180),
     _policy("concepts.indicators.money_flow.snapshot", True, "daily", 180),

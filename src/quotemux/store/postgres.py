@@ -96,7 +96,7 @@ class DefaultCachePolicySpec:
 def _time_field_for_capability(capability_id: str) -> str:
     if capability_id in {"markets.trading.open_auctions", "stocks.quotes.auctions"}:
         return "trade_date"
-    if capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday", "stocks.quotes.daily_snapshot", "indexes.quotes.daily"}:
+    if capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday", "stocks.quotes.daily_snapshot", "indexes.quotes.daily", "boards.quotes.daily"}:
         return "trade_time"
     if capability_id.startswith("concepts.quotes.") or capability_id.startswith("markets.trading.open_auctions"):
         return "trade_time"
@@ -168,6 +168,8 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("index_code", "freq")
     if capability_id.startswith("concepts.quotes."):
         return ("concept_id", "freq")
+    if capability_id.startswith("boards.quotes."):
+        return ("board_code", "freq")
     if capability_id.startswith("concepts.members"):
         return ("concept_id", "code")
     if capability_id == "indexes.members":
@@ -298,6 +300,8 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("index_code", "freq")
     if capability_id.startswith("concepts.quotes."):
         return ("concept_id", "freq")
+    if capability_id.startswith("boards.quotes."):
+        return ("board_code", "freq")
     if capability_id.startswith("concepts.members"):
         return ("concept_id",)
     if capability_id == "indexes.members":
@@ -356,7 +360,7 @@ def _coverage_mode_for_capability(capability_id: str) -> str:
         return "snapshot"
     if capability_id == "stocks.quotes.intraday":
         return "minute_range"
-    if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily", "concepts.quotes.daily"}:
+    if capability_id in {"stocks.quotes.daily", "indexes.quotes.daily", "concepts.quotes.daily", "boards.quotes.daily"}:
         return "trading_day_range"
     if capability_id.startswith("stocks.finance."):
         return "period_range"

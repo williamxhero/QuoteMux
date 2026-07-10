@@ -4,7 +4,7 @@ from typing import Callable, Sequence
 
 from pydantic import BaseModel
 
-from platform_models import ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
+from platform_models import BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 
@@ -297,6 +297,61 @@ def _upsert_concept_daily(items: Sequence[ConceptQuoteItem]) -> bool:
     )
 
 
+def _upsert_board_daily(items: Sequence[BoardQuoteItem]) -> bool:
+    if not _table_exists("fact", "board_daily_1d"):
+        return False
+    existing_columns = _existing_columns("fact", "board_daily_1d")
+    optional_columns = tuple(column_name for column_name in ("pre_close", "change", "pct_chg") if column_name in existing_columns)
+    params: list[tuple[object, ...]] = []
+    board_params: list[tuple[object, ...]] = []
+    trade_dates: set[str] = set()
+    for item in items:
+        if item.freq != "1d":
+            continue
+        trade_date = format_date_value(item.trade_time)
+        if item.board_code == "" or trade_date == "":
+            continue
+        trade_dates.add(trade_date)
+        optional_values = tuple(getattr(item, column_name) for column_name in optional_columns)
+        params.append((item.board_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
+        board_params.append((item.board_code, item.board_name, "industry"))
+    for trade_date in sorted(trade_dates):
+        if not execute_sql(
+            "delete from fact.board_daily_1d where trade_date = %s::date and board_code like 'INDUSTRY:%'",
+            (trade_date,),
+        ):
+            return False
+    if not execute_many(
+        """
+        insert into ref.board (board_code, name, board_type)
+        values (%s, %s, %s)
+        on conflict (board_code) do update set
+            name = excluded.name,
+            board_type = excluded.board_type,
+            updated_at = now()
+        """,
+        list(dict.fromkeys(board_params)),
+    ):
+        return False
+    optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
+    optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
+    return execute_many(
+        f"""
+        insert into fact.board_daily_1d (board_code, trade_date, open, high, low, close, volume, amount{optional_column_sql})
+        values (%s, %s::date, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
+        on conflict (board_code, trade_date) do update set
+            open = excluded.open,
+            high = excluded.high,
+            low = excluded.low,
+            close = excluded.close,
+            volume = excluded.volume,
+            amount = excluded.amount{_optional_update_assignments(existing_columns, optional_columns)},
+            loaded_at = now()
+        """,
+        params,
+    )
+
+
 def _upsert_trading_calendar(items: Sequence[TradingCalendarItem]) -> bool:
     params: list[tuple[object, ...]] = []
     for item in items:
@@ -322,14 +377,16 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         if code == "":
             continue
         market = _exchange_to_ref(item.exchange or item.market or _stock_market(code))
-        params.append((market, code, item.name, item.industry, format_date_value(item.list_date), _stock_status_to_delisted_date(item), item.area))
+        listing_board = item.listing_board or item.market
+        params.append((market, code, item.name, item.industry, listing_board, format_date_value(item.list_date), _stock_status_to_delisted_date(item), item.area))
     return execute_many(
         """
-        insert into ref.stock (market, code, name, industry, listed_date, delisted_date, area)
-        values (%s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s)
+        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area)
+        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s)
         on conflict (market, code) do update set
             name = excluded.name,
             industry = excluded.industry,
+            listing_board = excluded.listing_board,
             listed_date = excluded.listed_date,
             delisted_date = excluded.delisted_date,
             area = excluded.area,
@@ -485,6 +542,7 @@ def get_fact_ref_writer(capability_id: str) -> Callable[[list[BaseModel]], bool]
         "stocks.quotes.daily": _upsert_stock_daily,
         "stocks.quotes.intraday": _upsert_stock_intraday,
         "stocks.quotes.daily_snapshot": _upsert_stock_daily,
+        "boards.quotes.daily": _upsert_board_daily,
         "indexes.quotes.daily": _upsert_index_daily,
         "concepts.quotes.daily": _upsert_concept_daily,
         "markets.calendar.trading": _upsert_trading_calendar,

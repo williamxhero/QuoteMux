@@ -157,6 +157,7 @@ DERIVED_CAPABILITY_BASE_IDS = {
 }
 
 STORE_TARGET_CAPABILITIES = {
+    "boards.quotes.daily",
     "stocks.quotes.intraday",
     "stocks.quotes.daily",
     "stocks.quotes.daily_snapshot",
@@ -165,6 +166,8 @@ STORE_TARGET_CAPABILITIES = {
     "markets.calendar.trading",
     "markets.events.news",
 }
+
+INTERNAL_CAPABILITY_IDS = ("boards.quotes.daily",)
 
 _API_PATHS_BY_CAPABILITY: dict[str, list[str]] = {}
 for binding in PUBLIC_API_CAPABILITY_BINDINGS:
@@ -226,6 +229,8 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
         return ("code", "trade_date")
     if capability_id.startswith("concepts.quotes."):
         return ("concept_id", "trade_time", "freq")
+    if capability_id.startswith("boards.quotes."):
+        return ("board_code", "trade_time", "freq")
     if capability_id == "concepts.indicators.money_flow":
         return ("concept_id", "trade_date", "scope")
     if capability_id == "concepts.indicators.money_flow.snapshot":
@@ -262,8 +267,10 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("derived_core",)
     if capability_id.startswith("concepts.alias."):
         return ("derived_core",)
+    if capability_id == "boards.quotes.daily":
+        return ("derived_core",)
     if capability_id == "stocks.quotes.intraday":
-        return ("opentdx", "efinance", "mootdx", "akshare")
+        return ("tushare", "opentdx", "efinance", "mootdx", "akshare")
     if capability_id == "stocks.quotes.daily":
         return ("tushare", "efinance", "mootdx", "akshare", "opentdx")
     if capability_id == "indexes.quotes.daily":
@@ -357,6 +364,8 @@ def _infer_source_order(capability_id: str) -> tuple[str, ...]:
         return ("derived_core",)
     if capability_id.startswith("concepts.alias."):
         return ("derived_core",)
+    if capability_id == "boards.quotes.daily":
+        return ("derived_core",)
     return _infer_allowed_packages(capability_id)
 
 
@@ -374,12 +383,14 @@ def _infer_freshness_seconds(capability_id: str) -> int:
 
 def _build_capability_definitions() -> tuple[CapabilityDefinition, ...]:
     definitions: list[CapabilityDefinition] = []
-    for capability_id in sorted(_API_PATHS_BY_CAPABILITY):
+    capability_ids = set(_API_PATHS_BY_CAPABILITY)
+    capability_ids.update(INTERNAL_CAPABILITY_IDS)
+    for capability_id in sorted(capability_ids):
         result_shape = _infer_result_shape(capability_id)
         definitions.append(
             CapabilityDefinition(
                 capability_id=capability_id,
-                api_paths=tuple(_API_PATHS_BY_CAPABILITY[capability_id]),
+                api_paths=tuple(_API_PATHS_BY_CAPABILITY.get(capability_id, ())),
                 result_shape=result_shape,
                 key_fields=_infer_key_fields(capability_id),
                 default_merge_strategy=_default_merge_strategy(result_shape),

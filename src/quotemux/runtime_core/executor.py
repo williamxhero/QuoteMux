@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 import inspect
+import threading
 import time
 from typing import Callable, Generic, Mapping, Sequence, TypeVar
 
@@ -98,6 +99,19 @@ class ProviderFetchResult(Generic[T]):
     @property
     def fetched_row_count(self) -> int:
         return len(self.items)
+
+
+@dataclass(frozen=True)
+class _ProviderCooldownState:
+    consecutive_errors: int
+    until: float
+
+
+PROVIDER_COOLDOWN_ERROR_THRESHOLD = 3
+PROVIDER_COOLDOWN_SECONDS = 300.0
+
+_PROVIDER_COOLDOWN_LOCK = threading.Lock()
+_PROVIDER_COOLDOWNS: dict[tuple[str, str], _ProviderCooldownState] = {}
 
 
 @dataclass(frozen=True)

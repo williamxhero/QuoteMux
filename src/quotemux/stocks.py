@@ -635,7 +635,7 @@ def _build_steps(freq: str, request_freq: str, request_count: int | None, actual
     if freq in {"1d", "1w", "1mo"}:
         fallback_order = ("tushare", "efinance", "mootdx", "akshare", "opentdx")
     else:
-        fallback_order = ("opentdx", "efinance", "mootdx", "akshare")
+        fallback_order = ("tushare", "opentdx", "efinance", "mootdx", "akshare")
     capability_id = "stocks.quotes.daily" if freq in {"1d", "1w", "1mo"} else "stocks.quotes.intraday"
     return SourceInstanceExecutor(settings).build_steps(capability_id, handlers, fallback_order)
 
@@ -781,7 +781,7 @@ class QuoteMuxStocks:
                 sort_fields=("code", "trade_time"),
                 request_builder=lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings),
                 provider_steps=lambda: _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
-                source_order=self._settings.get_contract_source_order(contract_name, ("tushare", "efinance", "mootdx", "akshare", "opentdx")),
+                source_order=self._settings.get_contract_source_order(contract_name, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
                 base_items=local_items,
                 base_source_name="fact.stock_daily_1d" if request_freq == "1d" else ("fact.stock_bar_30m" if request_freq == "30m" else "fact.stock_bar_1m"),
                 store_enabled=store_enabled,
