@@ -317,7 +317,7 @@ def _upsert_board_daily(items: Sequence[BoardQuoteItem]) -> bool:
         board_params.append((item.board_code, item.board_name, "industry"))
     for trade_date in sorted(trade_dates):
         if not execute_sql(
-            "delete from fact.board_daily_1d where trade_date = %s::date and board_code like 'INDUSTRY:%'",
+            "delete from fact.board_daily_1d where trade_date = %s::date and left(board_code, 9) = 'INDUSTRY:'",
             (trade_date,),
         ):
             return False
