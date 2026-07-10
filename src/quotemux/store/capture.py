@@ -776,6 +776,82 @@ def _single_point_missing(capability_id: str, request_identity: dict[str, object
     return _date_missing_ranges(capability_id, request_identity, (time_start.strftime("%Y-%m-%d"),)) != ()
 
 
+def _fact_daily_count(table_name: str, trade_date: str, where_sql: str = "") -> int:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date == "":
+        return 0
+    query = f"select count(*) as row_count from {table_name} where trade_date = %s::date {where_sql}"
+    frame = query_dataframe(query, (actual_trade_date,))
+    if _is_empty_dataframe(frame):
+        return 0
+    return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
+
+
+def _recent_concept_daily_count(trade_date: str) -> int:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date == "":
+        return 0
+    frame = query_dataframe(
+        """
+        select coalesce(max(day_count), 0) as row_count
+        from (
+            select count(*) as day_count
+            from fact.concept_daily_1d
+            where trade_date < %s::date
+              and trade_date >= %s::date - interval '45 days'
+            group by trade_date
+        ) daily_counts
+        """,
+        (actual_trade_date, actual_trade_date),
+    )
+    if _is_empty_dataframe(frame):
+        return 0
+    return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
+
+
+def _recent_concept_daily_ids(trade_date: str) -> tuple[str, ...]:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date == "":
+        return ()
+    frame = query_dataframe(
+        """
+        with daily_counts as (
+            select trade_date, count(*) as day_count
+            from fact.concept_daily_1d
+            where trade_date < %s::date
+              and trade_date >= %s::date - interval '45 days'
+            group by trade_date
+            order by day_count desc, trade_date desc
+            limit 1
+        )
+        select fact_rows.concept_id
+        from fact.concept_daily_1d fact_rows
+        join daily_counts daily on daily.trade_date = fact_rows.trade_date
+        order by fact_rows.concept_id
+        """,
+        (actual_trade_date, actual_trade_date),
+    )
+    if _is_empty_dataframe(frame):
+        return _concept_ids()
+    return tuple(str(row["concept_id"]) for row in frame.to_dict("records") if str(row["concept_id"]) != "")
+
+
+def _daily_count_complete(actual_count: int, expected_count: int) -> bool:
+    if actual_count <= 0:
+        return False
+    if expected_count <= 0:
+        return True
+    return actual_count >= int(expected_count * 0.9)
+
+
+def _concept_daily_fact_missing(trade_date: str) -> bool:
+    return not _daily_count_complete(_fact_daily_count("fact.concept_daily_1d", trade_date), _recent_concept_daily_count(trade_date))
+
+
+def _board_daily_fact_missing(trade_date: str) -> bool:
+    return not _daily_count_complete(_fact_daily_count("fact.board_daily_1d", trade_date, "and left(board_code, 9) = 'INDUSTRY:'"), _industry_count())
+
+
 def _report_period_dates(periods: Sequence[str]) -> tuple[str, ...]:
     return tuple(format_date_value(item) for item in periods if format_date_value(item) != "")
 
@@ -954,11 +1030,30 @@ def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: d
 
 def _concept_quote_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
-    return tuple(
-        CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
-        for trade_date in trading_days
-        if _single_date_missing(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
-    )
+    requests: list[CaptureRequest] = []
+    for trade_date in trading_days:
+        if not _concept_daily_fact_missing(trade_date):
+            continue
+        concept_ids = _recent_concept_daily_ids(trade_date)
+        if concept_ids == ():
+            continue
+        requests.append(
+            CaptureRequest(
+                capability_id,
+                {
+                    "concept_ids": list(concept_ids),
+                    "freq": "1d",
+                    "trade_date": "",
+                    "start_date": trade_date,
+                    "end_date": trade_date,
+                    "start_time": "",
+                    "end_time": "",
+                    "count": None,
+                    "limit": max(5000, len(concept_ids)),
+                },
+            )
+        )
+    return tuple(requests)
 
 
 def _board_quote_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -978,7 +1073,7 @@ def _board_quote_requests(policy: CapturePolicy, capability_id: str, now: dateti
             },
         )
         for trade_date in trading_days
-        if _single_date_missing(capability_id, {"board_code": "", "freq": "1d", "trade_date": trade_date})
+        if _board_daily_fact_missing(trade_date)
     )
 
 
@@ -1690,6 +1785,10 @@ class QuoteMuxCaptureJob:
             failed_batches.append({"request_identity": {}, "error": "股票 1m 分钟线本轮未获取到任何数据"})
         if policy.capability_id == "stocks.quotes.intraday" and row_count > 0 and coverage_count == 0:
             failed_batches.append({"request_identity": {}, "error": "股票 1m 分钟线本轮未写入 fact.stock_bar_1m"})
+        if policy.capability_id in {"concepts.quotes.daily", "boards.quotes.daily"} and requests != () and row_count == 0:
+            failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未获取到任何数据"})
+        if policy.capability_id in {"concepts.quotes.daily", "boards.quotes.daily"} and row_count > 0 and coverage_count == 0:
+            failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未写入事实表"})
         return CaptureExecutionResult(row_count, coverage_count, tuple(failed_batches))
 
     def _run_runtime_request(self, request: CaptureRequest):
@@ -1711,14 +1810,17 @@ class QuoteMuxCaptureJob:
         if request.capability_id == "indexes.members":
             return self._runtime.indexes.get_members_with_report(IndexMembersRequest(**request.request_identity))
         if request.capability_id == "concepts.quotes.daily":
-            items = self._normalize_runtime_items(self._runtime.concepts.get_market_daily_snapshot(**request.request_identity))
-            expected_count = len(_concept_ids())
+            if "concept_ids" in request.request_identity:
+                items = self._normalize_runtime_items(self._runtime.concepts.get_quotes(**request.request_identity))
+            else:
+                items = self._normalize_runtime_items(self._runtime.concepts.get_market_daily_snapshot(**request.request_identity))
+            expected_count = len(request.request_identity.get("concept_ids", [])) if "concept_ids" in request.request_identity else _recent_concept_daily_count(str(request.request_identity.get("trade_date", "")))
             if expected_count > 0 and len(items) < int(expected_count * 0.9):
                 raise RuntimeError(f"概念日线快照覆盖不完整: expected={expected_count} actual={len(items)}")
             normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
-            write_result = store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
-            self._write_fact_ref_items(request.capability_id, normalized_items)
-            return normalized_items, _CaptureRuntimeReport("concepts.quotes.daily", write_result.coverage_count)
+            store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
+            fact_write_count = self._write_fact_ref_items(request.capability_id, normalized_items)
+            return normalized_items, _CaptureRuntimeReport("concepts.quotes.daily", fact_write_count)
         if request.capability_id == "boards.quotes.daily":
             handler = get_default_source_package_registry().get_handler("derived_core", "get_industry_board_quotes")
             items = self._normalize_runtime_items(handler(**request.request_identity))
@@ -1726,9 +1828,9 @@ class QuoteMuxCaptureJob:
             if expected_count > 0 and len(items) < int(expected_count * 0.9):
                 raise RuntimeError(f"行业板块日线快照覆盖不完整: expected={expected_count} actual={len(items)}")
             normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
-            write_result = store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
-            self._write_fact_ref_items(request.capability_id, normalized_items)
-            return normalized_items, _CaptureRuntimeReport("boards.quotes.daily", write_result.coverage_count)
+            store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
+            fact_write_count = self._write_fact_ref_items(request.capability_id, normalized_items)
+            return normalized_items, _CaptureRuntimeReport("boards.quotes.daily", fact_write_count)
         if request.capability_id == "concepts.members":
             items = self._normalize_runtime_items(self._runtime.concepts.get_members(**request.request_identity))
             normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)

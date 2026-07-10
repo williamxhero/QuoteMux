@@ -405,11 +405,11 @@ def _has_explicit_quote_window(request: StockQuotesRequest) -> bool:
     return request.trade_date != "" or request.start_date != "" or request.end_date != "" or request.start_time != "" or request.end_time != ""
 
 
-def _missing_ranges_are_current_or_future(missing_requests: list[tuple[list[str], str, str]]) -> bool:
+def _missing_ranges_are_future(missing_requests: list[tuple[list[str], str, str]]) -> bool:
     today_text = _today_text()
     for _, missing_start, missing_end in missing_requests:
         missing_date = missing_end or missing_start
-        if missing_date == "" or missing_date < today_text:
+        if missing_date == "" or missing_date <= today_text:
             return False
     return True
 
@@ -419,7 +419,43 @@ def _should_return_local_daily(request: StockQuotesRequest, missing_requests: li
         return True
     if not _has_explicit_quote_window(request):
         return False
-    return _missing_ranges_are_current_or_future(missing_requests)
+    return _missing_ranges_are_future(missing_requests)
+
+
+def _missing_daily_placeholder_keys(missing_requests: list[tuple[list[str], str, str]]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for codes, missing_start, missing_end in missing_requests:
+        start_day = parse_date_text(missing_start)
+        end_day = parse_date_text(missing_end or missing_start)
+        if start_day is None or end_day is None or start_day > end_day:
+            continue
+        current_day = start_day
+        while current_day <= end_day:
+            trade_date = current_day.strftime("%Y-%m-%d")
+            for code in codes:
+                normalized_code = normalize_stock_code(code)
+                if normalized_code != "":
+                    keys.add((normalized_code.zfill(6), trade_date))
+            current_day += timedelta(days=1)
+    return keys
+
+
+def _drop_missing_daily_placeholders(items: list[StockQuoteItem], missing_requests: list[tuple[list[str], str, str]]) -> list[StockQuoteItem]:
+    placeholder_keys = _missing_daily_placeholder_keys(missing_requests)
+    if placeholder_keys == set():
+        return items
+    return [
+        item
+        for item in items
+        if not (
+            _is_suspended_zero_amount_daily_item(item)
+            and (normalize_stock_code(item.code).zfill(6), format_date_value(item.trade_time)) in placeholder_keys
+        )
+    ]
+
+
+def _drop_daily_snapshot_placeholders(trade_date: str, items: list[StockQuoteItem]) -> list[StockQuoteItem]:
+    return [item for item in items if not _is_snapshot_placeholder(item, trade_date)]
 
 
 def _filter_suspended_quote_items(items: list[StockQuoteItem], skip_suspended: bool, fill_missing: bool, freq: str) -> list[StockQuoteItem]:
@@ -510,7 +546,7 @@ def _build_missing_quote_requests(
         expected_trade_times = _expected_quote_trade_times(freq, expected_trade_dates)
         for code in codes:
             code_items = [item for item in current_items if item.code == code and item.freq == freq]
-            existing_dates = {_quote_item_date(item) for item in code_items}
+            existing_dates = {_quote_item_date(item) for item in code_items if not _is_suspended_zero_amount_daily_item(item)}
             if expected_trade_times:
                 missing_times = [str(key[1]) for key in _missing_quote_time_keys(code, freq, expected_trade_times, code_items)]
                 missing_ranges = _build_missing_time_date_ranges(expected_trade_dates, missing_times)
@@ -536,7 +572,7 @@ def _build_missing_quote_requests(
     expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings)
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
-        existing_dates = {_quote_item_date(item) for item in current_items if item.code == code and item.freq == "1d"}
+        existing_dates = {_quote_item_date(item) for item in current_items if item.code == code and item.freq == "1d" and not _is_suspended_zero_amount_daily_item(item)}
         missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
             missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
@@ -547,6 +583,21 @@ def _build_missing_quote_requests(
 
 def _has_complete_stock_snapshot_item(item: StockQuoteItem) -> bool:
     return item.close is not None and item.pre_close is not None and item.pct_chg is not None and item.amount is not None
+
+
+def _is_suspended_zero_amount_daily_item(item: StockQuoteItem) -> bool:
+    return item.freq == "1d" and item.is_suspended and (item.amount is None or item.amount == 0)
+
+
+def _is_snapshot_placeholder(item: StockQuoteItem, trade_date: str) -> bool:
+    return format_date_value(item.trade_time) == trade_date and _is_suspended_zero_amount_daily_item(item)
+
+
+def _has_market_wide_snapshot_placeholders(trade_date: str, items: list[StockQuoteItem], active_count: int) -> bool:
+    if active_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD:
+        return False
+    placeholder_count = sum(1 for item in items if _is_snapshot_placeholder(item, trade_date))
+    return placeholder_count >= int(active_count * 0.9)
 
 
 def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[str]:
@@ -560,6 +611,9 @@ def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit:
 
 
 def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[tuple[list[str], str]]:
+    active_frame = load_stock_active_codes_frame(trade_date)
+    if not active_frame.empty and _has_market_wide_snapshot_placeholders(trade_date, items, len(active_frame)):
+        return [([], trade_date)]
     missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset)
     if missing_codes != []:
         if offset == 0 and len(missing_codes) >= SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD:
@@ -574,6 +628,8 @@ def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem]
     active_frame = load_stock_active_codes_frame(trade_date)
     if active_frame.empty:
         return
+    if _has_market_wide_snapshot_placeholders(trade_date, items, len(active_frame)):
+        raise RuntimeError(f"股票日线快照为全市场占位数据：trade_date={trade_date}")
     active_codes = {normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")}
     actual_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
     expected_count = min(len(active_codes), offset + limit)
@@ -770,8 +826,10 @@ class QuoteMuxStocks:
             local_missing_requests = _build_missing_quote_requests(request.codes, local_items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings)
             if _should_return_local_daily(request, local_missing_requests):
                 return _build_local_daily_query_result(contract_name, request, local_items, actual_freq, actual_limit, actual_adjust, request_freq, request_count, self._settings)
+            base_items = _drop_missing_daily_placeholders(local_items, local_missing_requests)
         else:
             local_items = get_local_stock_intraday_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count)
+            base_items = local_items
         merged_items, report = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id=contract_name,
@@ -782,7 +840,7 @@ class QuoteMuxStocks:
                 request_builder=lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings),
                 provider_steps=lambda: _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
                 source_order=self._settings.get_contract_source_order(contract_name, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
-                base_items=local_items,
+                base_items=base_items,
                 base_source_name="fact.stock_daily_1d" if request_freq == "1d" else ("fact.stock_bar_30m" if request_freq == "30m" else "fact.stock_bar_1m"),
                 store_enabled=store_enabled,
                 fact_ref_writer=fact_ref_writer,
@@ -808,6 +866,7 @@ class QuoteMuxStocks:
         if request.offset < 0:
             raise ValueError("offset 不能小于 0")
         local_items = get_local_stock_daily_snapshot_full(actual_trade_date)
+        base_items = _drop_daily_snapshot_placeholders(actual_trade_date, local_items)
         items, report = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="stocks.quotes.daily_snapshot",
@@ -818,7 +877,7 @@ class QuoteMuxStocks:
                 request_builder=lambda current_items: _build_snapshot_requests(actual_trade_date, current_items, request.limit, request.offset),
                 provider_steps=lambda: _build_daily_snapshot_steps(self._settings),
                 source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
-                base_items=local_items,
+                base_items=base_items,
                 base_source_name="fact.stock_daily_1d",
                 fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
             )
