@@ -787,6 +787,30 @@ def _fact_daily_count(table_name: str, trade_date: str, where_sql: str = "") -> 
     return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
 
 
+def _complete_board_daily_count(trade_date: str) -> int:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date == "":
+        return 0
+    frame = query_dataframe(
+        """
+        select count(*) as row_count
+        from fact.board_daily_1d
+        where trade_date = %s::date
+          and left(board_code, 9) = 'INDUSTRY:'
+          and open is not null
+          and high is not null
+          and low is not null
+          and close is not null
+          and pre_close is not null
+          and change is not null
+        """,
+        (actual_trade_date,),
+    )
+    if _is_empty_dataframe(frame):
+        return 0
+    return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
+
+
 def _recent_concept_daily_count(trade_date: str) -> int:
     actual_trade_date = format_date_value(trade_date)
     if actual_trade_date == "":
@@ -849,7 +873,7 @@ def _concept_daily_fact_missing(trade_date: str) -> bool:
 
 
 def _board_daily_fact_missing(trade_date: str) -> bool:
-    return not _daily_count_complete(_fact_daily_count("fact.board_daily_1d", trade_date, "and left(board_code, 9) = 'INDUSTRY:'"), _industry_count())
+    return not _daily_count_complete(_complete_board_daily_count(trade_date), _industry_count())
 
 
 def _report_period_dates(periods: Sequence[str]) -> tuple[str, ...]:

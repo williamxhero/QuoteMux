@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quotemux.infra.common import stock_market_name
 from quotemux.infra.db.client import execute_many, query_dataframe
 
 
@@ -57,9 +58,9 @@ def _daily_metric_selects(existing_columns: set[str], row_alias: str) -> str:
 def _canonical_stock_market_condition(row_alias: str) -> str:
     return f"""
                 (
-                    ({row_alias}.market = 'SHSE' and left({row_alias}.code, 1) = '6')
-                    or ({row_alias}.market = 'BJSE' and left({row_alias}.code, 1) in ('4', '8', '9'))
-                    or ({row_alias}.market = 'SZSE' and left({row_alias}.code, 1) not in ('4', '6', '8', '9'))
+                    ({row_alias}.market = 'SHSE' and (left({row_alias}.code, 1) in ('5', '6') or left({row_alias}.code, 3) = '900'))
+                    or ({row_alias}.market = 'BJSE' and (left({row_alias}.code, 1) in ('4', '8') or left({row_alias}.code, 3) = '920'))
+                    or ({row_alias}.market = 'SZSE' and left({row_alias}.code, 1) not in ('4', '5', '6', '8', '9'))
                 )
     """
 
@@ -302,11 +303,7 @@ def load_stock_bar_30m_frame(codes: list[str], start_time: object, end_time: obj
 
 
 def _stock_market(code: str) -> str:
-    if code.startswith("6"):
-        return "SHSE"
-    if code.startswith(("4", "8", "9")):
-        return "BJSE"
-    return "SZSE"
+    return stock_market_name(code)
 
 
 def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:

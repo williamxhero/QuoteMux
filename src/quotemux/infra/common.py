@@ -153,7 +153,7 @@ def stock_code_to_ts(code: str) -> str:
     normalized = normalize_stock_code(code)
     if not normalized:
         return ""
-    if normalized.startswith(("4", "8")):
+    if normalized.startswith(("4", "8", "920")):
         return f"{normalized}.BJ"
     if normalized.startswith(("5", "6", "9")):
         return f"{normalized}.SH"
@@ -164,7 +164,7 @@ def stock_code_to_gm(code: str) -> str:
     normalized = normalize_stock_code(code)
     if not normalized:
         return ""
-    if normalized.startswith(("4", "8")):
+    if normalized.startswith(("4", "8", "920")):
         return f"BJSE.{normalized}"
     if normalized.startswith(("5", "6", "9")):
         return f"SHSE.{normalized}"
@@ -173,7 +173,7 @@ def stock_code_to_gm(code: str) -> str:
 
 def stock_market_name(code: str) -> str:
     normalized = normalize_stock_code(code)
-    if normalized.startswith(("4", "8")):
+    if normalized.startswith(("4", "8", "920")):
         return "BJSE"
     if normalized.startswith(("5", "6", "9")):
         return "SHSE"

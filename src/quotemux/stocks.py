@@ -883,13 +883,14 @@ class QuoteMuxStocks:
             )
         )
         placeholder_items = _build_missing_snapshot_placeholders(actual_trade_date, items)
+        candidate_items = sort_items([*items, *placeholder_items], ("code", "trade_time"))
+        _assert_daily_snapshot_coverage(actual_trade_date, candidate_items, request.limit, request.offset)
         if placeholder_items != []:
             writer = get_fact_ref_writer("stocks.quotes.daily_snapshot")
             if writer is not None:
                 writer(placeholder_items)
-            items = sort_items([*items, *placeholder_items], ("code", "trade_time"))
+            items = candidate_items
         filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
-        _assert_daily_snapshot_coverage(actual_trade_date, items, request.limit, request.offset)
         return filtered_items[request.offset: request.offset + request.limit], report
     def get_daily_local_window(self, request: StockDailyLocalWindowRequest) -> list[StockQuoteItem]:
         actual_start_date = format_date_value(request.start_date)

@@ -52,7 +52,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("markets.trading.sessions", False, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("rankings.research.broker_monthly_picks", True, "weekly", 180),
     _policy("rankings.research.reports", True, "daily", 90),
-    _policy("stocks.catalog", True, "monthly", 365),
+    _policy("stocks.catalog", True, "daily", 365),
     _policy("stocks.catalog.archive", True, "monthly", 365),
     _policy("stocks.corporate_actions.dividends", False, "daily", 365),
     _policy("stocks.corporate_actions.repurchases", False, "daily", 365),

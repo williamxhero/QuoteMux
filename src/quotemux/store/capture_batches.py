@@ -38,7 +38,7 @@ FIRST_BATCH_CAPTURE_POLICIES = (
     FirstBatchCapturePolicy("concepts.quotes.daily", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 30, 1, "第一批：题材概念日线，每天补最近 30 个交易日快照"),
     FirstBatchCapturePolicy("markets.calendar.trading", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 2, 1, "第一批：交易日历，每月维护当前和下一年度窗口"),
     FirstBatchCapturePolicy("markets.trading.sessions", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：交易时段，低频参考数据"),
-    FirstBatchCapturePolicy("stocks.catalog", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：股票目录，采集股票范围依赖"),
+    FirstBatchCapturePolicy("stocks.catalog", CADENCE_DAILY, DEFAULT_RUN_TIME, None, None, None, 1, 1, "第一批：股票目录，每日同步新上市和退市状态"),
     FirstBatchCapturePolicy("stocks.catalog.archive", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：股票目录归档，采集股票范围依赖"),
     FirstBatchCapturePolicy("stocks.profile.basic", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 100, "第一批：股票基础资料，目录和展示依赖"),
     FirstBatchCapturePolicy("stocks.reference.bse_code_mappings", CADENCE_MONTHLY, DEFAULT_RUN_TIME, None, None, 31, 1, 1, "第一批：北交所代码映射，低频参考数据"),

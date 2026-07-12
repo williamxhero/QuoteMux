@@ -133,7 +133,13 @@ def load_concept_catalog_frame(status_filter: str) -> pd.DataFrame:
 
 def load_concept_members_frame(concept_id: str, trade_date: str) -> pd.DataFrame:
     query = """
-        with target_rows as (
+        with available_trade_date as (
+            select 1
+            from fact.stock_daily_1d
+            where trade_date = %s::date
+            limit 1
+        ),
+        target_rows as (
             select
                 m.concept_id,
                 m.stock_market,
@@ -174,9 +180,17 @@ def load_concept_members_frame(concept_id: str, trade_date: str) -> pd.DataFrame
             select * from fallback_rows
         ) m
         left join ref.stock s on s.market = m.stock_market and s.code = m.stock_code
+        where not exists (select 1 from available_trade_date)
+           or exists (
+              select 1
+              from fact.stock_daily_1d d
+              where d.market = m.stock_market
+                and d.code = m.stock_code
+                and d.trade_date = %s::date
+           )
         order by m.stock_code
     """
-    return query_dataframe(query, (concept_id, trade_date, trade_date, concept_id, trade_date, concept_id))
+    return query_dataframe(query, (trade_date, concept_id, trade_date, trade_date, concept_id, trade_date, concept_id, trade_date))
 
 
 def load_index_catalog_frame(index_codes: list[str]) -> pd.DataFrame:

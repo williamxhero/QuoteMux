@@ -25,6 +25,7 @@ CONCEPT_MONEY_FLOW_SOURCE_ORDER = ("akshare", "tushare", "derived_core")
 CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER = ("akshare", "tushare", "derived_core")
 CONCEPT_CATEGORIES_SOURCE_ORDER = ("tushare", "akshare")
 CRAWLER_PROVIDER_CONCEPT_TYPES = {"ths", "em"}
+DERIVED_CONCEPT_SNAPSHOT_BATCH_SIZE = 100
 
 
 def _source_package_call(package_id: str, handler_name: str, *args: object) -> object:
@@ -425,9 +426,12 @@ class QuoteMuxConceptRuntime:
         requested_ids = [concept_id for concept_id in concept_ids if concept_id in groups_by_id]
         if requested_ids == []:
             return []
-        raw_items = _source_package_call("derived_core", "get_concept_quotes", requested_ids, "1d", trade_date, "", "", "", "", None)
-        if not isinstance(raw_items, list):
-            return []
+        raw_items: list[object] = []
+        for index in range(0, len(requested_ids), DERIVED_CONCEPT_SNAPSHOT_BATCH_SIZE):
+            batch_ids = requested_ids[index: index + DERIVED_CONCEPT_SNAPSHOT_BATCH_SIZE]
+            batch_items = _source_package_call("derived_core", "get_concept_quotes", batch_ids, "1d", trade_date, "", "", "", "", None)
+            if isinstance(batch_items, list):
+                raw_items.extend(batch_items)
         items: list[ConceptQuoteItem] = []
         for item in raw_items:
             if not isinstance(item, BoardQuoteItem):

@@ -5,8 +5,20 @@ from typing import Callable, Sequence
 from pydantic import BaseModel
 
 from platform_models import BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
-from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
+from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
+
+
+KNOWN_INDEX_CATALOG: dict[str, IndexCatalogItem] = {
+    "000001": IndexCatalogItem(index_code="000001", index_name="上证指数", category="broad_market", market="SHSE", publisher="SSE", status="active"),
+    "000300": IndexCatalogItem(index_code="000300", index_name="沪深300", category="broad_market", market="A_SHARE", publisher="CSI", status="active"),
+    "000688": IndexCatalogItem(index_code="000688", index_name="科创50", category="broad_market", market="SHSE", publisher="SSE", status="active"),
+    "000852": IndexCatalogItem(index_code="000852", index_name="中证1000", category="broad_market", market="A_SHARE", publisher="CSI", status="active"),
+    "000905": IndexCatalogItem(index_code="000905", index_name="中证500", category="broad_market", market="A_SHARE", publisher="CSI", status="active"),
+    "399001": IndexCatalogItem(index_code="399001", index_name="深证成指", category="broad_market", market="SZSE", publisher="SZSE", status="active"),
+    "399006": IndexCatalogItem(index_code="399006", index_name="创业板指", category="broad_market", market="SZSE", publisher="SZSE", status="active"),
+    "899050": IndexCatalogItem(index_code="899050", index_name="北证50", category="broad_market", market="BJSE", publisher="BSE", status="active"),
+}
 
 
 def _existing_columns(table_schema: str, table_name: str) -> set[str]:
@@ -69,11 +81,7 @@ def _ensure_concept_membership_table() -> bool:
 
 
 def _stock_market(code: str) -> str:
-    if code.startswith("6"):
-        return "SHSE"
-    if code.startswith(("4", "8", "9")):
-        return "BJSE"
-    return "SZSE"
+    return stock_market_name(code)
 
 
 def _exchange_to_ref(value: str) -> str:
@@ -93,6 +101,43 @@ def _stock_status_to_delisted_date(item: StockBasicInfo) -> str:
     if item.list_status.upper() in {"D", "DELISTED", "INACTIVE"}:
         return format_date_value(item.delist_date)
     return ""
+
+
+def _fallback_index_market(index_code: str) -> str:
+    if index_code.startswith(("0", "9")):
+        return "SHSE"
+    if index_code.startswith("3"):
+        return "SZSE"
+    if index_code.startswith("8"):
+        return "BJSE"
+    return ""
+
+
+def _index_catalog_from_quotes(items: Sequence[IndexQuoteItem]) -> list[IndexCatalogItem]:
+    index_codes = []
+    for item in items:
+        if item.freq != "1d":
+            continue
+        index_code = normalize_index_code(item.index_code)
+        if index_code != "":
+            index_codes.append(index_code)
+    catalog_items: list[IndexCatalogItem] = []
+    for index_code in dict.fromkeys(index_codes):
+        known_item = KNOWN_INDEX_CATALOG.get(index_code)
+        if known_item is not None:
+            catalog_items.append(known_item)
+            continue
+        catalog_items.append(
+            IndexCatalogItem(
+                index_code=index_code,
+                index_name=index_code,
+                category="",
+                market=_fallback_index_market(index_code),
+                publisher="",
+                status="active",
+            )
+        )
+    return catalog_items
 
 
 def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
@@ -247,7 +292,7 @@ def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
         params.append((index_code, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
     optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
     optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
-    return execute_many(
+    daily_ok = execute_many(
         f"""
         insert into fact.index_bar_1d (index_code, trade_date, open, high, low, close, volume, amount{optional_column_sql})
         values (%s, %s::date, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
@@ -262,6 +307,9 @@ def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
         """,
         params,
     )
+    if not daily_ok:
+        return False
+    return _upsert_index_catalog(_index_catalog_from_quotes(items))
 
 
 def _upsert_concept_daily(items: Sequence[ConceptQuoteItem]) -> bool:
@@ -372,6 +420,8 @@ def _upsert_trading_calendar(items: Sequence[TradingCalendarItem]) -> bool:
 
 def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
     params: list[tuple[object, ...]] = []
+    existing_columns = _existing_columns("ref", "stock")
+    has_board_type = "board_type" in existing_columns
     for item in items:
         code = normalize_stock_code(item.code).zfill(6)
         if code == "":
@@ -379,17 +429,22 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         market = _exchange_to_ref(item.exchange or item.market or _stock_market(code))
         listing_board = item.listing_board or item.market
         params.append((market, code, item.name, item.industry, listing_board, format_date_value(item.list_date), _stock_status_to_delisted_date(item), item.area))
+    board_type_column_sql = ", board_type" if has_board_type else ""
+    board_type_value_sql = ", %s" if has_board_type else ""
+    update_board_type_sql = ",\n            board_type = excluded.board_type" if has_board_type else ""
+    if has_board_type:
+        params = [(*item, item[4]) for item in params]
     return execute_many(
-        """
-        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area)
-        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s)
+        f"""
+        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area{board_type_column_sql})
+        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s{board_type_value_sql})
         on conflict (market, code) do update set
             name = excluded.name,
             industry = excluded.industry,
             listing_board = excluded.listing_board,
             listed_date = excluded.listed_date,
             delisted_date = excluded.delisted_date,
-            area = excluded.area,
+            area = excluded.area{update_board_type_sql},
             updated_at = now()
         """,
         params,
@@ -452,17 +507,6 @@ def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
         params.append((item.concept_id, market, code, valid_from, item.weight))
         if item.name != "":
             stock_params.append((market, code, item.name))
-    members_ok = execute_many(
-        """
-        insert into ref.concept_stock_membership (concept_id, stock_market, stock_code, valid_from, valid_to, weight)
-        values (%s, %s, %s, %s::date, null, %s)
-        on conflict (concept_id, stock_market, stock_code, valid_from) do update set
-            valid_to = excluded.valid_to,
-            weight = excluded.weight,
-            updated_at = now()
-        """,
-        params,
-    )
     names_ok = execute_many(
         """
         insert into ref.stock (market, code, name)
@@ -473,7 +517,78 @@ def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
         """,
         stock_params,
     )
-    return members_ok and names_ok
+    if not names_ok:
+        return False
+    valid_params = _filter_concept_member_params(params)
+    members_ok = execute_many(
+        """
+        insert into ref.concept_stock_membership (concept_id, stock_market, stock_code, valid_from, valid_to, weight)
+        values (%s, %s, %s, %s::date, null, %s)
+        on conflict (concept_id, stock_market, stock_code, valid_from) do update set
+            valid_to = excluded.valid_to,
+            weight = excluded.weight,
+            updated_at = now()
+        """,
+        valid_params,
+    )
+    return members_ok
+
+
+def _filter_concept_member_params(params: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    if params == []:
+        return []
+    concept_ids = [str(item[0]) for item in params]
+    markets = [str(item[1]) for item in params]
+    codes = [str(item[2]) for item in params]
+    valid_froms = [str(item[3]) for item in params]
+    weights = [item[4] for item in params]
+    frame = query_dataframe(
+        """
+        with incoming as (
+            select *
+            from unnest(%s::text[], %s::text[], %s::text[], %s::date[], %s::double precision[])
+              as rows(concept_id, stock_market, stock_code, valid_from, weight)
+        )
+        select incoming.concept_id,
+               incoming.stock_market,
+               incoming.stock_code,
+               incoming.valid_from::text as valid_from,
+               incoming.weight
+        from incoming
+        where exists (
+            select 1
+            from ref.stock stock_ref
+            where stock_ref.market = incoming.stock_market
+              and stock_ref.code = incoming.stock_code
+        )
+          and (
+              incoming.valid_from = date '1900-01-01'
+              or exists (
+                  select 1
+                  from fact.stock_daily_1d daily_rows
+                  where daily_rows.market = incoming.stock_market
+                    and daily_rows.code = incoming.stock_code
+                    and daily_rows.trade_date = incoming.valid_from
+              )
+          )
+          and (
+              incoming.valid_from = date '1900-01-01'
+              or exists (
+                  select 1
+                  from fact.concept_daily_1d concept_rows
+                  where concept_rows.concept_id = incoming.concept_id
+                    and concept_rows.trade_date = incoming.valid_from
+              )
+          )
+        """,
+        (concept_ids, markets, codes, valid_froms, weights),
+    )
+    if frame.empty:
+        return []
+    return [
+        (row["concept_id"], row["stock_market"], row["stock_code"], row["valid_from"], row["weight"])
+        for row in frame.to_dict("records")
+    ]
 
 
 def _upsert_concept_member_history(items: Sequence[ConceptMemberHistoryItem]) -> bool:
