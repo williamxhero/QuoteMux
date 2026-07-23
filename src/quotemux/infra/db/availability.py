@@ -81,7 +81,13 @@ def _estimated_row_count(spec: FactRefObjectSpec) -> int:
     frame = query_dataframe("select greatest(reltuples::bigint, 0) as row_count from pg_class where oid = %s::regclass", (spec.full_name,))
     if frame.empty:
         return 0
-    return int(frame.iloc[0]["row_count"])
+    estimated_count = int(frame.iloc[0]["row_count"])
+    if estimated_count > 0:
+        return estimated_count
+    count_frame = query_dataframe(f"select count(*)::int as row_count from {spec.full_name}")
+    if count_frame.empty:
+        return 0
+    return int(count_frame.iloc[0]["row_count"] or 0)
 
 
 def _boundary_value(spec: FactRefObjectSpec, direction: str) -> str:

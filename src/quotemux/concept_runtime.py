@@ -678,7 +678,17 @@ class QuoteMuxConceptRuntime:
         provider_items: list[ConceptMoneyFlowItem] = []
         for alias in aliases:
             provider_scope = _concept_scope_for_provider(scope, alias)
-            raw_items = _source_package_call(alias.provider, "get_concept_money_flow", alias.board_code, trade_date, start_date, end_date, provider_scope)
+            raw_items = _timed_source_package_call(
+                self._settings,
+                "concepts.indicators.money_flow",
+                alias.provider,
+                "get_concept_money_flow",
+                alias.board_code,
+                trade_date,
+                start_date,
+                end_date,
+                provider_scope,
+            )
             if isinstance(raw_items, list):
                 provider_items.extend(_rewrite_provider_money_flow_items([item for item in raw_items if isinstance(item, BoardMoneyFlowItem)], alias, scope))
         merged_items = _merge_money_flow_items(provider_items)
@@ -699,7 +709,16 @@ class QuoteMuxConceptRuntime:
         items: list[ConceptMoneyFlowItem] = []
         source_order = self._source_order("concepts.indicators.money_flow.snapshot", CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER)
         for provider in source_order:
-            raw_items = _source_package_call(provider, "get_concept_daily_money_flow_snapshot", actual_trade_date, scope, MARKET_DAILY_SNAPSHOT_LIMIT, 0)
+            raw_items = _timed_source_package_call(
+                self._settings,
+                "concepts.indicators.money_flow.snapshot",
+                provider,
+                "get_concept_daily_money_flow_snapshot",
+                actual_trade_date,
+                scope,
+                MARKET_DAILY_SNAPSHOT_LIMIT,
+                0,
+            )
             if not isinstance(raw_items, list):
                 continue
             for item in raw_items:

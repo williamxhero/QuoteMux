@@ -9,6 +9,8 @@ import subprocess
 import sys
 
 from quotemux.source_packages.registry import clear_loaded_source_package_modules, refresh_default_source_package_registry
+from quotemux.source_packages.environment import ensure_package_environment, package_uses_isolated_environment
+from quotemux.source_packages.manifest import SourcePackageManifest
 
 
 import os
@@ -34,12 +36,19 @@ def install_all_packages() -> PackageInstallResult:
     refresh_default_source_package_registry()
     runtime = get_config_runtime()
     packages = runtime.refresh_source_packages()
+    _ensure_isolated_package_environments(packages)
     package_ids = tuple(manifest.package_id for manifest in packages)
     return PackageInstallResult(
         installed_package_ids=package_ids,
         visible_package_ids=package_ids,
         package_count=len(package_ids),
     )
+
+
+def _ensure_isolated_package_environments(packages: tuple[SourcePackageManifest, ...]) -> None:
+    for manifest in packages:
+        if package_uses_isolated_environment(manifest):
+            ensure_package_environment(manifest)
 
 
 def install_distribution_for_python(python_executable: str) -> None:

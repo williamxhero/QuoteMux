@@ -5,10 +5,11 @@ import math
 
 import pandas as pd
 
+from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import normalize_index_code, normalize_stock_code
 
 
-EXPECTED_MINUTE_BAR_COUNT = 242
+EXPECTED_MINUTE_BAR_COUNT = len(EXPECTED_INTRADAY_BAR_TIMES["1m"])
 
 
 def normalize_index_code_full(code: str) -> str:

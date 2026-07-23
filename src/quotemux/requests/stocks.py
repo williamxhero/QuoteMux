@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 from quotemux.infra.common import normalize_stock_code
@@ -19,6 +21,7 @@ class StockQuotesRequest(BaseModel):
     skip_suspended: bool = True
     skip_st: bool = False
     fill_missing: bool = False
+    meta_detail: Literal["summary", "full"] = "summary"
 
     @field_validator("codes", mode="before")
     @classmethod

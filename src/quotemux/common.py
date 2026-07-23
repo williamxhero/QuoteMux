@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 import pandas as pd
 from pydantic import BaseModel
@@ -31,6 +32,28 @@ def ensure_limit(limit: int) -> int:
     if limit < 1:
         raise ValueError("limit 必须大于 0")
     return limit
+
+
+def intraday_quote_cache_needs_refresh(
+    frame: pd.DataFrame,
+    freq: str,
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+    count: int | None,
+) -> bool:
+    if freq != "1m" or count is not None or start_dt is None or end_dt is None:
+        return False
+    if start_dt.date() != end_dt.date() or start_dt.time() != datetime.min.time() or end_dt.time() != datetime.max.time():
+        return False
+    if frame.empty or "trade_time" not in frame.columns:
+        return True
+    times = pd.to_datetime(frame["trade_time"], errors="coerce")
+    actual_times = {
+        item.strftime("%H:%M:%S")
+        for item in times.dropna()
+        if item.date() == start_dt.date()
+    }
+    return not set(EXPECTED_INTRADAY_BAR_TIMES["1m"]).issubset(actual_times)
 
 
 def merge_model_lists[T: BaseModel](high_priority: Sequence[T], low_priority: Sequence[T], key_fields: tuple[str, ...]) -> list[T]:

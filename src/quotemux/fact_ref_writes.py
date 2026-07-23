@@ -5,6 +5,7 @@ from typing import Callable, Sequence
 from pydantic import BaseModel
 
 from platform_models import BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
+from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 
@@ -189,7 +190,56 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
     )
     if not upsert_ok:
         return False
-    return _repair_stock_listed_dates_from_daily(list(dict.fromkeys(daily_codes)))
+    unique_codes = list(dict.fromkeys(daily_codes))
+    return _repair_stock_daily_reference_rows(unique_codes) and _repair_stock_listed_dates_from_daily(unique_codes) and _repair_stock_daily_metrics(unique_codes)
+
+
+def _repair_stock_daily_reference_rows(codes: Sequence[str]) -> bool:
+    if not codes:
+        return True
+    return execute_sql(
+        """
+        with target_codes as (
+            select unnest(%s::text[]) as code
+        ),
+        first_daily as (
+            select day_rows.market, day_rows.code, min(day_rows.trade_date) as listed_date
+            from fact.stock_daily_1d day_rows
+            join target_codes target on target.code = day_rows.code
+            group by day_rows.market, day_rows.code
+        )
+        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area, board_type)
+        select
+            first_daily.market,
+            first_daily.code,
+            '',
+            '',
+            case
+                when first_daily.market = 'BJSE' or left(first_daily.code, 1) in ('4', '8') or left(first_daily.code, 3) = '920' then 'beijing'
+                when first_daily.market = 'SHSE' and left(first_daily.code, 3) in ('688', '689') then 'star_market'
+                when first_daily.market = 'SZSE' and left(first_daily.code, 3) in ('300', '301') then 'chi_next'
+                else 'main_board'
+            end,
+            first_daily.listed_date,
+            null,
+            '',
+            case
+                when first_daily.market = 'BJSE' or left(first_daily.code, 1) in ('4', '8') or left(first_daily.code, 3) = '920' then 'beijing'
+                when first_daily.market = 'SHSE' and left(first_daily.code, 3) in ('688', '689') then 'star_market'
+                when first_daily.market = 'SZSE' and left(first_daily.code, 3) in ('300', '301') then 'chi_next'
+                else 'main_board'
+            end
+        from first_daily
+        where not exists (
+            select 1
+            from ref.stock stock_ref
+            where stock_ref.market = first_daily.market
+              and stock_ref.code = first_daily.code
+        )
+        on conflict (market, code) do nothing
+        """,
+        (list(codes),),
+    )
 
 
 def _repair_stock_listed_dates_from_daily(codes: Sequence[str]) -> bool:
@@ -218,10 +268,70 @@ def _repair_stock_listed_dates_from_daily(codes: Sequence[str]) -> bool:
     )
 
 
+def _repair_stock_daily_metrics(codes: Sequence[str]) -> bool:
+    if not codes:
+        return True
+    return execute_sql(
+        """
+        with target_codes as (
+            select unnest(%s::text[]) as code
+        ),
+        metric_rows as (
+            select
+                daily_rows.market,
+                daily_rows.code,
+                daily_rows.trade_date,
+                daily_rows.close,
+                lag(daily_rows.close) over (partition by daily_rows.market, daily_rows.code order by daily_rows.trade_date) as previous_close
+            from fact.stock_daily_1d daily_rows
+            join target_codes target on target.code = daily_rows.code
+        )
+        update fact.stock_daily_1d target
+        set pre_close = coalesce(target.pre_close, metric_rows.previous_close, metric_rows.close),
+            change = coalesce(target.change, metric_rows.close - coalesce(metric_rows.previous_close, metric_rows.close)),
+            pct_chg = coalesce(target.pct_chg, (metric_rows.close - coalesce(metric_rows.previous_close, metric_rows.close)) / nullif(coalesce(metric_rows.previous_close, metric_rows.close), 0) * 100),
+            loaded_at = now()
+        from metric_rows
+        where target.market = metric_rows.market
+          and target.code = metric_rows.code
+          and target.trade_date = metric_rows.trade_date
+          and metric_rows.close is not null
+          and (target.pre_close is null or target.change is null or target.pct_chg is null)
+        """,
+        (list(codes),),
+    )
+
+
+def _complete_stock_1m_items(items: Sequence[StockQuoteItem]) -> list[StockQuoteItem]:
+    expected_times = set(EXPECTED_INTRADAY_BAR_TIMES["1m"])
+    grouped: dict[tuple[str, str], dict[str, StockQuoteItem]] = {}
+    for item in items:
+        if item.freq != "1m" or None in (item.open, item.high, item.low, item.close):
+            continue
+        code = normalize_stock_code(item.code).zfill(6)
+        trade_time = format_datetime_value(item.trade_time, "1m")
+        if code == "" or len(trade_time) < 19:
+            continue
+        bar_time = trade_time[11:19]
+        if bar_time not in expected_times:
+            continue
+        grouped.setdefault((code, trade_time[:10]), {})[bar_time] = item
+
+    complete_items: list[StockQuoteItem] = []
+    for key in sorted(grouped):
+        day_items = grouped[key]
+        if set(day_items) != expected_times:
+            continue
+        # 事实表只接收完整交易日，避免 provider 短暂失败留下分钟碎片。
+        complete_items.extend(day_items[bar_time] for bar_time in EXPECTED_INTRADAY_BAR_TIMES["1m"])
+    return complete_items
+
+
 def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
     params_1m: list[tuple[object, ...]] = []
     params_30m: list[tuple[object, ...]] = []
-    for item in items:
+    writable_items = _complete_stock_1m_items(items) + [item for item in items if item.freq == "30m"]
+    for item in writable_items:
         if item.freq not in {"1m", "30m"}:
             continue
         code = normalize_stock_code(item.code).zfill(6)
@@ -274,7 +384,7 @@ def _normalized_ohlc(open_price: float, high_price: float, low_price: float, clo
         return open_price, high_price, low_price, open_price
     if open_price == 0 and low_price <= close_price <= high_price and close_price > 0:
         return close_price, high_price, low_price, close_price
-    return open_price, high_price, low_price, close_price
+    return open_price, max(open_price, high_price, low_price, close_price), min(open_price, high_price, low_price, close_price), close_price
 
 
 def _upsert_index_daily(items: Sequence[IndexQuoteItem]) -> bool:
@@ -634,7 +744,8 @@ def _upsert_index_catalog(items: Sequence[IndexCatalogItem]) -> bool:
         index_code = normalize_index_code(item.index_code)
         if index_code == "":
             continue
-        params.append((index_code, item.index_name, item.category, item.market, item.publisher, format_date_value(item.list_date), item.status))
+        stable_item = KNOWN_INDEX_CATALOG.get(index_code, item)
+        params.append((index_code, stable_item.index_name, stable_item.category, stable_item.market, stable_item.publisher, format_date_value(stable_item.list_date), stable_item.status))
     return execute_many(
         """
         insert into ref.index (index_code, index_name, category, market, publisher, list_date, status)

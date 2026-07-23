@@ -68,6 +68,7 @@ class StockQuoteCodeSummary(ApiModel):
     row_count: int
     expected_bar_count: int = 0
     actual_bar_count: int = 0
+    missing_count: int = 0
     first_trade_time: str = ""
     last_trade_time: str = ""
     complete: bool

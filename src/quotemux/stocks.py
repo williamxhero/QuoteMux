@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
-from quotemux.infra.common import build_time_bounds, format_date_value, normalize_stock_code, parse_date_text
+from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
 from quotemux.infra.db.reference_reads import load_stock_active_codes_frame
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
@@ -20,12 +20,14 @@ from quotemux.settings import QuoteMuxSettings
 
 
 MAX_DAILY_INDICATOR_CODES = 200
-QUOTE_REQUEST_CODE_BATCH_SIZE = 10
+QUOTE_REQUEST_CODE_BATCH_SIZE = 20
 SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD = 100
 MONEY_FLOW_REQUEST_CODE_BATCH_SIZE = 10
 HL_SIGNAL_RECENT_WINDOW_DAYS = 20
 LIMIT_PRICE_TOLERANCE = 0.001
 LIMIT_ORDER_AMOUNT_CAPABILITY = "stocks.signals.limit_order_amount"
+DAILY_QUOTE_SOURCE_ORDER = ("tushare", "efinance", "mootdx", "akshare", "opentdx")
+INTRADAY_QUOTE_SOURCE_ORDER = ("opentdx", "mootdx", "efinance", "akshare", "tushare")
 
 
 def _today_text() -> str:
@@ -261,12 +263,26 @@ def _build_missing_time_date_ranges(expected_dates: list[str], missing_trade_tim
 
 def _missing_quote_time_keys(code: str, freq: str, expected_trade_times: list[str], code_items: list[StockQuoteItem]) -> list[tuple[object, ...]]:
     expected_keys = [(code, trade_time, freq) for trade_time in expected_trade_times]
-    existing_keys = {(item.code, item.trade_time, item.freq) for item in code_items}
+    existing_keys = {(item.code, _quote_time_key(item), item.freq) for item in code_items}
     return missing_expected_keys(expected_keys, existing_keys)
+
+
+def _quote_time_key(item: StockQuoteItem) -> str:
+    trade_time = item.trade_time.strip().replace("T", " ")
+    if len(trade_time) == 16:
+        trade_time += ":00"
+    return format_datetime_value(trade_time, item.freq)
 
 
 def _quote_item_date(item: StockQuoteItem) -> str:
     return format_date_value(item.trade_time)
+
+
+def _filter_standard_intraday_items(items: list[StockQuoteItem], freq: str, expected_dates: list[str]) -> list[StockQuoteItem]:
+    if freq != "1m" or expected_dates == []:
+        return items
+    expected_trade_times = set(_expected_quote_trade_times(freq, expected_dates))
+    return [item for item in items if _quote_time_key(item) in expected_trade_times]
 
 
 def _quote_expected_dates(
@@ -311,6 +327,7 @@ def _build_quote_code_summaries(
     expected_dates: list[str],
     count: int | None,
     excluded_st_codes: set[str],
+    meta_detail: str = "summary",
 ) -> list[StockQuoteCodeSummary]:
     summaries: list[StockQuoteCodeSummary] = []
     expected_trade_times = _expected_quote_trade_times(freq, expected_dates)
@@ -328,6 +345,7 @@ def _build_quote_code_summaries(
                     row_count=0,
                     expected_bar_count=len(expected_trade_times),
                     actual_bar_count=0,
+                    missing_count=0,
                     first_trade_time="",
                     last_trade_time="",
                     complete=False,
@@ -337,25 +355,31 @@ def _build_quote_code_summaries(
                 )
             )
             continue
-        actual_dates = {_quote_item_date(item) for item in code_coverage_items}
+        normalized_coverage_times = {_quote_time_key(item) for item in code_coverage_items}
+        actual_dates = (
+            {trade_time[:10] for trade_time in normalized_coverage_times if trade_time in expected_trade_time_set}
+            if expected_trade_times
+            else {_quote_item_date(item) for item in code_coverage_items}
+        )
         missing_time_keys = _missing_quote_time_keys(code, freq, expected_trade_times, code_coverage_items)
         missing_trade_dates = [trade_date for trade_date in expected_dates if trade_date not in actual_dates]
-        missing_trade_times = [str(key[1]) for key in missing_time_keys]
+        full_missing_trade_times = [str(key[1]) for key in missing_time_keys]
         truncated = len(code_returned_items) < len(code_total_items)
         enough_count = count is None or len(code_total_items) >= count
-        complete = missing_trade_dates == [] and missing_trade_times == [] and enough_count and not truncated
+        complete = missing_trade_dates == [] and full_missing_trade_times == [] and enough_count and not truncated
         summaries.append(
             StockQuoteCodeSummary(
                 code=code,
                 row_count=len(code_returned_items),
                 expected_bar_count=len(expected_trade_times),
-                actual_bar_count=sum(1 for item in code_coverage_items if item.trade_time in expected_trade_time_set) if expected_trade_times else 0,
+                actual_bar_count=len(normalized_coverage_times & expected_trade_time_set) if expected_trade_times else 0,
+                missing_count=len(full_missing_trade_times) if expected_trade_times else len(missing_trade_dates),
                 first_trade_time=min(trade_times) if trade_times else "",
                 last_trade_time=max(trade_times) if trade_times else "",
                 complete=complete,
                 truncated=truncated,
                 missing_trade_dates=missing_trade_dates,
-                missing_trade_times=missing_trade_times,
+                missing_trade_times=full_missing_trade_times if meta_detail == "full" else [],
             )
         )
     return summaries
@@ -371,9 +395,10 @@ def _build_stock_quotes_query_result(
     expected_dates: list[str],
     count: int | None,
     excluded_st_codes: set[str],
+    meta_detail: str = "summary",
 ) -> StockQuotesQueryResult:
     returned_items = _limit_quote_items(returned_source_items, limit)
-    summaries = _build_quote_code_summaries(codes, total_items, returned_items, coverage_items, freq, expected_dates, count, excluded_st_codes)
+    summaries = _build_quote_code_summaries(codes, total_items, returned_items, coverage_items, freq, expected_dates, count, excluded_st_codes, meta_detail)
     truncated = len(returned_items) < len(returned_source_items)
     complete = all(item.complete for item in summaries) and not truncated
     return StockQuotesQueryResult(
@@ -506,7 +531,7 @@ def _build_local_daily_query_result(
     sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
     expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", settings)
     report = _base_source_report(contract_name, "fact.stock_daily_1d", local_items != [])
-    return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes), report
+    return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes, request.meta_detail), report
 
 
 def _build_missing_quote_requests(
@@ -633,8 +658,9 @@ def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem]
     active_codes = {normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")}
     actual_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
     expected_count = min(len(active_codes), offset + limit)
-    if len(actual_codes) < expected_count:
-        raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected_min={expected_count} actual={len(actual_codes)}")
+    expected_min = expected_count if expected_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD else int(expected_count * 0.9)
+    if len(actual_codes) < expected_min:
+        raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected_min={expected_min} actual={len(actual_codes)}")
 
 
 def _build_missing_snapshot_placeholders(trade_date: str, items: list[StockQuoteItem]) -> list[StockQuoteItem]:
@@ -689,18 +715,19 @@ def _build_steps(freq: str, request_freq: str, request_count: int | None, actual
         "get_stock_quotes": lambda instance: lambda missing_codes, missing_start, missing_end: _source_package_call(instance.package_id, "get_stock_quotes", missing_codes, request_freq, "", missing_start, missing_end, "", "", request_count, actual_adjust),
     }
     if freq in {"1d", "1w", "1mo"}:
-        fallback_order = ("tushare", "efinance", "mootdx", "akshare", "opentdx")
+        fallback_order = DAILY_QUOTE_SOURCE_ORDER
     else:
-        fallback_order = ("tushare", "opentdx", "efinance", "mootdx", "akshare")
+        fallback_order = INTRADAY_QUOTE_SOURCE_ORDER
     capability_id = "stocks.quotes.daily" if freq in {"1d", "1w", "1mo"} else "stocks.quotes.intraday"
     return SourceInstanceExecutor(settings).build_steps(capability_id, handlers, fallback_order)
 
 
 def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
     def fetch_snapshot(package_id: str, missing_codes: list[str], request_trade_date: str) -> list[StockQuoteItem]:
-        if missing_codes != []:
-            return _source_package_call(package_id, "get_stock_quotes", missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")
-        return _source_package_call(package_id, "get_stock_daily_snapshot_full", request_trade_date)
+        snapshot_items = _source_package_call(package_id, "get_stock_daily_snapshot_full", request_trade_date)
+        if snapshot_items != [] or missing_codes == []:
+            return snapshot_items
+        return _source_package_call(package_id, "get_stock_quotes", missing_codes, "1d", request_trade_date, "", "", "", "", None, "none")
 
     handlers = {
         "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: fetch_snapshot(instance.package_id, missing_codes, request_trade_date),
@@ -797,7 +824,7 @@ class QuoteMuxStocks:
         result, _ = self.get_quotes_query_result_with_report(request)
         return result
 
-    def get_quotes_query_result_with_report(self, request: StockQuotesRequest) -> tuple[StockQuotesQueryResult, ContractReport]:
+    def get_quotes_query_result_with_report(self, request: StockQuotesRequest, *, write_fact_ref: bool = True) -> tuple[StockQuotesQueryResult, ContractReport]:
         if request.codes == []:
             return StockQuotesQueryResult(items=[], meta=StockQuotesMeta(total_rows=0, returned_rows=0, complete=True, truncated=False)), ContractReport.empty("stocks.quotes")
         actual_limit = None if request.limit is None else ensure_limit(request.limit)
@@ -839,11 +866,14 @@ class QuoteMuxStocks:
                 sort_fields=("code", "trade_time"),
                 request_builder=lambda items: _build_missing_quote_requests(request.codes, items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings),
                 provider_steps=lambda: _build_steps(request_freq, request_freq, request_count, actual_adjust, self._settings),
-                source_order=self._settings.get_contract_source_order(contract_name, ("tushare", "opentdx", "efinance", "mootdx", "akshare")),
+                source_order=self._settings.get_contract_source_order(
+                    contract_name,
+                    INTRADAY_QUOTE_SOURCE_ORDER if contract_name == "stocks.quotes.intraday" else DAILY_QUOTE_SOURCE_ORDER,
+                ),
                 base_items=base_items,
                 base_source_name="fact.stock_daily_1d" if request_freq == "1d" else ("fact.stock_bar_30m" if request_freq == "30m" else "fact.stock_bar_1m"),
-                store_enabled=store_enabled,
-                fact_ref_writer=fact_ref_writer,
+                store_enabled=store_enabled and write_fact_ref,
+                fact_ref_writer=fact_ref_writer if write_fact_ref else None,
             )
         )
         st_filtered_items, excluded_st_codes = _filter_st_quote_items(merged_items, request.skip_st, actual_freq)
@@ -851,7 +881,10 @@ class QuoteMuxStocks:
         trimmed_items = trim_items_per_key(filtered_items, "code", "trade_time", request.count)
         sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
         expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", self._settings)
-        return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes), report
+        contract_total_items = _filter_standard_intraday_items(filtered_items, actual_freq, expected_dates)
+        contract_returned_items = _filter_standard_intraday_items(sorted_items, actual_freq, expected_dates)
+        contract_coverage_items = _filter_standard_intraday_items(st_filtered_items, actual_freq, expected_dates)
+        return _build_stock_quotes_query_result(request.codes, contract_total_items, contract_returned_items, contract_coverage_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes, request.meta_detail), report
 
     def get_daily_snapshot(self, request: StockDailySnapshotRequest) -> list[StockQuoteItem]:
         items, _ = self.get_daily_snapshot_with_report(request)
@@ -1020,10 +1053,10 @@ class QuoteMuxStocks:
             lambda: self._source_list("stocks.finance.indicators", handlers, ("tushare", "akshare", "efinance"), ("code", "report_period")),
         )
 
-    def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int) -> list[StockBasicInfo]:
+    def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int, refresh: bool = False) -> list[StockBasicInfo]:
         store_identity = {"codes": list(codes), "name": name, "exchange": exchange, "list_status": list_status, "include_delisted": include_delisted}
         handlers = {
-            "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset),
+            "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset, refresh),
         }
         
         def build_request(current_items: list[StockBasicInfo]) -> list[tuple[()]]:
@@ -1045,7 +1078,7 @@ class QuoteMuxStocks:
                 request_builder=build_request,
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.catalog", handlers, ("tushare",)),
                 source_order=self._settings.get_contract_source_order("stocks.catalog", ("tushare",)),
-                base_items=get_local_stock_catalog(codes, name, exchange, list_status, include_delisted),
+                base_items=[] if refresh else get_local_stock_catalog(codes, name, exchange, list_status, include_delisted),
                 base_source_name="ref.stock",
                 fact_ref_writer=get_fact_ref_writer("stocks.catalog") if is_full_snapshot else None,
             )

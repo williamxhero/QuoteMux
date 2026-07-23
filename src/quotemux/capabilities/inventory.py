@@ -50,6 +50,7 @@ class PublicApiCapabilityBinding:
 
 PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/quotes", ("stocks.quotes.intraday", "stocks.quotes.daily")),
+    PublicApiCapabilityBinding("/api/stocks/quotes/query", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-snapshot", ("stocks.quotes.daily_snapshot",)),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-local-window", ("stocks.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/catalog", ("stocks.catalog",)),
@@ -270,7 +271,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "boards.quotes.daily":
         return ("derived_core",)
     if capability_id == "stocks.quotes.intraday":
-        return ("tushare", "opentdx", "efinance", "mootdx", "akshare")
+        return ("opentdx", "mootdx", "efinance", "akshare", "tushare")
     if capability_id == "stocks.quotes.daily":
         return ("tushare", "efinance", "mootdx", "akshare", "opentdx")
     if capability_id == "indexes.quotes.daily":

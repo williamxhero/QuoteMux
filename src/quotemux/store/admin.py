@@ -155,6 +155,16 @@ class QuoteMuxCaptureAdmin:
         root_capability_id = "" if capability_id == "" else get_capability_config_root(capability_id)
         return self._job.list_runs(root_capability_id, status, limit)
 
+    def list_gaps(self, capability_id: str = "", status: str = "", limit: int = 500) -> tuple[dict[str, object], ...]:
+        root_capability_id = "" if capability_id == "" else get_capability_config_root(capability_id)
+        return self._job.list_gaps(root_capability_id, status, limit)
+
+    def audit_intraday_gaps(self, window_count: int = 30) -> dict[str, object]:
+        return self._job.audit_intraday_gaps(window_count)
+
+    def retry_intraday_gaps(self, window_count: int = 30) -> dict[str, object]:
+        return self._job.retry_intraday_gaps(window_count)
+
     def run_capture(self, capability_id: str) -> dict[str, object]:
         return self._job.run_capture(get_capability_config_root(capability_id))
 

@@ -27,13 +27,16 @@ from quotemux.store.planner import CacheMissingPlanner, CacheMissingRange
 from quotemux.store.default_update_policy import get_capability_update_policy_default
 from quotemux.store.postgres import _ensure_schema, _field_values, _is_fresh, _time_range_from_request, build_scope_identity, get_postgres_cache_store
 from quotemux.store.runtime import store_result
+from quotemux.store.capture_gaps import CaptureGap, CaptureGapRepository
 from quotemux.source_packages.registry import get_default_source_package_registry
 
 
 CAPTURE_RUNNING = "running"
 CAPTURE_SUCCESS = "success"
+CAPTURE_PARTIAL = "partial"
 CAPTURE_FAILED = "failed"
 CAPTURE_SKIPPED = "skipped"
+CAPTURE_MARKET_DATA_READY_TIME = time(16, 0)
 
 CADENCE_DAILY = "daily"
 CADENCE_WEEKLY = "weekly"
@@ -148,6 +151,7 @@ class CaptureRequest:
 class CaptureExecutionResult:
     row_count: int
     coverage_count: int
+    partial_batches: tuple[dict[str, object], ...]
     failed_batches: tuple[dict[str, object], ...]
 
 
@@ -155,6 +159,13 @@ class CaptureExecutionResult:
 class _CaptureRuntimeReport:
     contract_name: str
     store_write_count: int = 1
+
+
+@dataclass(frozen=True)
+class _CaptureBatchResult:
+    items: tuple[object, ...]
+    store_write_count: int
+    partial_issues: tuple[str, ...] = ()
 
 
 def _default_profile_for_capability(capability_id: str) -> str:
@@ -628,6 +639,7 @@ class PostgresAdvisoryLock:
         with connection.cursor() as cursor:
             cursor.execute("select pg_try_advisory_lock(hashtext(%s)) as locked", (self._capability_id,))
             row = cursor.fetchone()
+        connection.commit()
         locked = bool(row["locked"]) if isinstance(row, dict) else False
         if not locked:
             connection.close()
@@ -669,8 +681,9 @@ def _date_range_end_text(now: datetime) -> str:
 
 
 def _recent_trading_days(window_count: int, now: datetime) -> tuple[str, ...]:
-    end_text = _date_range_end_text(now)
-    start_day = now.date() - timedelta(days=max(10, window_count * 3))
+    end_day = now.date() if now.time() >= CAPTURE_MARKET_DATA_READY_TIME else now.date() - timedelta(days=1)
+    end_text = end_day.strftime("%Y-%m-%d")
+    start_day = end_day - timedelta(days=max(10, window_count * 3))
     frame = load_trade_calendar_frame("SSE", start_day.strftime("%Y-%m-%d"), end_text, True)
     if _is_empty_dataframe(frame):
         return ()
@@ -690,6 +703,85 @@ def _active_stock_codes(trade_date: str) -> tuple[str, ...]:
     if _is_empty_dataframe(frame):
         return ()
     return tuple(str(row["code"]) for row in frame.to_dict("records") if str(row["code"]) != "")
+
+
+def _intraday_missing_stock_codes(trade_date: str) -> tuple[str, ...]:
+    frame = query_dataframe(
+        """
+        with expected_codes as (
+            select distinct code
+            from fact.stock_daily_1d
+            where trade_date = %s
+              and not coalesce(is_suspended, false)
+        ), standard_coverage as (
+            select code, count(*) as bar_count
+            from fact.stock_bar_1m
+            where bar_time >= %s::date
+              and bar_time < %s::date + interval '1 day'
+              and (
+                    bar_time::time between time '09:31:00' and time '11:30:00'
+                 or bar_time::time between time '13:01:00' and time '15:00:00'
+              )
+            group by code
+        )
+        select expected.code
+        from expected_codes expected
+        left join standard_coverage coverage on coverage.code = expected.code
+        where coalesce(coverage.bar_count, 0) < 240
+        order by expected.code
+        """,
+        (trade_date, trade_date, trade_date),
+    )
+    if _is_empty_dataframe(frame):
+        return ()
+    return tuple(str(row["code"]) for row in frame.to_dict("records") if str(row["code"]) != "")
+
+
+def _intraday_missing_universe_dates(trading_days: Sequence[str]) -> tuple[str, ...]:
+    if trading_days == ():
+        return ()
+    frame = query_dataframe(
+        """
+        select requested.trade_date
+        from unnest(%s::date[]) as requested(trade_date)
+        left join fact.stock_daily_1d daily
+          on daily.trade_date = requested.trade_date
+         and not coalesce(daily.is_suspended, false)
+        group by requested.trade_date
+        having count(daily.code) = 0
+        order by requested.trade_date
+        """,
+        (list(trading_days),),
+    )
+    if _is_empty_dataframe(frame):
+        return ()
+    return tuple(format_date_value(row["trade_date"]) for row in frame.to_dict("records") if format_date_value(row["trade_date"]) != "")
+
+
+def _intraday_request_identity(codes: Sequence[str], trade_date: str) -> dict[str, object]:
+    return {
+        "codes": list(codes),
+        "freq": "1m",
+        "trade_date": "",
+        "start_date": trade_date,
+        "end_date": trade_date,
+        "start_time": "",
+        "end_time": "",
+        "count": None,
+        "adjust": "none",
+        "limit": max(5000, len(codes) * 240),
+    }
+
+
+def _intraday_gap_requests(policy: CapturePolicy, gaps: Sequence[CaptureGap]) -> tuple[CaptureRequest, ...]:
+    codes_by_date: dict[str, list[str]] = {}
+    for gap in gaps:
+        codes_by_date.setdefault(gap.trade_date, []).append(gap.code)
+    requests: list[CaptureRequest] = []
+    for trade_date in sorted(codes_by_date):
+        for batch in _chunk(tuple(dict.fromkeys(codes_by_date[trade_date])), policy.batch_size):
+            requests.append(CaptureRequest(policy.capability_id, _intraday_request_identity(batch, trade_date)))
+    return tuple(requests)
 
 
 def _index_codes() -> tuple[str, ...]:
@@ -811,7 +903,44 @@ def _complete_board_daily_count(trade_date: str) -> int:
     return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
 
 
-def _recent_concept_daily_count(trade_date: str) -> int:
+def _daily_count_complete(actual_count: int, expected_count: int) -> bool:
+    if actual_count <= 0:
+        return False
+    if expected_count <= 0:
+        return True
+    return actual_count >= int(expected_count * 0.9)
+
+
+def _concept_daily_fact_missing(trade_date: str) -> bool:
+    return not _daily_count_complete(_fact_daily_count("fact.concept_daily_1d", trade_date), len(_concept_ids()))
+
+
+def _complete_stock_daily_count(trade_date: str) -> int:
+    actual_trade_date = format_date_value(trade_date)
+    if actual_trade_date == "":
+        return 0
+    frame = query_dataframe(
+        """
+        select count(*) as row_count
+        from fact.stock_daily_1d
+        where trade_date = %s::date
+          and open is not null
+          and high is not null
+          and low is not null
+          and close is not null
+          and pre_close is not null
+          and pct_chg is not null
+          and volume is not null
+          and amount is not null
+        """,
+        (actual_trade_date,),
+    )
+    if _is_empty_dataframe(frame):
+        return 0
+    return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
+
+
+def _recent_stock_daily_count(trade_date: str) -> int:
     actual_trade_date = format_date_value(trade_date)
     if actual_trade_date == "":
         return 0
@@ -820,9 +949,17 @@ def _recent_concept_daily_count(trade_date: str) -> int:
         select coalesce(max(day_count), 0) as row_count
         from (
             select count(*) as day_count
-            from fact.concept_daily_1d
+            from fact.stock_daily_1d
             where trade_date < %s::date
               and trade_date >= %s::date - interval '45 days'
+              and open is not null
+              and high is not null
+              and low is not null
+              and close is not null
+              and pre_close is not null
+              and pct_chg is not null
+              and volume is not null
+              and amount is not null
             group by trade_date
         ) daily_counts
         """,
@@ -833,43 +970,10 @@ def _recent_concept_daily_count(trade_date: str) -> int:
     return int(frame.iloc[0].to_dict().get("row_count", 0) or 0)
 
 
-def _recent_concept_daily_ids(trade_date: str) -> tuple[str, ...]:
-    actual_trade_date = format_date_value(trade_date)
-    if actual_trade_date == "":
-        return ()
-    frame = query_dataframe(
-        """
-        with daily_counts as (
-            select trade_date, count(*) as day_count
-            from fact.concept_daily_1d
-            where trade_date < %s::date
-              and trade_date >= %s::date - interval '45 days'
-            group by trade_date
-            order by day_count desc, trade_date desc
-            limit 1
-        )
-        select fact_rows.concept_id
-        from fact.concept_daily_1d fact_rows
-        join daily_counts daily on daily.trade_date = fact_rows.trade_date
-        order by fact_rows.concept_id
-        """,
-        (actual_trade_date, actual_trade_date),
-    )
-    if _is_empty_dataframe(frame):
-        return _concept_ids()
-    return tuple(str(row["concept_id"]) for row in frame.to_dict("records") if str(row["concept_id"]) != "")
-
-
-def _daily_count_complete(actual_count: int, expected_count: int) -> bool:
-    if actual_count <= 0:
-        return False
-    if expected_count <= 0:
-        return True
-    return actual_count >= int(expected_count * 0.9)
-
-
-def _concept_daily_fact_missing(trade_date: str) -> bool:
-    return not _daily_count_complete(_fact_daily_count("fact.concept_daily_1d", trade_date), _recent_concept_daily_count(trade_date))
+def _stock_daily_fact_missing(trade_date: str) -> bool:
+    actual_count = _complete_stock_daily_count(trade_date)
+    expected_count = _recent_stock_daily_count(trade_date)
+    return not _daily_count_complete(actual_count, expected_count)
 
 
 def _board_daily_fact_missing(trade_date: str) -> bool:
@@ -941,34 +1045,21 @@ def _active_stock_requests(policy: CapturePolicy, capability_id: str, now: datet
     trading_days = _recent_trading_days(policy.window_count, now)
     if trading_days == ():
         return ()
+    freq = "1d" if capability_id == "stocks.quotes.daily" else "1m"
+    requests: list[CaptureRequest] = []
+    if capability_id == "stocks.quotes.intraday":
+        missing_universe_dates = _intraday_missing_universe_dates(trading_days)
+        if missing_universe_dates != ():
+            raise RuntimeError(f"股票 1m 分钟线缺少日线股票池: trade_dates={','.join(missing_universe_dates)}")
+        for trade_date in reversed(trading_days):
+            codes = _intraday_missing_stock_codes(trade_date)
+            for batch in _chunk(codes, policy.batch_size):
+                requests.append(CaptureRequest(capability_id, _intraday_request_identity(batch, trade_date)))
+        return tuple(requests)
     codes = _active_stock_codes(trading_days[-1])
     if codes == ():
         return ()
-    freq = "1d" if capability_id == "stocks.quotes.daily" else "1m"
-    requests: list[CaptureRequest] = []
-    actual_batch_size = min(policy.batch_size, 20) if capability_id == "stocks.quotes.intraday" else policy.batch_size
-    if capability_id == "stocks.quotes.intraday":
-        for trade_date in reversed(trading_days):
-            for batch in _chunk(codes, actual_batch_size):
-                requests.append(
-                    CaptureRequest(
-                        capability_id,
-                        {
-                            "codes": list(batch),
-                            "freq": freq,
-                            "trade_date": "",
-                            "start_date": trade_date,
-                            "end_date": trade_date,
-                            "start_time": "",
-                            "end_time": "",
-                            "count": None,
-                            "adjust": "none",
-                            "limit": 5000,
-                        },
-                    )
-                )
-        return tuple(requests)
-    for batch in _chunk(codes, actual_batch_size):
+    for batch in _chunk(codes, policy.batch_size):
         request_identity = {
             "codes": list(batch),
             "freq": freq,
@@ -1032,7 +1123,7 @@ def _daily_snapshot_requests(policy: CapturePolicy, capability_id: str, now: dat
     return tuple(
         CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
         for trade_date in trading_days
-        if _single_date_missing(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
+        if _stock_daily_fact_missing(trade_date)
     )
 
 
@@ -1058,22 +1149,13 @@ def _concept_quote_requests(policy: CapturePolicy, capability_id: str, now: date
     for trade_date in trading_days:
         if not _concept_daily_fact_missing(trade_date):
             continue
-        concept_ids = _recent_concept_daily_ids(trade_date)
-        if concept_ids == ():
-            continue
         requests.append(
             CaptureRequest(
                 capability_id,
                 {
-                    "concept_ids": list(concept_ids),
-                    "freq": "1d",
-                    "trade_date": "",
-                    "start_date": trade_date,
-                    "end_date": trade_date,
-                    "start_time": "",
-                    "end_time": "",
-                    "count": None,
-                    "limit": max(5000, len(concept_ids)),
+                    "trade_date": trade_date,
+                    "limit": 5000,
+                    "offset": 0,
                 },
             )
         )
@@ -1167,7 +1249,7 @@ def _recent_months(window_count: int, now: datetime) -> tuple[str, ...]:
 def _catalog_snapshot_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_date, end_date = _date_window(policy, now)
     identities = {
-        "stocks.catalog": {"codes": [], "name": "", "exchange": "", "list_status": "L", "include_delisted": False, "limit": 10000, "offset": 0},
+        "stocks.catalog": {"codes": [], "name": "", "exchange": "", "list_status": "", "include_delisted": True, "limit": 10000, "offset": 0, "refresh": True},
         "stocks.catalog.archive": {"trade_date": end_date, "code": "", "name": "", "industry": "", "area": "", "limit": 10000, "offset": 0},
         "indexes.catalog": {"category": "", "market": "", "publisher": "", "status": "active", "limit": 10000, "offset": 0},
         "concepts.catalog": {"category": "", "market": "", "status": "active", "limit": 10000, "offset": 0},
@@ -1183,6 +1265,8 @@ def _catalog_snapshot_requests(policy: CapturePolicy, capability_id: str, now: d
 def _single_entity_snapshot_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_date, end_date = _date_window(policy, now)
     if capability_id.startswith("stocks.profile."):
+        if capability_id == "stocks.profile.name_history":
+            return (CaptureRequest(capability_id, {"code": "", "start_date": "", "end_date": ""}),)
         trading_days = _recent_trading_days(1, now)
         codes = _active_stock_codes(trading_days[-1]) if trading_days != () else ()
         if capability_id == "stocks.profile.basic":
@@ -1192,8 +1276,6 @@ def _single_entity_snapshot_requests(policy: CapturePolicy, capability_id: str, 
         if capability_id == "stocks.profile.managers":
             return tuple(CaptureRequest(capability_id, {"code": code}) for code in codes)
         if capability_id == "stocks.profile.management_rewards":
-            return tuple(CaptureRequest(capability_id, {"code": code, "start_date": start_date, "end_date": end_date}) for code in codes)
-        if capability_id == "stocks.profile.name_history":
             return tuple(CaptureRequest(capability_id, {"code": code, "start_date": start_date, "end_date": end_date}) for code in codes)
     if capability_id == "indexes.profile":
         return tuple(CaptureRequest(capability_id, {"index_code": index_code}) for index_code in _index_codes())
@@ -1594,7 +1676,7 @@ def is_capture_due(policy: CapturePolicy, runs: CaptureRunRepository, now: datet
     if planned_time is None:
         return False
     previous = runs.latest_for_planned_time(policy.capability_id, planned_time)
-    return previous is None or previous.status in {CAPTURE_FAILED, CAPTURE_SKIPPED}
+    return previous is None or previous.status in {CAPTURE_PARTIAL, CAPTURE_FAILED, CAPTURE_SKIPPED}
 
 
 CAPTURE_DUE_PRIORITY: dict[str, int] = {
@@ -1703,6 +1785,7 @@ class QuoteMuxCaptureJob:
         locks: PostgresAdvisoryLockFactory | None = None,
         now_provider: Callable[[], datetime] | None = None,
         cache_store: object | None = None,
+        gaps: CaptureGapRepository | None = None,
     ) -> None:
         if runtime is None:
             from quotemux.runtime import QuoteMux
@@ -1715,6 +1798,7 @@ class QuoteMuxCaptureJob:
         self._locks = locks or PostgresAdvisoryLockFactory()
         self._now_provider = now_provider or _current_datetime
         self._cache_store = cache_store or get_postgres_cache_store()
+        self._gaps = gaps or CaptureGapRepository()
 
     def list_policies(self) -> tuple[dict[str, object], ...]:
         return tuple(self._policy_to_dict(policy) for policy in self._policies.list())
@@ -1748,6 +1832,44 @@ class QuoteMuxCaptureJob:
     def list_runs(self, capability_id: str = "", status: str = "", limit: int = 100) -> tuple[dict[str, object], ...]:
         return tuple(self._run_to_dict(run) for run in self._runs.list(capability_id, status, limit))
 
+    def list_gaps(self, capability_id: str = "", status: str = "", limit: int = 500) -> tuple[dict[str, object], ...]:
+        return self._gaps.list(capability_id, status, limit)
+
+    def audit_intraday_gaps(self, window_count: int = 30) -> dict[str, object]:
+        return self._gaps.audit_intraday(window_count).to_dict()
+
+    def retry_intraday_gaps(self, window_count: int = 30) -> dict[str, object]:
+        policy = self._get_policy("stocks.quotes.intraday")
+        audit_before = self._gaps.audit_intraday(window_count)
+        gaps_before = self._gaps.list_retryable(policy.capability_id, window_count)
+        if gaps_before == ():
+            return {
+                "status": CAPTURE_SUCCESS,
+                "audit_before": audit_before.to_dict(),
+                "capture_run": {},
+                "audit_after": audit_before.to_dict(),
+                "resolved_trade_dates": [],
+            }
+        requests = _intraday_gap_requests(policy, gaps_before)
+        capture_run = self._run_capture_requests(policy, requests, {"mode": "gap_only", "gap_count": len(gaps_before)})
+        audit_after = self._gaps.audit_intraday(window_count)
+        unresolved_after = {
+            (gap.code, gap.trade_date)
+            for gap in self._gaps.list_unresolved(policy.capability_id, window_count)
+        }
+        resolved_trade_dates = sorted({
+            gap.trade_date
+            for gap in gaps_before
+            if (gap.code, gap.trade_date) not in unresolved_after
+        })
+        return {
+            "status": str(capture_run["status"]),
+            "audit_before": audit_before.to_dict(),
+            "capture_run": capture_run,
+            "audit_after": audit_after.to_dict(),
+            "resolved_trade_dates": resolved_trade_dates,
+        }
+
     def run_due_captures(self) -> tuple[dict[str, object], ...]:
         now = self._now_provider()
         runs: list[dict[str, object]] = []
@@ -1775,12 +1897,37 @@ class QuoteMuxCaptureJob:
         if not lock.acquire():
             run = self._create_finished_run(policy, actual_planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "advisory_lock_busy"})
             return self._run_to_dict(run)
-        run = self._runs.create(root_capability_id, CAPTURE_RUNNING, actual_planned_time, {"phase": "预处理"})
+        return self._run_capture_requests(policy, None, {"mode": "scheduled"}, actual_planned_time, lock)
+
+    def _run_capture_requests(
+        self,
+        policy: CapturePolicy,
+        requests: Sequence[CaptureRequest] | None,
+        run_detail: dict[str, object],
+        planned_time: datetime | None = None,
+        acquired_lock: object | None = None,
+    ) -> dict[str, object]:
+        actual_planned_time = planned_time or self._now_provider().replace(tzinfo=None)
+        lock = acquired_lock or self._locks.create(policy.capability_id)
+        if acquired_lock is None and not lock.acquire():
+            run = self._create_finished_run(policy, actual_planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "advisory_lock_busy"})
+            return self._run_to_dict(run)
+        run = self._runs.create(policy.capability_id, CAPTURE_RUNNING, actual_planned_time, {"phase": "预处理", **run_detail})
         try:
-            result = self._execute(policy)
-            status = CAPTURE_SUCCESS if result.failed_batches == () else CAPTURE_FAILED
-            error_message = "" if result.failed_batches == () else "部分 batch 采集失败"
-            detail_json = {"phase": "后处理", "failed_batches": list(result.failed_batches)}
+            actual_requests = build_capture_requests(policy, _policy_local_now(policy, self._now_provider())) if requests is None else tuple(requests)
+            result = self._execute_requests(policy, actual_requests)
+            status = self._execution_status(result)
+            error_message = ""
+            if status == CAPTURE_FAILED:
+                error_message = "部分 batch 采集失败"
+            elif status == CAPTURE_PARTIAL:
+                error_message = "存在未解决数据缺口"
+            detail_json = {
+                "phase": "后处理",
+                **run_detail,
+                "partial_batches": list(result.partial_batches),
+                "failed_batches": list(result.failed_batches),
+            }
             self._runs.finish(run.id, status, result.row_count, result.coverage_count, error_message, detail_json)
             return self._run_to_dict(self._merge_finished_run(run, status, result.row_count, result.coverage_count, error_message, detail_json))
         except BaseException as exc:
@@ -1794,35 +1941,94 @@ class QuoteMuxCaptureJob:
             lock.release()
 
     def _execute(self, policy: CapturePolicy) -> CaptureExecutionResult:
-        requests = build_capture_requests(policy, _policy_local_now(policy, self._now_provider()))
+        policy_now = _policy_local_now(policy, self._now_provider())
+        return self._execute_requests(policy, build_capture_requests(policy, policy_now))
+
+    def _execute_requests(self, policy: CapturePolicy, requests: Sequence[CaptureRequest]) -> CaptureExecutionResult:
         row_count = 0
         coverage_count = 0
+        partial_batches: list[dict[str, object]] = []
         failed_batches: list[dict[str, object]] = []
         for request in requests:
             try:
-                items, report = self._run_runtime_request(request)
-                row_count += len(items)
-                coverage_count += int(getattr(report, "store_write_count", 0))
+                batch_result = self._run_capture_batch(request)
+                row_count += len(batch_result.items)
+                coverage_count += batch_result.store_write_count
+                for issue in batch_result.partial_issues:
+                    partial_batches.append({"request_identity": request.request_identity, "error": issue})
             except Exception as exc:
+                if request.capability_id == "stocks.quotes.intraday":
+                    trade_date = format_date_value(request.request_identity.get("start_date", request.request_identity.get("trade_date", "")))
+                    for code in request.request_identity.get("codes", []):
+                        self._gaps.record_system_failure(request.capability_id, str(code), trade_date, str(exc))
                 failed_batches.append({"request_identity": request.request_identity, "error": str(exc)})
-        if policy.capability_id == "stocks.quotes.intraday" and requests != () and row_count == 0:
+        if policy.capability_id == "stocks.quotes.intraday" and requests != () and row_count == 0 and partial_batches == () and failed_batches == ():
             failed_batches.append({"request_identity": {}, "error": "股票 1m 分钟线本轮未获取到任何数据"})
         if policy.capability_id == "stocks.quotes.intraday" and row_count > 0 and coverage_count == 0:
             failed_batches.append({"request_identity": {}, "error": "股票 1m 分钟线本轮未写入 fact.stock_bar_1m"})
+        if policy.capability_id == "stocks.catalog" and requests != () and row_count == 0:
+            failed_batches.append({"request_identity": {}, "error": "股票目录权威刷新未返回任何数据"})
         if policy.capability_id in {"concepts.quotes.daily", "boards.quotes.daily"} and requests != () and row_count == 0:
             failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未获取到任何数据"})
         if policy.capability_id in {"concepts.quotes.daily", "boards.quotes.daily"} and row_count > 0 and coverage_count == 0:
             failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未写入事实表"})
-        return CaptureExecutionResult(row_count, coverage_count, tuple(failed_batches))
+        return CaptureExecutionResult(row_count, coverage_count, tuple(partial_batches), tuple(failed_batches))
+
+    def _execution_status(self, result: CaptureExecutionResult) -> str:
+        if result.failed_batches != ():
+            return CAPTURE_FAILED
+        if result.partial_batches != ():
+            return CAPTURE_PARTIAL
+        return CAPTURE_SUCCESS
+
+    def _run_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        if request.capability_id == "stocks.quotes.intraday":
+            return self._run_intraday_capture_batch(request)
+        items, report = self._run_runtime_request(request)
+        normalized_items = tuple(self._normalize_runtime_items(items))
+        return _CaptureBatchResult(normalized_items, int(getattr(report, "store_write_count", 0)))
+
+    def _run_intraday_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        result, report = self._runtime.stocks.get_quotes_query_result_with_report(
+            StockQuotesRequest(**request.request_identity),
+            write_fact_ref=False,
+        )
+        incomplete_codes = tuple(item.code for item in result.meta.codes if not item.complete)
+        if incomplete_codes == ():
+            complete_items = tuple(result.items)
+        else:
+            incomplete_code_set = set(incomplete_codes)
+            complete_items = tuple(item for item in result.items if item.code not in incomplete_code_set)
+        write_count = self._write_fact_ref_items(request.capability_id, complete_items)
+        trade_date = format_date_value(request.request_identity.get("start_date", request.request_identity.get("trade_date", "")))
+        provider_results = report.to_dict()
+        provider_success_count = sum(int(item.get("success_count", 0) or 0) for item in report.package_reports())
+        system_failed = report.source_error_count > 0 and provider_success_count == 0 and sum(report.source_hit_counts.values()) == 0
+        for summary in result.meta.codes:
+            if summary.complete:
+                if write_count > 0 and trade_date != "":
+                    self._gaps.resolve(request.capability_id, summary.code, trade_date, summary.actual_bar_count)
+                continue
+            if trade_date == "":
+                raise RuntimeError(f"股票 1m 缺口缺少交易日: code={summary.code}")
+            error = "所有 provider 调用失败" if system_failed else "所有可用 provider 均未返回完整 240 根分钟线"
+            self._gaps.record_incomplete(
+                request.capability_id,
+                summary.code,
+                trade_date,
+                summary.expected_bar_count,
+                summary.actual_bar_count,
+                provider_results,
+                system_failed,
+                error,
+            )
+        if incomplete_codes == ():
+            return _CaptureBatchResult(complete_items, write_count)
+        sample_codes = ",".join(incomplete_codes[:10])
+        issue = f"股票 1m 分钟线覆盖不完整: incomplete_codes={len(incomplete_codes)} sample={sample_codes}"
+        return _CaptureBatchResult(complete_items, write_count, (issue,))
 
     def _run_runtime_request(self, request: CaptureRequest):
-        if request.capability_id == "stocks.quotes.intraday":
-            result, report = self._runtime.stocks.get_quotes_query_result_with_report(StockQuotesRequest(**request.request_identity))
-            if not result.meta.complete:
-                incomplete_codes = [item.code for item in result.meta.codes if not item.complete]
-                sample_codes = ",".join(incomplete_codes[:10])
-                raise RuntimeError(f"股票 1m 分钟线覆盖不完整: incomplete_codes={len(incomplete_codes)} sample={sample_codes}")
-            return result.items, report
         if request.capability_id == "stocks.quotes.daily":
             return self._runtime.stocks.get_quotes_with_report(StockQuotesRequest(**request.request_identity))
         if request.capability_id == "stocks.quotes.daily_snapshot":
@@ -1838,7 +2044,7 @@ class QuoteMuxCaptureJob:
                 items = self._normalize_runtime_items(self._runtime.concepts.get_quotes(**request.request_identity))
             else:
                 items = self._normalize_runtime_items(self._runtime.concepts.get_market_daily_snapshot(**request.request_identity))
-            expected_count = len(request.request_identity.get("concept_ids", [])) if "concept_ids" in request.request_identity else _recent_concept_daily_count(str(request.request_identity.get("trade_date", "")))
+            expected_count = len(request.request_identity.get("concept_ids", [])) if "concept_ids" in request.request_identity else len(_concept_ids())
             if expected_count > 0 and len(items) < int(expected_count * 0.9):
                 raise RuntimeError(f"概念日线快照覆盖不完整: expected={expected_count} actual={len(items)}")
             normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
