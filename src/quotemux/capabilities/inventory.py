@@ -49,6 +49,8 @@ class PublicApiCapabilityBinding:
 
 
 PUBLIC_API_CAPABILITY_BINDINGS = (
+    PublicApiCapabilityBinding("/api/funds/etfs", ("funds.etf.catalog",)),
+    PublicApiCapabilityBinding("/api/funds/etfs/quotes/daily", ("funds.etf.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/quotes", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/query", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-snapshot", ("stocks.quotes.daily_snapshot",)),
@@ -68,6 +70,10 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/technical", ("stocks.factors.technical",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/indicators/money-flow", ("stocks.indicators.money_flow",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/batch", ("stocks.indicators.money_flow.batch",)),
+    PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/snapshot", ("stocks.indicators.money_flow.snapshot",)),
+    PublicApiCapabilityBinding("/api/stocks/indicators/margin/snapshot", ("stocks.indicators.margin.snapshot",)),
+    PublicApiCapabilityBinding("/api/stocks/finance/express/snapshot", ("stocks.finance.express.snapshot",)),
+    PublicApiCapabilityBinding("/api/stocks/finance/forecasts/snapshot", ("stocks.finance.forecasts.snapshot",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/ah-comparisons", ("stocks.indicators.ah_comparisons",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/daily-basic", ("stocks.indicators.daily_basic",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/daily-valuation", ("stocks.indicators.daily_valuation",)),
@@ -162,13 +168,14 @@ STORE_TARGET_CAPABILITIES = {
     "stocks.quotes.intraday",
     "stocks.quotes.daily",
     "stocks.quotes.daily_snapshot",
+    "funds.etf.quotes.daily",
     "stocks.signals.limit_order_amount",
     "indexes.quotes.daily",
     "markets.calendar.trading",
     "markets.events.news",
 }
 
-INTERNAL_CAPABILITY_IDS = ("boards.quotes.daily",)
+INTERNAL_CAPABILITY_IDS = ("boards.catalog", "boards.members.history", "boards.quotes.daily")
 
 _API_PATHS_BY_CAPABILITY: dict[str, list[str]] = {}
 for binding in PUBLIC_API_CAPABILITY_BINDINGS:
@@ -218,14 +225,26 @@ def _infer_result_shape(capability_id: str) -> str:
 
 
 def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "boards.catalog":
+        return ("board_code",)
+    if capability_id == "boards.members.history":
+        return ("board_code", "code", "effective_date", "action")
+    if capability_id == "funds.etf.quotes.daily":
+        return ("ts_code", "trade_date")
+    if capability_id == "funds.etf.catalog":
+        return ("ts_code",)
     if capability_id.startswith("stocks.quotes."):
         return ("code", "trade_time", "freq")
-    if capability_id == "stocks.indicators.money_flow":
+    if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.snapshot"}:
         return ("code", "trade_date", "view")
     if capability_id.startswith("stocks.profile."):
         return ("code",)
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_period", "report_type")
+    if capability_id == "stocks.finance.express.snapshot":
+        return ("code", "report_period", "announce_date")
+    if capability_id == "stocks.finance.forecasts.snapshot":
+        return ("code", "report_period", "announce_date", "forecast_type")
     if capability_id.startswith("stocks.finance.") or capability_id.startswith("stocks.ownership.") or capability_id.startswith("stocks.corporate_actions.") or capability_id.startswith("stocks.research.") or capability_id.startswith("stocks.indicators.") or capability_id.startswith("stocks.signals.") or capability_id.startswith("stocks.factors."):
         return ("code", "trade_date")
     if capability_id.startswith("concepts.quotes."):
@@ -264,6 +283,12 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
+    if capability_id in {"boards.catalog", "boards.members.history"}:
+        return ("tushare",)
+    if capability_id == "funds.etf.quotes.daily":
+        return ("tushare", "akshare", "efinance")
+    if capability_id == "funds.etf.catalog":
+        return ("tushare",)
     if capability_id in DERIVED_CAPABILITY_BASE_IDS:
         return ("derived_core",)
     if capability_id.startswith("concepts.alias."):
@@ -282,8 +307,10 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("tushare", "efinance", "mootdx", "akshare")
     if capability_id.startswith("markets.calendar."):
         return ("tushare", "akshare")
-    if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
+    if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.batch", "stocks.indicators.money_flow.snapshot", "stocks.indicators.margin.snapshot"}:
         return ("tushare", "akshare")
+    if capability_id in {"stocks.finance.express.snapshot", "stocks.finance.forecasts.snapshot"}:
+        return ("tushare",)
     if capability_id == "concepts.indicators.money_flow":
         return ("akshare", "tushare", "derived_core")
     if capability_id == "concepts.members":
@@ -347,7 +374,6 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "stocks.catalog",
         "stocks.profile.basic",
         "stocks.profile.name_history",
-        "stocks.factors.adj",
         "concepts.profile",
         "concepts.members.history",
         "concepts.indicators.money_flow.snapshot",
@@ -357,6 +383,8 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         "markets.trading.sessions",
     }:
         return ("tushare",)
+    if capability_id == "stocks.factors.adj":
+        return ("tushare", "akshare")
     return ("tushare",)
 
 
@@ -394,7 +422,11 @@ def _build_capability_definitions() -> tuple[CapabilityDefinition, ...]:
                 api_paths=tuple(_API_PATHS_BY_CAPABILITY.get(capability_id, ())),
                 result_shape=result_shape,
                 key_fields=_infer_key_fields(capability_id),
-                default_merge_strategy=_default_merge_strategy(result_shape),
+                default_merge_strategy=(
+                    MERGE_STRATEGY_PRIORITY_FALLBACK
+                    if capability_id == "funds.etf.quotes.daily"
+                    else _default_merge_strategy(result_shape)
+                ),
                 allowed_packages=_infer_allowed_packages(capability_id),
                 default_source_order=_infer_source_order(capability_id),
                 policy_mode=_infer_policy_mode(capability_id),

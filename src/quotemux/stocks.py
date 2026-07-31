@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
+from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialStatementItem, StockManagerItem, StockMarginItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
 from quotemux.infra.db.reference_reads import load_stock_active_codes_frame
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
-from quotemux.local_daily import get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
+from quotemux.local_daily import get_local_stock_adj_factors, get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
 from quotemux.local_store import get_local_stock_catalog, get_local_stock_hl_signal, get_local_stock_intraday_quotes, get_local_stock_name_history
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
@@ -1013,6 +1013,89 @@ class QuoteMuxStocks:
         )
         return [item for item in sorted_items if item.code in requested_codes and item.trade_date == actual_trade_date and item.view == view]
 
+    def get_money_flow_snapshot(self, trade_date: str, view: str) -> list[StockMoneyFlowItem]:
+        actual_trade_date = format_date_value(trade_date)
+        if actual_trade_date == "":
+            raise ValueError("trade_date 不能为空")
+        handlers = {
+            "get_stock_money_flow_snapshot": lambda instance: lambda: _source_package_call(
+                instance.package_id,
+                "get_stock_money_flow_snapshot",
+                actual_trade_date,
+                view,
+            ),
+        }
+        return self._store_list(
+            "stocks.indicators.money_flow.snapshot",
+            {"trade_date": actual_trade_date, "view": view},
+            StockMoneyFlowItem,
+            ("code", "trade_date", "view"),
+            ("code", "trade_date"),
+            lambda: self._source_list(
+                "stocks.indicators.money_flow.snapshot",
+                handlers,
+                ("tushare",),
+                ("code", "trade_date", "view"),
+            ),
+        )
+
+    def get_margin_snapshot(self, trade_date: str) -> list[StockMarginItem]:
+        actual_trade_date = format_date_value(trade_date)
+        if actual_trade_date == "":
+            raise ValueError("trade_date 不能为空")
+        handlers = {
+            "get_stock_margin_snapshot": lambda instance: lambda: _source_package_call(
+                instance.package_id,
+                "get_stock_margin_snapshot",
+                actual_trade_date,
+            ),
+        }
+        return self._store_list(
+            "stocks.indicators.margin.snapshot",
+            {"trade_date": actual_trade_date},
+            StockMarginItem,
+            ("code", "trade_date"),
+            ("code", "trade_date"),
+            lambda: self._source_list(
+                "stocks.indicators.margin.snapshot",
+                handlers,
+                ("tushare",),
+                ("code", "trade_date"),
+            ),
+        )
+
+    def get_express_snapshot(self, announce_date: str) -> list[ExpressItem]:
+        actual_announce_date = format_date_value(announce_date)
+        if actual_announce_date == "":
+            raise ValueError("announce_date 不能为空")
+        handlers = {
+            "get_stock_express_snapshot": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_express_snapshot", actual_announce_date),
+        }
+        return self._store_list(
+            "stocks.finance.express.snapshot",
+            {"announce_date": actual_announce_date},
+            ExpressItem,
+            ("code", "report_period", "announce_date"),
+            ("announce_date", "code", "report_period"),
+            lambda: self._source_list("stocks.finance.express.snapshot", handlers, ("tushare",), ("code", "report_period", "announce_date")),
+        )
+
+    def get_forecast_snapshot(self, announce_date: str) -> list[ForecastItem]:
+        actual_announce_date = format_date_value(announce_date)
+        if actual_announce_date == "":
+            raise ValueError("announce_date 不能为空")
+        handlers = {
+            "get_stock_forecast_snapshot": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_forecast_snapshot", actual_announce_date),
+        }
+        return self._store_list(
+            "stocks.finance.forecasts.snapshot",
+            {"announce_date": actual_announce_date},
+            ForecastItem,
+            ("code", "report_period", "announce_date", "forecast_type"),
+            ("announce_date", "code", "report_period", "forecast_type"),
+            lambda: self._source_list("stocks.finance.forecasts.snapshot", handlers, ("tushare",), ("code", "report_period", "announce_date", "forecast_type")),
+        )
+
     def get_financial_statements(self, codes: list[str], report_period: str, start_period: str, end_period: str, report_type: str) -> list[StockFinancialStatementItem]:
         store_identity = {
             "codes": list(codes),
@@ -1234,6 +1317,9 @@ class QuoteMuxStocks:
         )
 
     def get_adj_factors(self, code: str, start_date: str, end_date: str, base_date: str) -> list[AdjFactorItem]:
+        local_items = get_local_stock_adj_factors(code, start_date, end_date)
+        if local_items != []:
+            return local_items
         store_identity = {"code": code, "start_date": start_date, "end_date": end_date, "base_date": base_date}
         handlers = {
             "get_adj_factors": lambda instance: lambda: _source_package_call(instance.package_id, "get_adj_factors", code, start_date, end_date, base_date),
@@ -1244,7 +1330,7 @@ class QuoteMuxStocks:
             AdjFactorItem,
             ("code", "trade_date"),
             ("code", "trade_date"),
-            lambda: self._source_list("stocks.factors.adj", handlers, ("tushare",), ("code", "trade_date")),
+            lambda: self._source_list("stocks.factors.adj", handlers, ("tushare", "akshare"), ("code", "trade_date")),
         )
 
     def get_technical_factors(self, code: str, trade_date: str, start_date: str, end_date: str, adjust: str) -> list[TechnicalFactorItem]:

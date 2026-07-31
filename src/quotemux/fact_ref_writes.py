@@ -4,7 +4,7 @@ from typing import Callable, Sequence
 
 from pydantic import BaseModel
 
-from platform_models import BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
+from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, EtfCatalogItem, EtfDailyQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
@@ -79,6 +79,49 @@ def _ensure_concept_membership_table() -> bool:
         if not execute_sql(statement):
             return False
     return True
+
+
+def _ensure_etf_tables() -> bool:
+    statements = (
+        "create schema if not exists ref",
+        "create schema if not exists fact",
+        """
+        create table if not exists ref.etf (
+            market character varying not null,
+            code character varying not null,
+            ts_code character varying not null unique,
+            name text not null default '',
+            fund_type text not null default '',
+            management text not null default '',
+            custodian text not null default '',
+            listed_date date,
+            delisted_date date,
+            updated_at timestamp with time zone not null default now(),
+            primary key (market, code)
+        )
+        """,
+        """
+        create table if not exists fact.etf_daily_1d (
+            market character varying not null,
+            code character varying not null,
+            trade_date date not null,
+            open double precision,
+            high double precision,
+            low double precision,
+            close double precision,
+            pre_close double precision,
+            change double precision,
+            pct_chg double precision,
+            volume double precision,
+            amount double precision,
+            loaded_at timestamp with time zone not null default now(),
+            primary key (market, code, trade_date),
+            foreign key (market, code) references ref.etf (market, code)
+        )
+        """,
+        "create index if not exists etf_daily_1d_trade_date_idx on fact.etf_daily_1d (trade_date, market, code)",
+    )
+    return all(execute_sql(statement) for statement in statements)
 
 
 def _stock_market(code: str) -> str:
@@ -510,6 +553,108 @@ def _upsert_board_daily(items: Sequence[BoardQuoteItem]) -> bool:
     )
 
 
+def _upsert_board_catalog(items: Sequence[BoardCatalogItem]) -> bool:
+    params = [
+        (item.board_code, item.board_name, item.category, item.market, item.status, format_date_value(item.start_date), format_date_value(item.end_date))
+        for item in items
+        if item.board_code != ""
+    ]
+    return execute_many(
+        """
+        insert into ref.board (board_code, name, board_type, market, status, listed_date, delisted_date)
+        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date)
+        on conflict (board_code) do update set
+            name = excluded.name,
+            board_type = excluded.board_type,
+            market = excluded.market,
+            status = excluded.status,
+            listed_date = coalesce(excluded.listed_date, ref.board.listed_date),
+            delisted_date = excluded.delisted_date,
+            updated_at = now()
+        """,
+        params,
+    )
+
+
+def _upsert_board_member_history(items: Sequence[BoardMemberHistoryItem]) -> bool:
+    grouped: dict[tuple[str, str, str], list[BoardMemberHistoryItem]] = {}
+    for item in items:
+        code = normalize_stock_code(item.code).zfill(6)
+        if item.board_code == "" or code == "" or format_date_value(item.effective_date) == "":
+            continue
+        key = (item.board_code, _stock_market(code), code)
+        grouped.setdefault(key, []).append(item)
+    params: list[tuple[object, ...]] = []
+    for (board_code, market, code), events in grouped.items():
+        open_from = ""
+        for event in sorted(events, key=lambda value: (format_date_value(value.effective_date), value.action)):
+            effective_date = format_date_value(event.effective_date)
+            if event.action in {"remove", "out"}:
+                if open_from != "":
+                    params.append((board_code, market, code, open_from, effective_date))
+                    open_from = ""
+                continue
+            if open_from == "":
+                open_from = effective_date
+        if open_from != "":
+            params.append((board_code, market, code, open_from, ""))
+    if params == []:
+        return True
+    board_codes = [str(item[0]) for item in params]
+    markets = [str(item[1]) for item in params]
+    codes = [str(item[2]) for item in params]
+    valid_froms = [str(item[3]) for item in params]
+    valid_tos = [str(item[4]) for item in params]
+    valid_frame = query_dataframe(
+        """
+        with incoming as (
+            select * from unnest(%s::text[], %s::text[], %s::text[], %s::date[], %s::text[])
+              as rows(board_code, stock_market, stock_code, valid_from, valid_to)
+        )
+        select incoming.board_code, incoming.stock_market, incoming.stock_code,
+               incoming.valid_from::text as valid_from, incoming.valid_to
+        from incoming
+        where exists (
+            select 1 from ref.stock stock_ref
+            where stock_ref.market = incoming.stock_market and stock_ref.code = incoming.stock_code
+        )
+        """,
+        (board_codes, markets, codes, valid_froms, valid_tos),
+    )
+    valid_params = [
+        (row["board_code"], row["stock_market"], row["stock_code"], row["valid_from"], row["valid_to"])
+        for row in valid_frame.to_dict("records")
+    ]
+    if valid_params == []:
+        return False
+    valid_board_codes = [str(item[0]) for item in valid_params]
+    valid_markets = [str(item[1]) for item in valid_params]
+    valid_codes = [str(item[2]) for item in valid_params]
+    valid_froms = [str(item[3]) for item in valid_params]
+    valid_tos = [str(item[4]) for item in valid_params]
+    return execute_sql(
+        """
+        with incoming as (
+            select * from unnest(%s::text[], %s::text[], %s::text[], %s::date[], %s::text[])
+              as rows(board_code, stock_market, stock_code, valid_from, valid_to)
+        ),
+        deleted as (
+            delete from ref.board_stock_membership existing
+            where existing.board_code in (select distinct board_code from incoming)
+            returning existing.board_code
+        )
+        insert into ref.board_stock_membership (board_code, stock_market, stock_code, valid_from, valid_to)
+        select incoming.board_code, incoming.stock_market, incoming.stock_code, incoming.valid_from, nullif(incoming.valid_to, '')::date
+        from incoming
+        left join (select count(*) as deleted_count from deleted) deletion_barrier on true
+        on conflict (board_code, stock_market, stock_code, valid_from) do update set
+            valid_to = excluded.valid_to,
+            updated_at = now()
+        """,
+        (valid_board_codes, valid_markets, valid_codes, valid_froms, valid_tos),
+    )
+
+
 def _upsert_trading_calendar(items: Sequence[TradingCalendarItem]) -> bool:
     params: list[tuple[object, ...]] = []
     for item in items:
@@ -763,12 +908,86 @@ def _upsert_index_catalog(items: Sequence[IndexCatalogItem]) -> bool:
     )
 
 
+def _etf_market(ts_code: str) -> str:
+    return "SHSE" if ts_code.endswith(".SH") else "SZSE" if ts_code.endswith(".SZ") else ""
+
+
+def _upsert_etf_catalog(items: Sequence[EtfCatalogItem]) -> bool:
+    if not _ensure_etf_tables():
+        return False
+    params: list[tuple[object, ...]] = []
+    for item in items:
+        ts_code = item.ts_code.upper()
+        market = item.market or _etf_market(ts_code)
+        code = item.code.zfill(6)
+        if market == "" or code == "" or ts_code == "":
+            continue
+        params.append((market, code, ts_code, item.name, item.fund_type, item.management, item.custodian, format_date_value(item.list_date), format_date_value(item.delist_date)))
+    return execute_many(
+        """
+        insert into ref.etf (market, code, ts_code, name, fund_type, management, custodian, listed_date, delisted_date)
+        values (%s, %s, %s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date)
+        on conflict (market, code) do update set
+            ts_code = excluded.ts_code,
+            name = case when excluded.name = '' then ref.etf.name else excluded.name end,
+            fund_type = case when excluded.fund_type = '' then ref.etf.fund_type else excluded.fund_type end,
+            management = case when excluded.management = '' then ref.etf.management else excluded.management end,
+            custodian = case when excluded.custodian = '' then ref.etf.custodian else excluded.custodian end,
+            listed_date = coalesce(excluded.listed_date, ref.etf.listed_date),
+            delisted_date = coalesce(excluded.delisted_date, ref.etf.delisted_date),
+            updated_at = now()
+        """,
+        params,
+    )
+
+
+def _upsert_etf_daily(items: Sequence[EtfDailyQuoteItem]) -> bool:
+    if not _ensure_etf_tables():
+        return False
+    catalog_items = [
+        EtfCatalogItem(ts_code=item.ts_code, code=item.ts_code[:6], market=_etf_market(item.ts_code), name="")
+        for item in items
+        if item.ts_code != ""
+    ]
+    if not _upsert_etf_catalog(catalog_items):
+        return False
+    params: list[tuple[object, ...]] = []
+    for item in items:
+        market = _etf_market(item.ts_code)
+        trade_date = format_date_value(item.trade_date)
+        if market == "" or trade_date == "":
+            continue
+        params.append((market, item.ts_code[:6], trade_date, item.open, item.high, item.low, item.close, item.pre_close, item.change, item.pct_chg, item.volume, item.amount))
+    return execute_many(
+        """
+        insert into fact.etf_daily_1d (market, code, trade_date, open, high, low, close, pre_close, change, pct_chg, volume, amount)
+        values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        on conflict (market, code, trade_date) do update set
+            open = excluded.open,
+            high = excluded.high,
+            low = excluded.low,
+            close = excluded.close,
+            pre_close = excluded.pre_close,
+            change = excluded.change,
+            pct_chg = excluded.pct_chg,
+            volume = excluded.volume,
+            amount = excluded.amount,
+            loaded_at = now()
+        """,
+        params,
+    )
+
+
 def get_fact_ref_writer(capability_id: str) -> Callable[[list[BaseModel]], bool] | None:
     writers: dict[str, Callable[[Sequence[object]], bool]] = {
         "stocks.quotes.daily": _upsert_stock_daily,
         "stocks.quotes.intraday": _upsert_stock_intraday,
         "stocks.quotes.daily_snapshot": _upsert_stock_daily,
+        "funds.etf.catalog": _upsert_etf_catalog,
+        "funds.etf.quotes.daily": _upsert_etf_daily,
         "boards.quotes.daily": _upsert_board_daily,
+        "boards.catalog": _upsert_board_catalog,
+        "boards.members.history": _upsert_board_member_history,
         "indexes.quotes.daily": _upsert_index_daily,
         "concepts.quotes.daily": _upsert_concept_daily,
         "markets.calendar.trading": _upsert_trading_calendar,

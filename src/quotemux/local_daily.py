@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from platform_models import StockQuoteItem
+from platform_models import AdjFactorItem, StockQuoteItem
 from quotemux.infra.common import INTRADAY_RULES, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code
-from quotemux.infra.db.market_reads import load_stock_daily_frame, load_stock_daily_local_window_frame, load_stock_daily_snapshot_full_frame
+from quotemux.infra.db.market_reads import load_stock_adj_factor_frame, load_stock_daily_frame, load_stock_daily_local_window_frame, load_stock_daily_snapshot_full_frame
 
 
 def _quote_item_from_row(code: str, row: pd.Series, freq: str, adjust: str) -> StockQuoteItem:
@@ -75,3 +75,21 @@ def get_stock_daily_local_window(start_date: str, end_date: str, limit: int | No
     actual_end_date = format_date_value(end_date)
     raw_frame = load_stock_daily_local_window_frame(actual_start_date, actual_end_date, limit, offset)
     return _daily_frame_to_items(raw_frame, "none", "1d")
+
+
+def get_local_stock_adj_factors(code: str, start_date: str, end_date: str) -> list[AdjFactorItem]:
+    normalized_code = normalize_stock_code(code)
+    if normalized_code == "":
+        return []
+    frame = load_stock_adj_factor_frame(normalized_code, format_date_value(start_date), format_date_value(end_date))
+    if frame.empty:
+        return []
+    return [
+        AdjFactorItem(
+            code=normalized_code,
+            trade_date=format_date_value(row["trade_date"]).replace("-", ""),
+            adj_factor=float(row["adj_factor"]),
+        )
+        for _, row in frame.iterrows()
+        if pd.notna(row["adj_factor"])
+    ]

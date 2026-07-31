@@ -90,6 +90,58 @@ class StockQuotesQueryResult(ApiModel):
     meta: StockQuotesMeta
 
 
+class EtfCatalogItem(ApiModel):
+    ts_code: str
+    code: str
+    market: str
+    name: str
+    fund_type: str = ""
+    management: str = ""
+    custodian: str = ""
+    list_date: str = ""
+    delist_date: str = ""
+
+
+class EtfDailyQuoteItem(ApiModel):
+    ts_code: str
+    trade_date: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    pre_close: float | None = None
+    change: float | None = None
+    pct_chg: float | None = None
+    volume: float | None = None
+    amount: float | None = None
+
+
+class EtfDailyQuoteCodeSummary(ApiModel):
+    ts_code: str
+    row_count: int
+    expected_bar_count: int = 0
+    actual_bar_count: int = 0
+    missing_count: int = 0
+    first_trade_date: str = ""
+    last_trade_date: str = ""
+    complete: bool
+    truncated: bool
+    missing_trade_dates: list[str] = Field(default_factory=list)
+
+
+class EtfDailyQuotesMeta(ApiModel):
+    total_rows: int
+    returned_rows: int
+    complete: bool
+    truncated: bool
+    codes: list[EtfDailyQuoteCodeSummary] = Field(default_factory=list)
+
+
+class EtfDailyQuotesQueryResult(ApiModel):
+    items: list[EtfDailyQuoteItem] = Field(default_factory=list)
+    meta: EtfDailyQuotesMeta
+
+
 class BoardQuoteItem(ApiModel):
     board_code: str
     board_name: str = ""
@@ -144,6 +196,19 @@ class StockMoneyFlowItem(ApiModel):
     main_inflow: float | None = None
     main_outflow: float | None = None
     net_inflow: float | None = None
+
+
+class StockMarginItem(ApiModel):
+    code: str
+    trade_date: str
+    financing_balance: float | None = None
+    financing_buy: float | None = None
+    financing_repay: float | None = None
+    securities_lending_balance: float | None = None
+    securities_lending_volume: float | None = None
+    securities_lending_repay: float | None = None
+    securities_lending_sell: float | None = None
+    total_margin_balance: float | None = None
 
 
 class NewsEventSourceItem(ApiModel):
@@ -721,6 +786,7 @@ class ExpressItem(ApiModel):
 class ForecastItem(ApiModel):
     code: str
     report_period: str
+    announce_date: str = ""
     forecast_type: str = ""
     forecast_summary: str = ""
     net_profit_min: float | None = None

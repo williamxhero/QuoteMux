@@ -48,6 +48,45 @@ def load_stock_catalog_frame(codes: list[str], name: str, market: str, listed_fi
     return query_dataframe(query, tuple(params))
 
 
+def load_etf_catalog_frame(ts_codes: list[str], name: str, include_delisted: bool) -> pd.DataFrame:
+    exists_frame = query_dataframe(
+        """
+        select 1
+        from information_schema.tables
+        where table_schema = 'ref' and table_name = 'etf'
+        limit 1
+        """
+    )
+    if exists_frame.empty:
+        return pd.DataFrame()
+    where_clauses = ["ts_code <> ''"]
+    params: list[object] = []
+    if ts_codes != []:
+        where_clauses.append("ts_code = any(%s)")
+        params.append(ts_codes)
+    if name != "":
+        where_clauses.append("name ilike %s")
+        params.append(f"%{name}%")
+    if not include_delisted:
+        where_clauses.append("(delisted_date is null or delisted_date >= current_date)")
+    query = f"""
+        select
+            ts_code,
+            code,
+            market,
+            name,
+            fund_type,
+            management,
+            custodian,
+            listed_date::text as list_date,
+            delisted_date::text as delist_date
+        from ref.etf
+        where {' and '.join(where_clauses)}
+        order by ts_code
+    """
+    return query_dataframe(query, tuple(params))
+
+
 def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
     if not trade_date:
         return pd.DataFrame()

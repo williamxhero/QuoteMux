@@ -9,6 +9,7 @@ from quotemux.rankings import QuoteMuxRankings
 from quotemux.settings import QuoteMuxSettings
 from quotemux.stocks import QuoteMuxStocks
 from quotemux.datasets import QuoteMuxDatasets
+from quotemux.etfs import QuoteMuxEtfs
 from quotemux.store.admin import QuoteMuxCacheAdmin, QuoteMuxCaptureAdmin
 
 
@@ -16,6 +17,7 @@ class QuoteMux:
     def __init__(self, settings: QuoteMuxSettings | None = None) -> None:
         self.settings = settings or QuoteMuxSettings()
         self.stocks = QuoteMuxStocks(self.settings)
+        self.etfs = QuoteMuxEtfs(self.settings)
         self.indexes = QuoteMuxIndexes(self.settings)
         self.markets = QuoteMuxMarkets(self.settings)
         self.concepts = QuoteMuxConceptRuntime(self.settings)

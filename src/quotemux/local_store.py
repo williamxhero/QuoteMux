@@ -4,10 +4,10 @@ from datetime import date
 
 import pandas as pd
 
-from platform_models import ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
+from platform_models import ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, EtfCatalogItem, EtfDailyQuoteItem, HLSignalItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, TradingCalendarItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code
-from quotemux.infra.db.market_reads import load_concept_daily_frame, load_concept_daily_snapshot_frame, load_index_daily_frame, load_latest_complete_concept_daily_snapshot_frame, load_latest_complete_concept_daily_snapshot_ids, load_stock_intraday_frame
-from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_concept_member_history_frame, load_concept_members_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
+from quotemux.infra.db.market_reads import load_concept_daily_frame, load_concept_daily_snapshot_frame, load_etf_daily_frame, load_index_daily_frame, load_latest_complete_concept_daily_snapshot_frame, load_latest_complete_concept_daily_snapshot_ids, load_stock_intraday_frame
+from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_concept_member_history_frame, load_concept_members_frame, load_etf_catalog_frame, load_index_catalog_frame, load_stock_catalog_frame, load_stock_hl_frame, load_stock_name_history_frame, load_trade_calendar_frame
 
 
 def _frame_to_stock_quote_items(frame: pd.DataFrame, freq: str):
@@ -43,12 +43,12 @@ def _frame_to_stock_quote_items(frame: pd.DataFrame, freq: str):
 
 
 def get_local_stock_intraday_quotes(codes: list[str], freq: str, trade_date: str, start_date: str, end_date: str, start_time: str, end_time: str, count: int | None) -> list[object]:
-    if freq not in {"1m", "30m"}:
+    if freq not in {"1m", "5m", "30m"}:
         return []
     request_start_dt, request_end_dt = build_time_bounds(trade_date, start_date, end_date, start_time, end_time, count, True)
     normalized_codes = [normalize_stock_code(code) for code in codes]
     normalized_codes = [code for code in dict.fromkeys(normalized_codes) if code]
-    raw_frame = load_stock_intraday_frame(normalized_codes, request_start_dt, request_end_dt, "30m" if freq == "30m" else "1m")
+    raw_frame = load_stock_intraday_frame(normalized_codes, request_start_dt, request_end_dt, freq)
     items = _frame_to_stock_quote_items(raw_frame, freq)
     if count:
         grouped: dict[str, list[object]] = {}
@@ -59,6 +59,51 @@ def get_local_stock_intraday_quotes(codes: list[str], freq: str, trade_date: str
             trimmed.extend(sorted(code_items, key=lambda item: item.trade_time)[-count:])
         return trimmed
     return items
+
+
+def get_local_etf_catalog(ts_codes: list[str], name: str, include_delisted: bool) -> list[EtfCatalogItem]:
+    frame = load_etf_catalog_frame(ts_codes, name, include_delisted)
+    if frame.empty:
+        return []
+    return [
+        EtfCatalogItem(
+            ts_code=str(row["ts_code"]),
+            code=str(row["code"]),
+            market=str(row["market"]),
+            name=str(row["name"]),
+            fund_type=str(row["fund_type"]),
+            management=str(row["management"]),
+            custodian=str(row["custodian"]),
+            list_date=format_date_value(row["list_date"]),
+            delist_date=format_date_value(row["delist_date"]),
+        )
+        for _, row in frame.iterrows()
+    ]
+
+
+def get_local_etf_daily_quotes(ts_codes: list[str], trade_date: str, start_date: str, end_date: str) -> list[EtfDailyQuoteItem]:
+    request_start_dt, request_end_dt = build_time_bounds(trade_date, start_date, end_date, "", "", None, False)
+    start_text = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
+    end_text = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
+    frame = load_etf_daily_frame(ts_codes, start_text, end_text)
+    if frame.empty:
+        return []
+    return [
+        EtfDailyQuoteItem(
+            ts_code=str(row["ts_code"]),
+            trade_date=format_date_value(row["trade_date"]),
+            open=float(row["open"]) if pd.notna(row["open"]) else None,
+            high=float(row["high"]) if pd.notna(row["high"]) else None,
+            low=float(row["low"]) if pd.notna(row["low"]) else None,
+            close=float(row["close"]) if pd.notna(row["close"]) else None,
+            pre_close=float(row["pre_close"]) if pd.notna(row["pre_close"]) else None,
+            change=float(row["change"]) if pd.notna(row["change"]) else None,
+            pct_chg=float(row["pct_chg"]) if pd.notna(row["pct_chg"]) else None,
+            volume=float(row["volume"]) if pd.notna(row["volume"]) else None,
+            amount=float(row["amount"]) if pd.notna(row["amount"]) else None,
+        )
+        for _, row in frame.iterrows()
+    ]
 
 
 def get_local_stock_hl_signal(code: str, trade_date: str, start_date: str, end_date: str) -> list[HLSignalItem]:

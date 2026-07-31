@@ -11,7 +11,11 @@ import subprocess
 import tempfile
 
 
-PAYLOAD_ROOT = Path(os.getenv("QUOTEMUX_CACHE_PAYLOAD_ROOT", "/volume/stocks/QuoteMux/cache_payloads"))
+DEFAULT_PAYLOAD_ROOT = Path("/volume/stocks/QuoteMux/cache_payloads")
+
+
+def _payload_root() -> Path:
+    return Path(os.getenv("QUOTEMUX_CACHE_PAYLOAD_ROOT", str(DEFAULT_PAYLOAD_ROOT)))
 
 
 @dataclass(frozen=True)
@@ -50,7 +54,7 @@ def _safe_delete_path(path: Path) -> None:
 
 
 def _write_compressed_json(relative_path: str, data: bytes) -> None:
-    target = PAYLOAD_ROOT / relative_path
+    target = _payload_root() / relative_path
     if target.exists():
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -83,7 +87,7 @@ def put_payload(capability_id: str, time_key: datetime, payload_json: dict[str, 
 
 
 def _read_payload_file(path: str, expected_sha256: str) -> dict[str, object] | None:
-    full_path = PAYLOAD_ROOT / path
+    full_path = _payload_root() / path
     try:
         with gzip.open(full_path, "rb") as payload_file:
             data = payload_file.read()
@@ -102,5 +106,5 @@ def get_payload(payload_ref: CachePayloadRef) -> dict[str, object] | None:
 
 
 def delete_payload(payload_ref: CachePayloadRef) -> None:
-    _safe_delete_path(PAYLOAD_ROOT / payload_ref.payload_path)
-    _safe_delete_path(PAYLOAD_ROOT / payload_ref.source_path)
+    _safe_delete_path(_payload_root() / payload_ref.payload_path)
+    _safe_delete_path(_payload_root() / payload_ref.source_path)

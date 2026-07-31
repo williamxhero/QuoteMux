@@ -133,6 +133,65 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
     return query_dataframe(query, tuple([*source_params, *outer_params]))
 
 
+def load_stock_adj_factor_frame(code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    if code == "":
+        return pd.DataFrame()
+    clauses = ["day_rows.code = %s", _canonical_stock_market_condition("day_rows"), "day_rows.adj_factor is not null"]
+    params: list[object] = [code]
+    if start_date != "":
+        clauses.append("day_rows.trade_date >= %s::date")
+        params.append(start_date)
+    if end_date != "":
+        clauses.append("day_rows.trade_date <= %s::date")
+        params.append(end_date)
+    return query_dataframe(
+        f"""
+        select
+            day_rows.code,
+            day_rows.trade_date::text as trade_date,
+            day_rows.adj_factor
+        from fact.stock_daily_1d day_rows
+        where {' and '.join(clauses)}
+        order by day_rows.trade_date
+        """,
+        tuple(params),
+    )
+
+
+def load_etf_daily_frame(ts_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    if ts_codes == [] or not _table_exists("fact", "etf_daily_1d") or not _table_exists("ref", "etf"):
+        return pd.DataFrame()
+    where_clauses = ["etf.ts_code = any(%s)"]
+    params: list[object] = [ts_codes]
+    if start_date != "":
+        where_clauses.append("daily_rows.trade_date >= %s::date")
+        params.append(start_date)
+    if end_date != "":
+        where_clauses.append("daily_rows.trade_date <= %s::date")
+        params.append(end_date)
+    query = f"""
+        select
+            etf.ts_code,
+            daily_rows.trade_date::text as trade_date,
+            daily_rows.open,
+            daily_rows.high,
+            daily_rows.low,
+            daily_rows.close,
+            daily_rows.pre_close,
+            daily_rows.change,
+            daily_rows.pct_chg,
+            daily_rows.volume,
+            daily_rows.amount
+        from fact.etf_daily_1d daily_rows
+        join ref.etf etf
+          on etf.market = daily_rows.market
+         and etf.code = daily_rows.code
+        where {' and '.join(where_clauses)}
+        order by etf.ts_code, daily_rows.trade_date
+    """
+    return query_dataframe(query, tuple(params))
+
+
 def _stock_daily_snapshot_query() -> str:
     existing_columns = _existing_columns("fact", "stock_daily_1d")
     return f"""
@@ -245,10 +304,8 @@ def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: i
 def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: object, freq: str = "1m") -> pd.DataFrame:
     if not codes:
         return pd.DataFrame()
-    if freq == "30m":
-        frame = load_stock_bar_30m_frame(codes, start_time, end_time)
-        if not frame.empty:
-            return frame
+    if freq in {"5m", "30m"}:
+        return _load_stock_aggregated_bar_frame(codes, start_time, end_time, freq)
     where_clauses = ["code = any(%s)"]
     params: list[object] = [codes]
     if start_time is not None:
@@ -275,7 +332,14 @@ def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: ob
 
 
 def load_stock_bar_30m_frame(codes: list[str], start_time: object, end_time: object) -> pd.DataFrame:
+    return _load_stock_aggregated_bar_frame(codes, start_time, end_time, "30m")
+
+
+def _load_stock_aggregated_bar_frame(codes: list[str], start_time: object, end_time: object, freq: str) -> pd.DataFrame:
     if not codes:
+        return pd.DataFrame()
+    table_name = {"5m": "stock_bar_5m", "30m": "stock_bar_30m"}.get(freq, "")
+    if table_name == "":
         return pd.DataFrame()
     where_clauses = ["code = any(%s)"]
     params: list[object] = [codes]
@@ -295,7 +359,7 @@ def load_stock_bar_30m_frame(codes: list[str], start_time: object, end_time: obj
             close,
             volume,
             amount
-        from fact.stock_bar_30m
+        from fact.{table_name}
         where {' and '.join(where_clauses)}
         order by code, bar_time
     """

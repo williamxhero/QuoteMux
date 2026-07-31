@@ -22,8 +22,19 @@ def _bar_times(start_hour: int, start_minute: int, end_hour: int, end_minute: in
     return tuple(items)
 
 
+def _interval_bar_times(start_hour: int, start_minute: int, end_hour: int, end_minute: int, interval_minutes: int) -> tuple[str, ...]:
+    items: list[str] = []
+    current = start_hour * 60 + start_minute
+    end = end_hour * 60 + end_minute
+    while current <= end:
+        items.append(f"{current // 60:02d}:{current % 60:02d}:00")
+        current += interval_minutes
+    return tuple(items)
+
+
 EXPECTED_INTRADAY_BAR_TIMES = {
     "1m": _bar_times(9, 31, 11, 30) + _bar_times(13, 1, 15, 0),
+    "5m": _interval_bar_times(9, 35, 11, 30, 5) + _interval_bar_times(13, 5, 15, 0, 5),
     "30m": ("09:30:00", "10:00:00", "10:30:00", "11:00:00", "11:30:00", "13:00:00", "13:30:00", "14:00:00", "14:30:00", "15:00:00"),
 }
 

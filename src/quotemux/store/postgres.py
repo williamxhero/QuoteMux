@@ -94,16 +94,22 @@ class DefaultCachePolicySpec:
 
 
 def _time_field_for_capability(capability_id: str) -> str:
+    if capability_id == "funds.etf.quotes.daily":
+        return "trade_date"
+    if capability_id == "funds.etf.catalog":
+        return "list_date"
     if capability_id in {"markets.trading.open_auctions", "stocks.quotes.auctions"}:
         return "trade_date"
     if capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday", "stocks.quotes.daily_snapshot", "indexes.quotes.daily", "boards.quotes.daily"}:
         return "trade_time"
     if capability_id.startswith("concepts.quotes.") or capability_id.startswith("markets.trading.open_auctions"):
         return "trade_time"
-    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
+    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot", "stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch", "stocks.indicators.money_flow.snapshot", "stocks.indicators.margin.snapshot"}:
         return "trade_date"
     if capability_id == "stocks.indicators.risk_flags":
         return "start_date"
+    if capability_id in {"stocks.finance.express.snapshot", "stocks.finance.forecasts.snapshot"}:
+        return "announce_date"
     if capability_id.startswith("markets.calendar.") or capability_id.startswith("markets.indicators.") or capability_id.startswith("markets.connect.capital_flow") or capability_id.startswith("markets.connect.active_top10") or capability_id.startswith("markets.events.block_trades") or capability_id.startswith("markets.participants.dragon_tiger") or capability_id == "markets.participants.hot_money.details":
         return "trade_date"
     if capability_id.startswith("stocks.finance."):
@@ -162,6 +168,10 @@ def _time_field_for_capability(capability_id: str) -> str:
 
 
 def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "funds.etf.quotes.daily":
+        return ("ts_code", "trade_date")
+    if capability_id == "funds.etf.catalog":
+        return ("ts_code",)
     if capability_id.startswith("stocks.quotes."):
         return ("code", "freq", "adjust")
     if capability_id.startswith("indexes.quotes."):
@@ -184,6 +194,10 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("event_id",)
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_period", "report_type", "statement_type")
+    if capability_id == "stocks.finance.express.snapshot":
+        return ("code", "report_period", "announce_date")
+    if capability_id == "stocks.finance.forecasts.snapshot":
+        return ("code", "report_period", "announce_date", "forecast_type")
     if capability_id == "stocks.finance.indicators":
         return ("code", "report_period")
     if capability_id == "stocks.finance.audits":
@@ -242,7 +256,7 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "holder_name", "start_date", "end_date", "status")
     if capability_id == "stocks.ownership.shareholders.count":
         return ("code", "trade_date")
-    if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch"}:
+    if capability_id in {"stocks.indicators.daily_basic", "stocks.indicators.daily_market_value", "stocks.indicators.daily_valuation", "stocks.indicators.money_flow", "stocks.indicators.money_flow.batch", "stocks.indicators.money_flow.snapshot"}:
         return ("code", "trade_date")
     if capability_id == "stocks.indicators.risk_flags":
         return ("code", "flag_type", "start_date", "end_date", "status")
@@ -290,6 +304,10 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
 
 
 def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "funds.etf.catalog":
+        return ("ts_codes", "name", "include_delisted")
+    if capability_id == "funds.etf.quotes.daily":
+        return ("ts_codes",)
     if capability_id == "stocks.catalog":
         return ("codes", "name", "exchange", "list_status", "include_delisted")
     if capability_id.startswith("stocks.quotes."):
@@ -320,7 +338,7 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code",)
     if capability_id == "stocks.indicators.money_flow":
         return ("code", "view")
-    if capability_id == "stocks.indicators.money_flow.batch":
+    if capability_id in {"stocks.indicators.money_flow.batch", "stocks.indicators.money_flow.snapshot"}:
         return ("code", "view")
     if capability_id == "stocks.indicators.risk_flags":
         return ("flag_type", "status")
@@ -328,6 +346,8 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("concept_id", "scope")
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_type")
+    if capability_id in {"stocks.finance.express.snapshot", "stocks.finance.forecasts.snapshot"}:
+        return ()
     if capability_id == "stocks.finance.main_business":
         return ("code", "classification")
     if capability_id.startswith("stocks."):
@@ -356,6 +376,10 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
 
 
 def _coverage_mode_for_capability(capability_id: str) -> str:
+    if capability_id == "funds.etf.catalog":
+        return "snapshot"
+    if capability_id == "funds.etf.quotes.daily":
+        return "trading_day_range"
     if capability_id == "stocks.catalog":
         return "snapshot"
     if capability_id == "stocks.quotes.intraday":
@@ -555,6 +579,10 @@ def build_time_key(payload: dict[str, object], time_field: str) -> datetime:
 
 def build_scope_identity(payload: dict[str, object], fields: Sequence[str]) -> str:
     return build_identity_value(payload, fields)
+
+
+def _sql_like_descendant_prefix(identity_value: str) -> str:
+    return (identity_value + "|").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 def _fresh_until_from_ttl(written_at: datetime, ttl_seconds: int) -> datetime:
@@ -868,21 +896,35 @@ class CacheStatusRepository:
 
 
 class CacheRowRepository:
-    def read(self, capability_id: str, time_start: datetime, time_end: datetime, never_expires: bool) -> tuple[dict[str, object], ...]:
+    def read(
+        self,
+        capability_id: str,
+        time_start: datetime,
+        time_end: datetime,
+        never_expires: bool,
+        identity_prefix: str = "",
+    ) -> tuple[dict[str, object], ...]:
         if not _ensure_schema():
             return ()
+        clauses = [
+            "capability_id = %s",
+            "time_key >= %s",
+            "time_key <= %s",
+            "(%s or fresh_until > now())",
+            "payload_path <> ''",
+        ]
+        params: list[object] = [capability_id, time_start, time_end, never_expires]
+        if identity_prefix != "":
+            clauses.append("(identity_value = %s or identity_value like %s escape '\\')")
+            params.extend((identity_prefix, _sql_like_descendant_prefix(identity_prefix)))
         frame = query_dataframe(
-            """
+            f"""
             select payload_sha256, payload_path, source_sha256, source_path
             from capability_cache_rows
-            where capability_id = %s
-              and time_key >= %s
-              and time_key <= %s
-              and (%s or fresh_until > now())
-              and payload_path <> ''
+            where {' and '.join(clauses)}
             order by time_key asc, identity_value asc
             """,
-            (capability_id, time_start, time_end, never_expires),
+            tuple(params),
         )
         if _is_empty_dataframe(frame):
             return ()
@@ -1101,6 +1143,15 @@ def _filter_payloads(payloads: Sequence[dict[str, object]], scopes: Sequence[Cac
     return tuple(result)
 
 
+def _scope_identity_prefix(policy: CachePolicy, scope: CacheScope) -> str:
+    scope_fields = policy.request_scope_fields
+    if scope_fields == () or policy.key_fields[: len(scope_fields)] != scope_fields:
+        return ""
+    if any(_normalize_text(scope.criteria.get(field, "")) == "" for field in scope_fields):
+        return ""
+    return build_identity_value(scope.criteria, scope_fields)
+
+
 def _build_actual_coverage_rows(
     policy: CachePolicy,
     scopes: Sequence[CacheScope],
@@ -1226,7 +1277,8 @@ class UnifiedPostgresCacheStore:
                 start, end = datetime.min, datetime.max
             else:
                 start, end = _coverage_read_range(policy, coverage, scope)
-            for payload in self.rows.read(capability_id, start, end, never_expires):
+            identity_prefix = _scope_identity_prefix(policy, scope)
+            for payload in self.rows.read(capability_id, start, end, never_expires, identity_prefix):
                 marker = repr(sorted(payload.items()))
                 if marker in seen:
                     continue
