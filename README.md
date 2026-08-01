@@ -17,4 +17,4 @@
 
 ## 安装
 
-请使用 AI 安装并跑通本项目（通过 MarketHub 仓库安装），提示词示例：“阅读 https://github.com/williamxhero/MarketHub/AIREADME.md 并在本机 D:\MarketHub\ 目录中安装这个项目”
+请使用 AI 安装并跑通本项目（通过 [MarketHub](https://github.com/williamxhero/MarketHub) 仓库安装），提示词示例：“阅读 https://github.com/williamxhero/MarketHub/AIREADME.md 并在本机 D:\MarketHub\ 目录中安装这个项目”
