@@ -31,10 +31,10 @@ def package_repo_spec() -> str:
 
 
 def package_install_target() -> str:
-    local_project_root = find_local_package_project_root()
-    if local_project_root is not None:
-        return str(local_project_root)
-    return package_repo_spec()
+    target = package_repo_spec()
+    if Path(target).expanduser().is_dir():
+        raise RuntimeError("QuoteMux_Packages 必须在线安装，不能使用本地目录")
+    return target
 
 
 def package_requirements_path(manifest: SourcePackageManifest) -> Path | None:
@@ -167,18 +167,6 @@ def _install_distribution_for_python(python_executable: str) -> None:
     target = package_install_target()
     _clean_local_package_build_artifacts(target)
     subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", target], check=True)
-
-
-def find_local_package_project_root() -> Path | None:
-    env_path = Path(package_repo_spec()).expanduser()
-    if env_path.is_dir() and (env_path / "pyproject.toml").is_file():
-        return env_path.resolve()
-    current_path = Path(__file__).resolve()
-    for parent in current_path.parents:
-        candidate = parent / "QuoteMux_Packages"
-        if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
-            return candidate
-    return None
 
 
 def _installed_packages_fingerprint() -> str:

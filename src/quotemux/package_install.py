@@ -82,22 +82,10 @@ def _install_distribution(python_executable: str) -> None:
 
 
 def _package_install_target() -> str:
-    local_project_root = _find_local_package_project_root()
-    if local_project_root is not None:
-        return str(local_project_root)
-    return PACKAGE_REPO_SPEC
-
-
-def _find_local_package_project_root() -> Path | None:
-    env_path = Path(PACKAGE_REPO_SPEC).expanduser()
-    if env_path.is_dir() and (env_path / "pyproject.toml").is_file():
-        return env_path.resolve()
-    current_path = Path(__file__).resolve()
-    for parent in current_path.parents:
-        candidate = parent / "QuoteMux_Packages"
-        if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
-            return candidate
-    return None
+    target = os.getenv("QUOTEMUX_PACKAGE_REPO_SPEC", PACKAGE_REPO_SPEC)
+    if Path(target).expanduser().is_dir():
+        raise RuntimeError("QuoteMux_Packages 必须在线安装，不能使用本地目录")
+    return target
 
 
 def _clean_local_package_build_artifacts(target: str) -> None:
