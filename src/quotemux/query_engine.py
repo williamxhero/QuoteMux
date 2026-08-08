@@ -106,6 +106,7 @@ def execute_capability_query(spec: CapabilityQuerySpec[T]) -> tuple[list[T], Con
     cache_enabled = spec.store_enabled and not uses_fact_ref
     if cache_enabled:
         store_items, store_read = load_store_result(spec.capability_id, spec.store_identity, spec.model_type)
+        store_items = merge_model_lists([], store_items, spec.key_fields)
         store_status = store_read.status
         if store_read.hit:
             if spec.request_builder(store_items) == []:

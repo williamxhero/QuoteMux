@@ -30,9 +30,11 @@ def _quote_item_from_row(code: str, row: pd.Series, freq: str, adjust: str) -> S
 
 
 def _daily_frame_to_items(frame: pd.DataFrame, adjust: str, freq: str = "1d") -> list[StockQuoteItem]:
-    if frame.empty or adjust != "none" or freq != "1d":
+    if frame.empty or freq != "1d" or adjust not in {"none", "qfq", "hfq"}:
         return []
-    work = frame.copy()
+    work = _apply_daily_adjustment(frame, adjust)
+    if work.empty:
+        return []
     work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
     work = work.dropna(subset=["trade_time"])
     items: list[StockQuoteItem] = []
@@ -41,6 +43,38 @@ def _daily_frame_to_items(frame: pd.DataFrame, adjust: str, freq: str = "1d") ->
         for _, row in result_frame.iterrows():
             items.append(_quote_item_from_row(str(code), row, freq, adjust))
     return items
+
+
+def _apply_daily_adjustment(frame: pd.DataFrame, adjust: str) -> pd.DataFrame:
+    if adjust == "none":
+        return frame.copy()
+    if "adj_factor" not in frame.columns:
+        return pd.DataFrame()
+    work = frame.copy()
+    work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
+    work["adj_factor"] = pd.to_numeric(work["adj_factor"], errors="coerce")
+    work = work.dropna(subset=["code", "trade_time"])
+    if work.empty:
+        return pd.DataFrame()
+    adjusted_groups: list[pd.DataFrame] = []
+    for _, code_frame in work.groupby("code", sort=False):
+        ordered = code_frame.sort_values("trade_time").copy()
+        ordered.loc[ordered["adj_factor"] <= 0, "adj_factor"] = pd.NA
+        ordered["adj_factor"] = ordered["adj_factor"].ffill()
+        ordered = ordered.dropna(subset=["adj_factor"])
+        if ordered.empty:
+            continue
+        if adjust == "qfq":
+            multiplier = ordered["adj_factor"] / ordered["adj_factor"].iloc[-1]
+        else:
+            multiplier = ordered["adj_factor"]
+        for column in ("open", "high", "low", "close"):
+            ordered[column] = pd.to_numeric(ordered[column], errors="coerce") * multiplier
+        ordered["pre_close"] = ordered["close"].shift(1)
+        ordered["change"] = ordered["close"] - ordered["pre_close"]
+        ordered["pct_chg"] = ordered["change"] / ordered["pre_close"] * 100
+        adjusted_groups.append(ordered)
+    return pd.concat(adjusted_groups, ignore_index=True) if adjusted_groups else pd.DataFrame()
 
 
 def get_stock_quotes(codes: list[str], freq: str, trade_date: str, start_date: str, end_date: str, start_time: str, end_time: str, count: int | None, adjust: str) -> list[StockQuoteItem]:
@@ -93,3 +127,18 @@ def get_local_stock_adj_factors(code: str, start_date: str, end_date: str) -> li
         for _, row in frame.iterrows()
         if pd.notna(row["adj_factor"])
     ]
+
+
+def get_stock_codes_missing_adj_factors(codes: list[str], start_date: str, end_date: str) -> list[str]:
+    """返回窗口内存在日线但缺少有效复权因子的证券。"""
+    normalized_codes = [normalize_stock_code(code) for code in codes]
+    normalized_codes = [code for code in dict.fromkeys(normalized_codes) if code]
+    if not normalized_codes:
+        return []
+    frame = load_stock_daily_frame(normalized_codes, format_date_value(start_date), format_date_value(end_date))
+    if frame.empty or "adj_factor" not in frame.columns:
+        return normalized_codes
+    work = frame.copy()
+    work["adj_factor"] = pd.to_numeric(work["adj_factor"], errors="coerce")
+    valid_by_code = work.assign(_valid=work["adj_factor"] > 0).groupby("code", sort=False)["_valid"].any()
+    return [code for code in normalized_codes if not bool(valid_by_code.get(code, False))]

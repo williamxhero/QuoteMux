@@ -196,6 +196,7 @@ class StockMoneyFlowItem(ApiModel):
     main_inflow: float | None = None
     main_outflow: float | None = None
     net_inflow: float | None = None
+    active_buy_amount: float | None = None
 
 
 class StockMarginItem(ApiModel):
@@ -663,6 +664,7 @@ class StockDailyBasicItem(ApiModel):
     pb: float | None = None
     total_share: float | None = None
     float_share: float | None = None
+    free_share: float | None = None
 
 
 class StockDailyValuationItem(ApiModel):
@@ -673,6 +675,7 @@ class StockDailyValuationItem(ApiModel):
     ps: float | None = None
     pcf: float | None = None
     dv_ratio: float | None = None
+    dv_ttm: float | None = None
 
 
 class StockDailyMarketValueItem(ApiModel):
@@ -699,6 +702,87 @@ class StockPremarketItem(ApiModel):
     float_share: float | None = None
     limit_up: float | None = None
     limit_down: float | None = None
+
+
+class StockStrategyFactorItem(ApiModel):
+    trade_date: str
+    code: str
+    listing_board: str = ""
+    close: float | None = None
+    dividend_yield_pct: float | None = None
+    dividend_yield_ttm_pct: float | None = None
+    float_market_cap: float | None = None
+    circulating_shares: float | None = None
+    free_float_shares: float | None = None
+    active_buy_amount: float | None = None
+    active_buy_amount_proportion_all: float | None = None
+    volume_shares: float | None = None
+    mean_volume_5d_shares: float | None = None
+    mean_volume_5d_to_free_float_shares: float | None = None
+    ma10: float | None = None
+    ma20: float | None = None
+    ma40: float | None = None
+    ma10_qfq: float | None = None
+    ma20_qfq: float | None = None
+    ma40_qfq: float | None = None
+    is_st: bool = False
+    is_suspended: bool = False
+    upper_limit: float | None = None
+    lower_limit: float | None = None
+    price_band_state: str = ""
+    financial_formula_version: str = ""
+    financial_announcement_date: str = ""
+    financial_report_period: str = ""
+    gross_profit_ttm_yoy_pct: float | None = None
+    total_operating_revenue_ttm_yoy_pct: float | None = None
+    gross_profit_ttm_yoy_3y_avg_pct: float | None = None
+    total_operating_revenue_ttm_yoy_3y_avg_pct: float | None = None
+    ebit_per_share_latest_quarter_cny: float | None = None
+    attributable_net_profit_per_latest_share_cny: float | None = None
+    attributable_net_profit_per_latest_share_qoq_pct: float | None = None
+    deducted_net_profit_ttm_cny: float | None = None
+    deducted_net_profit_ttm_qoq_pct: float | None = None
+    ebit_ps_lf_consec_min_3q: float | None = None
+    basic_eps_latest_capital_lf_qoq_consec_min_3q: float | None = None
+    net_profit_deducted_ttm_qoq_consec_min_3q: float | None = None
+
+
+class StockFinancialPitRawItem(ApiModel):
+    code: str
+    report_period: str
+    announcement_date: str
+    actual_announcement_date: str = ""
+    report_type: str = "1"
+    company_type: str = ""
+    update_flag: str = ""
+    gross_profit_cumulative_cny: float | None = None
+    total_operating_revenue_cumulative_cny: float | None = None
+    ebit_cumulative_cny: float | None = None
+    attributable_net_profit_cumulative_cny: float | None = None
+    basic_eps_cumulative_cny_per_share: float | None = None
+    deducted_net_profit_single_quarter_cny: float | None = None
+
+
+class StockFinancialPitFactorItem(ApiModel):
+    code: str
+    announcement_date: str
+    report_period: str
+    formula_version: str
+    revision_source: str
+    gross_profit_ttm_cny: float | None = None
+    gross_profit_ttm_yoy_pct: float | None = None
+    total_operating_revenue_ttm_cny: float | None = None
+    total_operating_revenue_ttm_yoy_pct: float | None = None
+    ebit_latest_quarter_cny: float | None = None
+    total_shares_latest: float | None = None
+    ebit_per_share_latest_quarter_cny: float | None = None
+    attributable_net_profit_per_latest_share_cny: float | None = None
+    attributable_net_profit_per_latest_share_qoq_pct: float | None = None
+    deducted_net_profit_ttm_cny: float | None = None
+    deducted_net_profit_ttm_qoq_pct: float | None = None
+    ebit_ps_lf_consec_min_3q: float | None = None
+    basic_eps_latest_capital_lf_qoq_consec_min_3q: float | None = None
+    net_profit_deducted_ttm_qoq_consec_min_3q: float | None = None
 
 
 class LimitOrderAmountItem(ApiModel):

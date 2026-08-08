@@ -83,7 +83,7 @@ def _install_distribution(python_executable: str) -> None:
 
 def _package_install_target() -> str:
     target = os.getenv("QUOTEMUX_PACKAGE_REPO_SPEC", PACKAGE_REPO_SPEC)
-    if Path(target).expanduser().is_dir():
+    if Path(target).expanduser().is_dir() and os.getenv("QUOTEMUX_ALLOW_LOCAL_PACKAGE_REPO", "").lower() != "true":
         raise RuntimeError("QuoteMux_Packages 必须在线安装，不能使用本地目录")
     return target
 

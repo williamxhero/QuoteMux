@@ -237,6 +237,43 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
     return _repair_stock_daily_reference_rows(unique_codes) and _repair_stock_listed_dates_from_daily(unique_codes) and _repair_stock_daily_metrics(unique_codes)
 
 
+def _upsert_stock_adj_factors(items: Sequence[object]) -> bool:
+    """仅把 provider 的有效复权因子填入事实表中的空值。"""
+    if not items:
+        return False
+    params: list[tuple[object, ...]] = []
+    for item in items:
+        code = normalize_stock_code(str(getattr(item, "code", ""))).zfill(6)
+        trade_date = format_date_value(str(getattr(item, "trade_date", "")))
+        factor = getattr(item, "adj_factor", None)
+        if code == "" or trade_date == "" or factor is None:
+            continue
+        try:
+            factor_value = float(factor)
+        except (TypeError, ValueError):
+            continue
+        if factor_value <= 0:
+            continue
+        params.append((_stock_market(code), code, trade_date, factor_value))
+    if not params:
+        return False
+    existing_columns = _existing_columns("fact", "stock_daily_1d")
+    if "adj_factor" not in existing_columns:
+        return False
+    return execute_many(
+        """
+        update fact.stock_daily_1d as daily_rows
+        set adj_factor = incoming.adj_factor, loaded_at = now()
+        from (values (%s, %s, %s::date, %s)) as incoming(market, code, trade_date, adj_factor)
+        where daily_rows.market = incoming.market
+          and daily_rows.code = incoming.code
+          and daily_rows.trade_date = incoming.trade_date
+          and daily_rows.adj_factor is null
+        """,
+        params,
+    )
+
+
 def _repair_stock_daily_reference_rows(codes: Sequence[str]) -> bool:
     if not codes:
         return True
@@ -983,6 +1020,7 @@ def get_fact_ref_writer(capability_id: str) -> Callable[[list[BaseModel]], bool]
         "stocks.quotes.daily": _upsert_stock_daily,
         "stocks.quotes.intraday": _upsert_stock_intraday,
         "stocks.quotes.daily_snapshot": _upsert_stock_daily,
+        "stocks.factors.adj": _upsert_stock_adj_factors,
         "funds.etf.catalog": _upsert_etf_catalog,
         "funds.etf.quotes.daily": _upsert_etf_daily,
         "boards.quotes.daily": _upsert_board_daily,

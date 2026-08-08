@@ -68,6 +68,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/{code}/signals/nine-turn", ("stocks.signals.nine_turn",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/adj", ("stocks.factors.adj",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/factors/technical", ("stocks.factors.technical",)),
+    PublicApiCapabilityBinding("/api/stocks/factors/strategy-window", ("stocks.factors.strategy_window",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/indicators/money-flow", ("stocks.indicators.money_flow",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/batch", ("stocks.indicators.money_flow.batch",)),
     PublicApiCapabilityBinding("/api/stocks/indicators/money-flow/snapshot", ("stocks.indicators.money_flow.snapshot",)),
@@ -84,6 +85,7 @@ PUBLIC_API_CAPABILITY_BINDINGS = (
     PublicApiCapabilityBinding("/api/stocks/{code}/indicators/chip-performance", ("stocks.indicators.chip_performance",)),
     PublicApiCapabilityBinding("/api/stocks/finance/statements", ("stocks.finance.statements",)),
     PublicApiCapabilityBinding("/api/stocks/finance/indicators", ("stocks.finance.indicators",)),
+    PublicApiCapabilityBinding("/api/stocks/finance/pit/raw-period", ("stocks.finance.pit.raw.period",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/finance/audits", ("stocks.finance.audits",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/finance/disclosure-dates", ("stocks.finance.disclosure_dates",)),
     PublicApiCapabilityBinding("/api/stocks/{code}/finance/express", ("stocks.finance.express",)),
@@ -198,6 +200,8 @@ def _default_merge_strategy(result_shape: str) -> str:
 def _infer_result_shape(capability_id: str) -> str:
     if capability_id == "markets.events.news":
         return RESULT_SHAPE_EVENT_STREAM
+    if capability_id == "stocks.factors.strategy_window":
+        return RESULT_SHAPE_TIME_SERIES
     if capability_id == "concepts.alias.resolve":
         return RESULT_SHAPE_SINGLE_RECORD
     if capability_id.endswith(".basic") or capability_id.endswith(".company") or capability_id in {"concepts.profile", "indexes.profile"}:
@@ -289,7 +293,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
         return ("tushare", "akshare", "efinance")
     if capability_id == "funds.etf.catalog":
         return ("tushare",)
-    if capability_id in DERIVED_CAPABILITY_BASE_IDS:
+    if capability_id in DERIVED_CAPABILITY_BASE_IDS or capability_id == "stocks.factors.strategy_window":
         return ("derived_core",)
     if capability_id.startswith("concepts.alias."):
         return ("derived_core",)
@@ -310,6 +314,8 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.batch", "stocks.indicators.money_flow.snapshot", "stocks.indicators.margin.snapshot"}:
         return ("tushare", "akshare")
     if capability_id in {"stocks.finance.express.snapshot", "stocks.finance.forecasts.snapshot"}:
+        return ("tushare",)
+    if capability_id == "stocks.finance.pit.raw.period":
         return ("tushare",)
     if capability_id == "concepts.indicators.money_flow":
         return ("akshare", "tushare", "derived_core")
@@ -389,7 +395,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_source_order(capability_id: str) -> tuple[str, ...]:
-    if capability_id in DERIVED_CAPABILITY_BASE_IDS or capability_id in {"stocks.factors.technical", "stocks.ownership.shareholders.changes", "stocks.signals.hl"}:
+    if capability_id in DERIVED_CAPABILITY_BASE_IDS or capability_id in {"stocks.factors.strategy_window", "stocks.factors.technical", "stocks.ownership.shareholders.changes", "stocks.signals.hl"}:
         return ("derived_core",)
     if capability_id.startswith("concepts.alias."):
         return ("derived_core",)

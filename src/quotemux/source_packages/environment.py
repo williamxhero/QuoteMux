@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 
 from quotemux.source_packages.manifest import SourcePackageManifest
 
@@ -25,6 +27,8 @@ class PackageEnvironment:
     python_executable: str
     requirements_path: str
 
+_ENVIRONMENT_LOCK = threading.Lock()
+
 
 def package_repo_spec() -> str:
     return os.getenv("QUOTEMUX_PACKAGE_REPO_SPEC", DEFAULT_PACKAGE_REPO_SPEC)
@@ -33,7 +37,7 @@ def package_repo_spec() -> str:
 def package_install_target() -> str:
     target = package_repo_spec()
     if Path(target).expanduser().is_dir():
-        raise RuntimeError("QuoteMux_Packages 必须在线安装，不能使用本地目录")
+        return str(Path(target).expanduser().resolve())
     return target
 
 
@@ -51,6 +55,11 @@ def package_uses_isolated_environment(manifest: SourcePackageManifest) -> bool:
 
 
 def ensure_package_environment(manifest: SourcePackageManifest) -> PackageEnvironment:
+    with _ENVIRONMENT_LOCK:
+        return _ensure_package_environment(manifest)
+
+
+def _ensure_package_environment(manifest: SourcePackageManifest) -> PackageEnvironment:
     requirements_path = package_requirements_path(manifest)
     if requirements_path is None:
         raise ValueError(f"package {manifest.package_id} 鏈０鏄?requirements.txt")
@@ -58,13 +67,29 @@ def ensure_package_environment(manifest: SourcePackageManifest) -> PackageEnviro
     python_executable = _venv_python_executable(venv_path)
     marker_path = venv_path / ".quotemux-installed.json"
     requirements_hash = _requirements_hash(requirements_path)
+    package_source_hash = _package_source_hash(Path(manifest.package_root))
     runtime_hash = _runtime_requirements_hash()
     packages_hash = _installed_packages_fingerprint()
-    if not _environment_is_ready(marker_path, requirements_hash, runtime_hash, packages_hash, python_executable):
+    if not _environment_is_ready(
+        marker_path,
+        requirements_hash,
+        package_source_hash,
+        runtime_hash,
+        packages_hash,
+        python_executable,
+    ):
         _create_venv(venv_path)
         _install_runtime_requirements(python_executable)
         _install_requirements(python_executable, requirements_path)
-        _write_marker(marker_path, manifest, requirements_hash, runtime_hash, packages_hash)
+        packages_hash = _installed_packages_fingerprint()
+        _write_marker(
+            marker_path,
+            manifest,
+            requirements_hash,
+            package_source_hash,
+            runtime_hash,
+            packages_hash,
+        )
     return PackageEnvironment(
         package_id=manifest.package_id,
         python_executable=str(python_executable),
@@ -94,6 +119,19 @@ def _requirements_hash(requirements_path: Path) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _package_source_hash(package_root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(package_root.rglob("*")):
+        if not path.is_file() or path.suffix not in {".py", ".json", ".txt"}:
+            continue
+        relative_path = path.relative_to(package_root)
+        if "__pycache__" in relative_path.parts:
+            continue
+        digest.update(str(relative_path).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def _runtime_project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -112,7 +150,14 @@ def _venv_python_executable(venv_path: Path) -> Path:
     return venv_path / "bin" / "python"
 
 
-def _environment_is_ready(marker_path: Path, requirements_hash: str, runtime_hash: str, packages_hash: str, python_executable: Path) -> bool:
+def _environment_is_ready(
+    marker_path: Path,
+    requirements_hash: str,
+    package_source_hash: str,
+    runtime_hash: str,
+    packages_hash: str,
+    python_executable: Path,
+) -> bool:
     if not marker_path.is_file() or not python_executable.is_file():
         return False
     try:
@@ -123,6 +168,7 @@ def _environment_is_ready(marker_path: Path, requirements_hash: str, runtime_has
         return False
     return (
         str(payload.get("requirements_hash", "")) == requirements_hash
+        and str(payload.get("package_source_hash", "")) == package_source_hash
         and str(payload.get("runtime_hash", "")) == runtime_hash
         and str(payload.get("packages_hash", "")) == packages_hash
     )
@@ -147,10 +193,7 @@ def _install_requirements(python_executable: Path, requirements_path: Path) -> N
 
 
 def _install_runtime_requirements(python_executable: Path) -> None:
-    subprocess.run(
-        [str(python_executable), "-m", "pip", "install", "-e", str(_runtime_project_root())],
-        check=True,
-    )
+    _install_local_project_copy(str(python_executable), _runtime_project_root())
     _install_distribution_for_python(str(python_executable))
 
 
@@ -165,8 +208,24 @@ def _clean_local_package_build_artifacts(target: str) -> None:
 
 def _install_distribution_for_python(python_executable: str) -> None:
     target = package_install_target()
-    _clean_local_package_build_artifacts(target)
+    target_path = Path(target)
+    if target_path.is_dir():
+        _install_local_project_copy(python_executable, target_path)
+        return
     subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", target], check=True)
+
+
+def _install_local_project_copy(python_executable: str, source_root: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="quotemux-package-build-") as temp_root:
+        build_root = Path(temp_root) / source_root.name
+        shutil.copytree(
+            source_root,
+            build_root,
+            ignore=shutil.ignore_patterns(".git", ".venv", "build", "*.egg-info", "__pycache__"),
+        )
+        command = [python_executable, "-m", "pip", "install"]
+        command.extend(["--upgrade", "--force-reinstall", "--no-cache-dir", str(build_root)])
+        subprocess.run(command, check=True)
 
 
 def _installed_packages_fingerprint() -> str:
@@ -191,13 +250,21 @@ def _installed_packages_fingerprint() -> str:
     return digest.hexdigest()
 
 
-def _write_marker(marker_path: Path, manifest: SourcePackageManifest, requirements_hash: str, runtime_hash: str, packages_hash: str) -> None:
+def _write_marker(
+    marker_path: Path,
+    manifest: SourcePackageManifest,
+    requirements_hash: str,
+    package_source_hash: str,
+    runtime_hash: str,
+    packages_hash: str,
+) -> None:
     marker_path.write_text(
         json.dumps(
             {
                 "package_id": manifest.package_id,
                 "version": manifest.version,
                 "requirements_hash": requirements_hash,
+                "package_source_hash": package_source_hash,
                 "runtime_hash": runtime_hash,
                 "packages_hash": packages_hash,
             },

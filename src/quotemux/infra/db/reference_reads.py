@@ -33,7 +33,7 @@ def load_stock_catalog_frame(codes: list[str], name: str, market: str, listed_fi
     elif listed_filter == "delisted":
         where_clauses.append("delisted_date < current_date")
     query = f"""
-        select
+        select distinct on (code)
             market,
             code,
             name,
@@ -43,7 +43,7 @@ def load_stock_catalog_frame(codes: list[str], name: str, market: str, listed_fi
             delisted_date::text as delisted_date
         from ref.stock
         where {' and '.join(where_clauses)}
-        order by code
+        order by code, (delisted_date is null) desc, listed_date desc, market
     """
     return query_dataframe(query, tuple(params))
 
