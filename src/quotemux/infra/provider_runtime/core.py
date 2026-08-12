@@ -73,6 +73,18 @@ PROVIDER_POLICIES = {
         _int_env("MHK_AKSHARE_MAX_RETRIES", PROVIDER_MAX_RETRIES),
         _float_env("MHK_AKSHARE_QUEUE_TIMEOUT_SECONDS", PROVIDER_QUEUE_TIMEOUT_SECONDS),
     ),
+    "eastmoney_official": ProviderPolicy(
+        1,
+        2.0,
+        0,
+        PROVIDER_QUEUE_TIMEOUT_SECONDS,
+    ),
+    "cninfo_evidence": ProviderPolicy(
+        1,
+        2.0,
+        0,
+        PROVIDER_QUEUE_TIMEOUT_SECONDS,
+    ),
     "store_db": ProviderPolicy(
         _int_env("MHK_STORE_DB_CONCURRENCY", 8),
         _float_env("MHK_STORE_DB_RPS", 0.0),

@@ -22,6 +22,7 @@ class StockQuotesRequest(BaseModel):
     skip_st: bool = False
     fill_missing: bool = False
     meta_detail: Literal["summary", "full"] = "summary"
+    data_version: str = ""
 
     @field_validator("codes", mode="before")
     @classmethod

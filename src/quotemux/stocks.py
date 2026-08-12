@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
 
-from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, DisclosureDateItem, DividendItem, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialPitRawItem, StockFinancialStatementItem, StockManagerItem, StockMarginItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, StockStrategyFactorItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
+from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, CorporateActionCoverage, DisclosureDateItem, DividendItem, DividendPage, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, RightsIssuePage, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialPitRawItem, StockFinancialStatementItem, StockManagerItem, StockMarginItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, StockStrategyFactorItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
 from quotemux.infra.db.reference_reads import load_stock_active_codes_frame, load_stock_catalog_frame
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
@@ -10,12 +11,13 @@ from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, missing_expected_keys, sort_items, trim_items_per_key
 from quotemux.fact_ref_writes import get_fact_ref_writer
 from quotemux.local_daily import get_local_stock_adj_factors, get_stock_codes_missing_adj_factors, get_stock_daily_local_window as get_local_stock_daily_local_window, get_stock_daily_snapshot_full as get_local_stock_daily_snapshot_full, get_stock_quotes as get_local_stock_quotes
-from quotemux.local_store import get_local_stock_catalog, get_local_stock_hl_signal, get_local_stock_intraday_quotes, get_local_stock_name_history
+from quotemux.local_store import get_local_stock_catalog, get_local_stock_hl_signal, get_local_stock_intraday_quotes, get_local_stock_name_history, get_local_trading_calendar
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.store import load_store_result, store_result
+from quotemux.store.postgres import get_postgres_cache_store
 from quotemux.settings import QuoteMuxSettings
 
 
@@ -172,6 +174,33 @@ def _build_quote_range_requests(grouped_ranges: dict[tuple[str, str], list[str]]
     return requests
 
 
+def _stock_listing_windows(codes: list[str]) -> dict[str, tuple[str, str]]:
+    listing_frame = load_stock_catalog_frame(codes, "", "", "")
+    return {
+        str(row["code"]).zfill(6): (
+            format_date_value(row["listed_date"]) if row.get("listed_date") is not None else "",
+            format_date_value(row["delisted_date"]) if row.get("delisted_date") is not None else "",
+        )
+        for row in listing_frame.to_dict("records")
+    }
+
+
+def _code_expected_trade_dates(
+    codes: list[str],
+    expected_dates: list[str],
+) -> dict[str, list[str]]:
+    listing_windows = _stock_listing_windows(codes)
+    return {
+        code: [
+            trade_date
+            for trade_date in expected_dates
+            if (listing_windows.get(code, ("", ""))[0] == "" or trade_date >= listing_windows[code][0])
+            and (listing_windows.get(code, ("", ""))[1] == "" or trade_date <= listing_windows[code][1])
+        ]
+        for code in codes
+    }
+
+
 def _clip_recent_hl_range(range_start: str, range_end: str) -> tuple[str, str] | None:
     start_day = parse_date_text(range_start)
     end_day = parse_date_text(range_end)
@@ -315,6 +344,23 @@ def _quote_expected_dates(
     return _expected_trade_dates(actual_start, actual_end, settings)
 
 
+def _local_quote_expected_dates(
+    trade_date: str,
+    start_date: str,
+    end_date: str,
+    start_time: str,
+    end_time: str,
+    count: int | None,
+    intraday: bool,
+) -> list[str]:
+    if trade_date == "" and start_date == "" and end_date == "" and start_time == "" and end_time == "" and count:
+        return []
+    request_start_dt, request_end_dt = build_time_bounds(trade_date, start_date, end_date, start_time, end_time, count, intraday)
+    if request_start_dt is None or request_end_dt is None:
+        return []
+    return [item.trade_date for item in get_local_trading_calendar("SSE", request_start_dt.strftime("%Y-%m-%d"), request_end_dt.strftime("%Y-%m-%d"), True)]
+
+
 def _limit_quote_items(items: list[StockQuoteItem], limit: int | None) -> list[StockQuoteItem]:
     if limit is None:
         return items
@@ -336,15 +382,8 @@ def _build_quote_code_summaries(
 ) -> list[StockQuoteCodeSummary]:
     summaries: list[StockQuoteCodeSummary] = []
     expected_trade_times = _expected_quote_trade_times(freq, expected_dates)
-    expected_trade_time_set = set(expected_trade_times)
-    listing_frame = load_stock_catalog_frame(codes, "", "", "")
-    listing_windows = {
-        str(row["code"]).zfill(6): (
-            format_date_value(row["listed_date"]) if row.get("listed_date") is not None else "",
-            format_date_value(row["delisted_date"]) if row.get("delisted_date") is not None else "",
-        )
-        for row in listing_frame.to_dict("records")
-    }
+    expected_bar_count = len(expected_dates) if freq in {"1d", "1w", "1mo"} else len(expected_trade_times)
+    code_expected_dates_by_code = _code_expected_trade_dates(codes, expected_dates)
     for code in codes:
         code_total_items = [item for item in total_items if item.code == code]
         code_returned_items = [item for item in returned_items if item.code == code]
@@ -356,7 +395,7 @@ def _build_quote_code_summaries(
                 StockQuoteCodeSummary(
                     code=code,
                     row_count=0,
-                    expected_bar_count=len(expected_trade_times),
+                    expected_bar_count=expected_bar_count,
                     actual_bar_count=0,
                     missing_count=0,
                     first_trade_time="",
@@ -368,13 +407,7 @@ def _build_quote_code_summaries(
                 )
             )
             continue
-        listed_date, delisted_date = listing_windows.get(code, ("", ""))
-        code_expected_dates = [
-            trade_date
-            for trade_date in expected_dates
-            if (listed_date == "" or trade_date >= listed_date)
-            and (delisted_date == "" or trade_date <= delisted_date)
-        ]
+        code_expected_dates = code_expected_dates_by_code.get(code, [])
         code_expected_trade_times = _expected_quote_trade_times(freq, code_expected_dates)
         code_expected_trade_time_set = set(code_expected_trade_times)
         normalized_coverage_times = {_quote_time_key(item) for item in code_coverage_items}
@@ -393,8 +426,8 @@ def _build_quote_code_summaries(
             StockQuoteCodeSummary(
                 code=code,
                 row_count=len(code_returned_items),
-                expected_bar_count=len(code_expected_trade_times),
-                actual_bar_count=len(normalized_coverage_times & code_expected_trade_time_set) if code_expected_trade_times else 0,
+                expected_bar_count=len(code_expected_dates) if freq in {"1d", "1w", "1mo"} else len(code_expected_trade_times),
+                actual_bar_count=len(actual_dates) if freq in {"1d", "1w", "1mo"} else len(normalized_coverage_times & code_expected_trade_time_set),
                 missing_count=len(full_missing_trade_times) if code_expected_trade_times else len(missing_trade_dates),
                 first_trade_time=min(trade_times) if trade_times else "",
                 last_trade_time=max(trade_times) if trade_times else "",
@@ -418,6 +451,7 @@ def _build_stock_quotes_query_result(
     count: int | None,
     excluded_st_codes: set[str],
     meta_detail: str = "summary",
+    data_version: str = "",
 ) -> StockQuotesQueryResult:
     returned_items = _limit_quote_items(returned_source_items, limit)
     summaries = _build_quote_code_summaries(codes, total_items, returned_items, coverage_items, freq, expected_dates, count, excluded_st_codes, meta_detail)
@@ -426,6 +460,7 @@ def _build_stock_quotes_query_result(
     return StockQuotesQueryResult(
         items=returned_items,
         meta=StockQuotesMeta(
+            data_version=data_version,
             total_rows=len(total_items),
             returned_rows=len(returned_items),
             complete=complete,
@@ -551,9 +586,9 @@ def _build_local_daily_query_result(
     filtered_items = _filter_suspended_quote_items(st_filtered_items, request.skip_suspended, request.fill_missing, actual_freq)
     trimmed_items = trim_items_per_key(filtered_items, "code", "trade_time", request.count)
     sorted_items = sort_items(trimmed_items, ("code", "trade_time"))
-    expected_dates = _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", settings)
+    expected_dates = _local_quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d") if request.data_version != "" else _quote_expected_dates(request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, request_freq != "1d", settings)
     report = _base_source_report(contract_name, "fact.stock_daily_1d", local_items != [])
-    return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes, request.meta_detail), report
+    return _build_stock_quotes_query_result(request.codes, filtered_items, sorted_items, st_filtered_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes, request.meta_detail, request.data_version), report
 
 
 def _build_missing_quote_requests(
@@ -591,14 +626,17 @@ def _build_missing_quote_requests(
         grouped_ranges: dict[tuple[str, str], list[str]] = {}
         expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings)
         expected_trade_times = _expected_quote_trade_times(freq, expected_trade_dates)
+        code_expected_dates_by_code = _code_expected_trade_dates(codes, expected_trade_dates)
         for code in codes:
             code_items = [item for item in current_items if item.code == code and item.freq == freq]
             existing_dates = {_quote_item_date(item) for item in code_items if not _is_suspended_zero_amount_daily_item(item)}
-            if expected_trade_times:
-                missing_times = [str(key[1]) for key in _missing_quote_time_keys(code, freq, expected_trade_times, code_items)]
-                missing_ranges = _build_missing_time_date_ranges(expected_trade_dates, missing_times)
+            code_expected_dates = code_expected_dates_by_code.get(code, [])
+            code_expected_trade_times = _expected_quote_trade_times(freq, code_expected_dates)
+            if code_expected_trade_times:
+                missing_times = [str(key[1]) for key in _missing_quote_time_keys(code, freq, code_expected_trade_times, code_items)]
+                missing_ranges = _build_missing_time_date_ranges(code_expected_dates, missing_times)
             else:
-                missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
+                missing_ranges = build_missing_expected_date_ranges(code_expected_dates, existing_dates)
             if missing_ranges == [] and expected_trade_dates == []:
                 missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
             for missing_start, missing_end in missing_ranges:
@@ -617,10 +655,12 @@ def _build_missing_quote_requests(
     if actual_end_date == "":
         actual_end_date = actual_start_date
     expected_trade_dates = _expected_trade_dates(actual_start_date, actual_end_date, settings)
+    code_expected_dates_by_code = _code_expected_trade_dates(codes, expected_trade_dates)
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
         existing_dates = {_quote_item_date(item) for item in current_items if item.code == code and item.freq == "1d" and not _is_suspended_zero_amount_daily_item(item)}
-        missing_ranges = build_missing_expected_date_ranges(expected_trade_dates, existing_dates)
+        code_expected_dates = code_expected_dates_by_code.get(code, [])
+        missing_ranges = build_missing_expected_date_ranges(code_expected_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
             missing_ranges = _build_missing_date_ranges(actual_start_date, actual_end_date, existing_dates)
         for missing_start, missing_end in missing_ranges:
@@ -629,7 +669,7 @@ def _build_missing_quote_requests(
 
 
 def _has_complete_stock_snapshot_item(item: StockQuoteItem) -> bool:
-    return item.close is not None and item.pre_close is not None and item.pct_chg is not None and item.amount is not None
+    return not _is_suspended_zero_amount_daily_item(item) and item.close is not None and item.pre_close is not None and item.pct_chg is not None and item.amount is not None
 
 
 def _is_suspended_zero_amount_daily_item(item: StockQuoteItem) -> bool:
@@ -683,53 +723,6 @@ def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem]
     expected_min = expected_count if expected_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD else int(expected_count * 0.9)
     if len(actual_codes) < expected_min:
         raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected_min={expected_min} actual={len(actual_codes)}")
-
-
-def _build_missing_snapshot_placeholders(trade_date: str, items: list[StockQuoteItem]) -> list[StockQuoteItem]:
-    active_frame = load_stock_active_codes_frame(trade_date)
-    if active_frame.empty:
-        return []
-    active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
-    existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date}
-    missing_codes = [code for code in dict.fromkeys(active_codes) if code != "" and code not in existing_codes]
-    if missing_codes == []:
-        return []
-    history_items = get_local_stock_quotes(missing_codes, "1d", "", "", trade_date, "", "", None, "none")
-    latest_by_code: dict[str, StockQuoteItem] = {}
-    for item in history_items:
-        item_date = format_date_value(item.trade_time)
-        code = normalize_stock_code(item.code).zfill(6)
-        if code == "" or item_date == "" or item_date >= trade_date:
-            continue
-        current = latest_by_code.get(code)
-        if current is None or format_date_value(current.trade_time) < item_date:
-            latest_by_code[code] = item
-    placeholders: list[StockQuoteItem] = []
-    for code in missing_codes:
-        previous = latest_by_code.get(code)
-        if previous is None or previous.close is None:
-            continue
-        close = previous.close
-        placeholders.append(
-            StockQuoteItem(
-                code=code,
-                trade_time=trade_date,
-                freq="1d",
-                open=close,
-                high=close,
-                low=close,
-                close=close,
-                pre_close=close,
-                change=0.0,
-                pct_chg=0.0,
-                volume=0.0,
-                amount=0.0,
-                adjust="none",
-                is_suspended=True,
-                is_st=previous.is_st,
-            )
-        )
-    return placeholders
 
 
 def _build_steps(freq: str, request_freq: str, request_count: int | None, actual_adjust: str, settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
@@ -846,6 +839,22 @@ class QuoteMuxStocks:
         result, _ = self.get_quotes_query_result_with_report(request)
         return result
 
+    def _hydrate_missing_daily_adjustment_factors(
+        self,
+        missing_requests: list[tuple[list[str], str, str]],
+        adjustment_base_date: str,
+    ) -> None:
+        requested: set[tuple[str, str, str]] = set()
+        for codes, start_date, end_date in missing_requests:
+            if start_date == "" or end_date == "":
+                continue
+            for code in codes:
+                normalized_code = normalize_stock_code(code)
+                if normalized_code != "":
+                    requested.add((normalized_code, start_date, end_date))
+        for code, start_date, end_date in sorted(requested):
+            self.get_adj_factors(code, start_date, end_date, adjustment_base_date)
+
     def get_quotes_query_result_with_report(self, request: StockQuotesRequest, *, write_fact_ref: bool = True) -> tuple[StockQuotesQueryResult, ContractReport]:
         if request.codes == []:
             return StockQuotesQueryResult(items=[], meta=StockQuotesMeta(total_rows=0, returned_rows=0, complete=True, truncated=False)), ContractReport.empty("stocks.quotes")
@@ -872,14 +881,22 @@ class QuoteMuxStocks:
         local_missing_requests: list[tuple[list[str], str, str]] = []
         if request_freq == "1d":
             if actual_adjust in {"qfq", "hfq"}:
-                factor_start = request.start_date or request.trade_date
-                factor_end = request.end_date or request.trade_date
-                missing_factor_codes = get_stock_codes_missing_adj_factors(request.codes, factor_start, factor_end)
-                for missing_code in missing_factor_codes:
-                    self.get_adj_factors(missing_code, factor_start, factor_end, factor_end)
-            local_items = get_local_stock_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, actual_adjust)
+                adjustment_base_date = os.getenv("QUOTEMUX_ADJUSTMENT_BASE_DATE", "")
+                if adjustment_base_date == "":
+                    raise RuntimeError("QUOTEMUX_ADJUSTMENT_BASE_DATE 未配置，拒绝返回未冻结复权行情")
+            else:
+                adjustment_base_date = ""
+            local_items = get_local_stock_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, actual_adjust, adjustment_base_date)
+            if request.data_version != "":
+                return _build_local_daily_query_result(contract_name, request, local_items, actual_freq, actual_limit, actual_adjust, request_freq, request_count, self._settings)
             local_missing_requests = _build_missing_quote_requests(request.codes, local_items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings)
-            if _should_return_local_daily(request, local_missing_requests):
+            if actual_adjust in {"qfq", "hfq"} and local_missing_requests != [] and not _missing_ranges_are_future(local_missing_requests):
+                raw_request = request.model_copy(update={"adjust": "none"})
+                self.get_quotes_query_result_with_report(raw_request)
+                self._hydrate_missing_daily_adjustment_factors(local_missing_requests, adjustment_base_date)
+                local_items = get_local_stock_quotes(request.codes, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, actual_adjust, adjustment_base_date)
+                local_missing_requests = _build_missing_quote_requests(request.codes, local_items, request_freq, request.trade_date, request.start_date, request.end_date, request.start_time, request.end_time, request_count, self._settings)
+            if actual_adjust in {"qfq", "hfq"} or _should_return_local_daily(request, local_missing_requests):
                 return _build_local_daily_query_result(contract_name, request, local_items, actual_freq, actual_limit, actual_adjust, request_freq, request_count, self._settings)
             base_items = _drop_missing_daily_placeholders(local_items, local_missing_requests)
         else:
@@ -912,7 +929,7 @@ class QuoteMuxStocks:
         contract_total_items = _filter_standard_intraday_items(filtered_items, actual_freq, expected_dates)
         contract_returned_items = _filter_standard_intraday_items(sorted_items, actual_freq, expected_dates)
         contract_coverage_items = _filter_standard_intraday_items(st_filtered_items, actual_freq, expected_dates)
-        return _build_stock_quotes_query_result(request.codes, contract_total_items, contract_returned_items, contract_coverage_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes, request.meta_detail), report
+        return _build_stock_quotes_query_result(request.codes, contract_total_items, contract_returned_items, contract_coverage_items, actual_freq, actual_limit, expected_dates, request.count, excluded_st_codes, request.meta_detail, request.data_version), report
 
     def get_daily_snapshot(self, request: StockDailySnapshotRequest) -> list[StockQuoteItem]:
         items, _ = self.get_daily_snapshot_with_report(request)
@@ -943,14 +960,7 @@ class QuoteMuxStocks:
                 fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
             )
         )
-        placeholder_items = _build_missing_snapshot_placeholders(actual_trade_date, items)
-        candidate_items = sort_items([*items, *placeholder_items], ("code", "trade_time"))
-        _assert_daily_snapshot_coverage(actual_trade_date, candidate_items, request.limit, request.offset)
-        if placeholder_items != []:
-            writer = get_fact_ref_writer("stocks.quotes.daily_snapshot")
-            if writer is not None:
-                writer(placeholder_items)
-            items = candidate_items
+        _assert_daily_snapshot_coverage(actual_trade_date, items, request.limit, request.offset)
         filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
         return filtered_items[request.offset: request.offset + request.limit], report
     def get_daily_local_window(self, request: StockDailyLocalWindowRequest) -> list[StockQuoteItem]:
@@ -1164,7 +1174,10 @@ class QuoteMuxStocks:
             lambda: self._source_list("stocks.finance.indicators", handlers, ("tushare", "akshare", "efinance"), ("code", "report_period")),
         )
 
-    def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int, refresh: bool = False) -> list[StockBasicInfo]:
+    def get_catalog(self, codes: list[str], name: str, exchange: str, list_status: str, include_delisted: bool, limit: int, offset: int, refresh: bool = False, data_version: str = "") -> list[StockBasicInfo]:
+        if data_version != "":
+            items = [item for item in get_local_stock_catalog(codes, name, exchange, list_status, include_delisted) if _is_standard_stock_code(item.code)]
+            return items[offset: offset + ensure_limit(limit)]
         store_identity = {"codes": list(codes), "name": name, "exchange": exchange, "list_status": list_status, "include_delisted": include_delisted}
         handlers = {
             "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset, refresh),
@@ -1668,6 +1681,64 @@ class QuoteMuxStocks:
             ("code", "announce_date", "record_date"),
             lambda: self._source_list("stocks.corporate_actions.rights_issues", handlers, ("tushare", "akshare"), ("code", "announce_date", "record_date")),
         )
+
+    def get_dividends_page(self, codes: str, start_date: str, end_date: str, offset: int, limit: int) -> DividendPage:
+        items = self._get_corporate_actions_page("stocks.corporate_actions.dividends", DividendItem, codes, start_date, end_date)
+        return DividendPage(items=items[offset:offset + limit], total=len(items), offset=offset, limit=limit, coverage=self._get_corporate_action_coverage("stocks.corporate_actions.dividends", start_date, end_date))
+
+    def get_rights_issues_page(self, codes: str, start_date: str, end_date: str, offset: int, limit: int) -> RightsIssuePage:
+        items = self._get_corporate_actions_page("stocks.corporate_actions.rights_issues", RightsIssueItem, codes, start_date, end_date)
+        return RightsIssuePage(items=items[offset:offset + limit], total=len(items), offset=offset, limit=limit, coverage=self._get_corporate_action_coverage("stocks.corporate_actions.rights_issues", start_date, end_date))
+
+    def _get_corporate_action_coverage(self, capability_id: str, start_date: str, end_date: str) -> CorporateActionCoverage:
+        actual_start = format_date_value(start_date)
+        actual_end = format_date_value(end_date)
+        if actual_start == "" or actual_end == "" or actual_start > actual_end:
+            raise ValueError("start_date 和 end_date 必须是有效日期，且 start_date 不得晚于 end_date")
+        current_start = datetime.fromisoformat(actual_start)
+        requested_end = datetime.fromisoformat(actual_end) + timedelta(days=1) - timedelta(microseconds=1)
+        missing_ranges: list[str] = []
+        for coverage in get_postgres_cache_store().coverage.find_for_scope(capability_id, ""):
+            if coverage.fresh_until <= datetime.now() or coverage.time_end < current_start:
+                continue
+            if coverage.time_start > current_start:
+                gap_end = min(requested_end, coverage.time_start - timedelta(microseconds=1))
+                if current_start <= gap_end:
+                    missing_ranges.append(f"{current_start:%Y-%m-%d}/{gap_end:%Y-%m-%d}")
+            if coverage.time_end >= current_start:
+                current_start = max(current_start, coverage.time_end + timedelta(microseconds=1))
+            if current_start > requested_end:
+                break
+        if current_start <= requested_end:
+            missing_ranges.append(f"{current_start:%Y-%m-%d}/{requested_end:%Y-%m-%d}")
+        return CorporateActionCoverage(complete=missing_ranges == [], missing_date_ranges=missing_ranges)
+
+    def _get_corporate_actions_page(
+        self,
+        capability_id: str,
+        model_type: type[DividendItem] | type[RightsIssueItem],
+        codes: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[DividendItem] | list[RightsIssueItem]:
+        """从统一缓存事实读取公司行动，保持单股接口同一字段和单位。"""
+        actual_start = format_date_value(start_date)
+        actual_end = format_date_value(end_date)
+        if actual_start == "" or actual_end == "" or actual_start > actual_end:
+            raise ValueError("start_date 和 end_date 必须是有效日期，且 start_date 不得晚于 end_date")
+        requested_codes = {normalize_stock_code(code) for code in codes.split(",") if normalize_stock_code(code) != ""}
+        payloads = get_postgres_cache_store().rows.read(
+            capability_id,
+            datetime.fromisoformat(actual_start),
+            datetime.fromisoformat(actual_end) + timedelta(days=1) - timedelta(microseconds=1),
+            False,
+        )
+        items = [
+            model_type.model_validate(payload)
+            for payload in payloads
+            if requested_codes == set() or normalize_stock_code(str(payload.get("code", ""))) in requested_codes
+        ]
+        return sorted(items, key=lambda item: (item.announce_date, item.code, item.record_date))
 
     def get_share_changes(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[ShareChangeItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}

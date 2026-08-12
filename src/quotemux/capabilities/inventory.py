@@ -49,6 +49,8 @@ class PublicApiCapabilityBinding:
 
 
 PUBLIC_API_CAPABILITY_BINDINGS = (
+    PublicApiCapabilityBinding("/api/futures/quotes/1m", ("futures.quotes.back_adjusted_continuous.1m", "futures.quotes.main_continuous.1m")),
+    PublicApiCapabilityBinding("/api/futures/coverage", ("futures.quotes.back_adjusted_continuous.1m", "futures.quotes.main_continuous.1m")),
     PublicApiCapabilityBinding("/api/funds/etfs", ("funds.etf.catalog",)),
     PublicApiCapabilityBinding("/api/funds/etfs/quotes/daily", ("funds.etf.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/quotes", ("stocks.quotes.intraday", "stocks.quotes.daily")),
@@ -177,7 +179,13 @@ STORE_TARGET_CAPABILITIES = {
     "markets.events.news",
 }
 
-INTERNAL_CAPABILITY_IDS = ("boards.catalog", "boards.members.history", "boards.quotes.daily")
+INTERNAL_CAPABILITY_IDS = (
+    "boards.catalog",
+    "boards.members.history",
+    "boards.quotes.daily",
+    "funds.etf.profile",
+    "stocks.finance.report_disclosures",
+)
 
 _API_PATHS_BY_CAPABILITY: dict[str, list[str]] = {}
 for binding in PUBLIC_API_CAPABILITY_BINDINGS:
@@ -229,6 +237,8 @@ def _infer_result_shape(capability_id: str) -> str:
 
 
 def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
+    if capability_id.startswith("futures.quotes."):
+        return ("product_code", "exchange", "series_type", "bar_time")
     if capability_id == "boards.catalog":
         return ("board_code",)
     if capability_id == "boards.members.history":
@@ -237,12 +247,16 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
         return ("ts_code", "trade_date")
     if capability_id == "funds.etf.catalog":
         return ("ts_code",)
+    if capability_id == "funds.etf.profile":
+        return ("code",)
     if capability_id.startswith("stocks.quotes."):
         return ("code", "trade_time", "freq")
     if capability_id in {"stocks.indicators.money_flow", "stocks.indicators.money_flow.snapshot"}:
         return ("code", "trade_date", "view")
     if capability_id.startswith("stocks.profile."):
         return ("code",)
+    if capability_id == "stocks.finance.report_disclosures":
+        return ("code", "evidence_id")
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_period", "report_type")
     if capability_id == "stocks.finance.express.snapshot":
@@ -287,12 +301,20 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "futures.quotes.main_continuous.1m":
+        return ("shinny_edb",)
+    if capability_id == "futures.quotes.back_adjusted_continuous.1m":
+        return ()
+    if capability_id == "stocks.finance.report_disclosures":
+        return ("cninfo_evidence",)
     if capability_id in {"boards.catalog", "boards.members.history"}:
         return ("tushare",)
     if capability_id == "funds.etf.quotes.daily":
         return ("tushare", "akshare", "efinance")
     if capability_id == "funds.etf.catalog":
         return ("tushare",)
+    if capability_id == "funds.etf.profile":
+        return ("eastmoney_official",)
     if capability_id in DERIVED_CAPABILITY_BASE_IDS or capability_id == "stocks.factors.strategy_window":
         return ("derived_core",)
     if capability_id.startswith("concepts.alias."):

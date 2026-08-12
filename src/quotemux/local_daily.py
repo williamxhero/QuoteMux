@@ -4,7 +4,7 @@ import pandas as pd
 
 from platform_models import AdjFactorItem, StockQuoteItem
 from quotemux.infra.common import INTRADAY_RULES, build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code
-from quotemux.infra.db.market_reads import load_stock_adj_factor_frame, load_stock_daily_frame, load_stock_daily_local_window_frame, load_stock_daily_snapshot_full_frame
+from quotemux.infra.db.market_reads import load_stock_adj_factor_frame, load_stock_adjustment_base_factor_frame, load_stock_daily_frame, load_stock_daily_local_window_frame, load_stock_daily_snapshot_full_frame
 
 
 def _quote_item_from_row(code: str, row: pd.Series, freq: str, adjust: str) -> StockQuoteItem:
@@ -29,10 +29,10 @@ def _quote_item_from_row(code: str, row: pd.Series, freq: str, adjust: str) -> S
     )
 
 
-def _daily_frame_to_items(frame: pd.DataFrame, adjust: str, freq: str = "1d") -> list[StockQuoteItem]:
+def _daily_frame_to_items(frame: pd.DataFrame, adjust: str, freq: str = "1d", adjustment_base_factors: dict[str, float] | None = None) -> list[StockQuoteItem]:
     if frame.empty or freq != "1d" or adjust not in {"none", "qfq", "hfq"}:
         return []
-    work = _apply_daily_adjustment(frame, adjust)
+    work = _apply_daily_adjustment(frame, adjust, adjustment_base_factors or {})
     if work.empty:
         return []
     work["trade_time"] = pd.to_datetime(work["trade_time"], errors="coerce")
@@ -45,7 +45,7 @@ def _daily_frame_to_items(frame: pd.DataFrame, adjust: str, freq: str = "1d") ->
     return items
 
 
-def _apply_daily_adjustment(frame: pd.DataFrame, adjust: str) -> pd.DataFrame:
+def _apply_daily_adjustment(frame: pd.DataFrame, adjust: str, adjustment_base_factors: dict[str, float]) -> pd.DataFrame:
     if adjust == "none":
         return frame.copy()
     if "adj_factor" not in frame.columns:
@@ -65,7 +65,10 @@ def _apply_daily_adjustment(frame: pd.DataFrame, adjust: str) -> pd.DataFrame:
         if ordered.empty:
             continue
         if adjust == "qfq":
-            multiplier = ordered["adj_factor"] / ordered["adj_factor"].iloc[-1]
+            base_factor = adjustment_base_factors.get(str(ordered["code"].iloc[0]))
+            if base_factor is None or base_factor <= 0:
+                continue
+            multiplier = ordered["adj_factor"] / base_factor
         else:
             multiplier = ordered["adj_factor"]
         for column in ("open", "high", "low", "close"):
@@ -77,7 +80,7 @@ def _apply_daily_adjustment(frame: pd.DataFrame, adjust: str) -> pd.DataFrame:
     return pd.concat(adjusted_groups, ignore_index=True) if adjusted_groups else pd.DataFrame()
 
 
-def get_stock_quotes(codes: list[str], freq: str, trade_date: str, start_date: str, end_date: str, start_time: str, end_time: str, count: int | None, adjust: str) -> list[StockQuoteItem]:
+def get_stock_quotes(codes: list[str], freq: str, trade_date: str, start_date: str, end_date: str, start_time: str, end_time: str, count: int | None, adjust: str, adjustment_base_date: str = "") -> list[StockQuoteItem]:
     if freq in INTRADAY_RULES or freq == "tick":
         return []
     start_dt, end_dt = build_time_bounds(trade_date, start_date, end_date, start_time, end_time, count, False)
@@ -86,7 +89,23 @@ def get_stock_quotes(codes: list[str], freq: str, trade_date: str, start_date: s
     normalized_codes = [normalize_stock_code(code) for code in codes]
     normalized_codes = [code for code in dict.fromkeys(normalized_codes) if code]
     raw_frame = load_stock_daily_frame(normalized_codes, start_text, end_text)
-    items = _daily_frame_to_items(raw_frame, adjust, freq)
+    adjustment_base_factors: dict[str, float] = {}
+    if adjust == "qfq" and adjustment_base_date != "":
+        base_frame = load_stock_adjustment_base_factor_frame(normalized_codes, adjustment_base_date)
+        if not base_frame.empty:
+            adjustment_base_factors = {
+                str(row["code"]): float(row["adjustment_base_factor"])
+                for _, row in base_frame.iterrows()
+                if pd.notna(row["adjustment_base_factor"]) and float(row["adjustment_base_factor"]) > 0
+            }
+    elif adjust == "qfq" and "adj_factor" in raw_frame.columns:
+        # 仅供未配置冻结基准日的本地旧调用兼容；HTTP 研究链路必须传入冻结日期。
+        adjustment_base_factors = {
+            str(code): float(group["adj_factor"].dropna().iloc[-1])
+            for code, group in raw_frame.groupby("code", sort=False)
+            if not group["adj_factor"].dropna().empty
+        }
+    items = _daily_frame_to_items(raw_frame, adjust, freq, adjustment_base_factors)
     if count:
         grouped: dict[str, list[StockQuoteItem]] = {}
         for item in items:

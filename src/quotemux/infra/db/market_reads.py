@@ -70,7 +70,12 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
     if not codes:
         return pd.DataFrame()
     existing_columns = _existing_columns("fact", "stock_daily_1d")
-    source_where_clauses = ["day_rows.code = any(%s)", _canonical_stock_market_condition("day_rows")]
+    source_where_clauses = [
+        "day_rows.code = any(%s)",
+        _canonical_stock_market_condition("day_rows"),
+        "(stock_ref.listed_date is null or day_rows.trade_date >= stock_ref.listed_date)",
+        "(stock_ref.delisted_date is null or day_rows.trade_date <= stock_ref.delisted_date)",
+    ]
     source_params: list[object] = [codes]
     if end_date:
         source_where_clauses.append("day_rows.trade_date <= %s")
@@ -107,6 +112,9 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
                 {_optional_column(existing_columns, "mism_sell")},
                 lag(day_rows.close) over (partition by day_rows.code order by day_rows.trade_date) as previous_close
             from fact.stock_daily_1d day_rows
+            left join ref.stock stock_ref
+              on stock_ref.market = day_rows.market
+             and stock_ref.code = day_rows.code
             where {' and '.join(source_where_clauses)}
         )
         select
@@ -156,6 +164,48 @@ def load_stock_adj_factor_frame(code: str, start_date: str, end_date: str) -> pd
         """,
         tuple(params),
     )
+
+
+def load_stock_adjustment_base_factor_frame(codes: list[str], base_date: str) -> pd.DataFrame:
+    if codes == [] or base_date == "":
+        return pd.DataFrame()
+    return query_dataframe(
+        f"""
+        select distinct on (day_rows.code)
+            day_rows.code,
+            day_rows.adj_factor as adjustment_base_factor
+        from fact.stock_daily_1d day_rows
+        where day_rows.code = any(%s)
+          and {_canonical_stock_market_condition("day_rows")}
+          and day_rows.trade_date <= %s::date
+          and day_rows.adj_factor > 0
+        order by day_rows.code, day_rows.trade_date desc
+        """,
+        (codes, base_date),
+    )
+
+
+def list_stock_codes_with_daily_data(start_date: str, end_date: str) -> list[str]:
+    clauses = [_canonical_stock_market_condition("day_rows")]
+    params: list[object] = []
+    if start_date != "":
+        clauses.append("day_rows.trade_date >= %s::date")
+        params.append(start_date)
+    if end_date != "":
+        clauses.append("day_rows.trade_date <= %s::date")
+        params.append(end_date)
+    frame = query_dataframe(
+        f"""
+        select distinct day_rows.code
+        from fact.stock_daily_1d day_rows
+        where {' and '.join(clauses)}
+        order by day_rows.code
+        """,
+        tuple(params),
+    )
+    if frame.empty or "code" not in frame.columns:
+        return []
+    return [str(value) for value in frame["code"].tolist() if str(value) != ""]
 
 
 def load_etf_daily_frame(ts_codes: list[str], start_date: str, end_date: str) -> pd.DataFrame:

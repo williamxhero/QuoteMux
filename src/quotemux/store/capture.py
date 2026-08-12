@@ -166,9 +166,12 @@ class _CaptureBatchResult:
     items: tuple[object, ...]
     store_write_count: int
     partial_issues: tuple[str, ...] = ()
+    row_count_override: int | None = None
 
 
 def _default_profile_for_capability(capability_id: str) -> str:
+    if capability_id == "futures.quotes.main_continuous.1m":
+        return PROFILE_MARKET_RECENT_TRADING_DAYS
     if capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday"}:
         return PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS
     if capability_id == "stocks.quotes.daily_snapshot":
@@ -217,6 +220,8 @@ def _default_cadence_for_profile(scope_profile: str) -> str:
 
 
 def _default_window_for_profile(scope_profile: str, capability_id: str) -> int:
+    if capability_id == "futures.quotes.main_continuous.1m":
+        return 2
     if capability_id == "stocks.quotes.intraday":
         return 5
     if scope_profile in {PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS, PROFILE_INDEXES_RECENT_TRADING_DAYS, PROFILE_CONCEPTS_RECENT_TRADING_DAYS, PROFILE_BOARDS_RECENT_TRADING_DAYS, PROFILE_MARKET_RECENT_TRADING_DAYS, PROFILE_OWNERSHIP_RECENT_TRADING_DAYS, PROFILE_RESEARCH_RECENT_DATES, PROFILE_CORPORATE_ACTIONS_RECENT_ANNOUNCEMENTS}:
@@ -245,12 +250,13 @@ def _build_default_capture_policy_specs() -> tuple[DefaultCapturePolicySpec, ...
             continue
         scope_profile = _default_profile_for_capability(capability_id)
         policy_default = get_capability_update_policy_default(capability_id)
+        run_time = time(0, 30) if capability_id == "futures.quotes.main_continuous.1m" else time(18, 0)
         specs.append(
             DefaultCapturePolicySpec(
                 capability_id,
                 policy_default.capture_enabled,
                 policy_default.capture_cadence,
-                time(18, 0),
+                run_time,
                 "Asia/Shanghai",
                 scope_profile,
                 _default_window_for_profile(scope_profile, capability_id),
@@ -1593,6 +1599,8 @@ def _news_event_requests(policy: CapturePolicy, capability_id: str, now: datetim
 
 
 def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[CaptureRequest, ...]:
+    if policy.capability_id == "futures.quotes.main_continuous.1m":
+        return (CaptureRequest(policy.capability_id, {"overlap_days": max(1, policy.window_count)}),)
     if policy.scope_profile == PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS and policy.capability_id in {"stocks.quotes.daily", "stocks.quotes.intraday"}:
         return _active_stock_requests(policy, policy.capability_id, now)
     if policy.scope_profile == PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS:
@@ -1680,6 +1688,7 @@ def is_capture_due(policy: CapturePolicy, runs: CaptureRunRepository, now: datet
 
 
 CAPTURE_DUE_PRIORITY: dict[str, int] = {
+    "futures.quotes.main_continuous.1m": 0,
     "stocks.quotes.intraday": 0,
     "stocks.quotes.daily_snapshot": 1,
     "stocks.quotes.daily": 2,
@@ -1952,7 +1961,7 @@ class QuoteMuxCaptureJob:
         for request in requests:
             try:
                 batch_result = self._run_capture_batch(request)
-                row_count += len(batch_result.items)
+                row_count += batch_result.row_count_override if batch_result.row_count_override is not None else len(batch_result.items)
                 coverage_count += batch_result.store_write_count
                 for issue in batch_result.partial_issues:
                     partial_batches.append({"request_identity": request.request_identity, "error": issue})
@@ -1982,6 +1991,15 @@ class QuoteMuxCaptureJob:
         return CAPTURE_SUCCESS
 
     def _run_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        if request.capability_id == "futures.quotes.main_continuous.1m":
+            result = self._runtime.futures.update_main_continuous(**request.request_identity)
+            errors = tuple(str(item.get("error", "")) for item in result.get("errors", []) if isinstance(item, dict))
+            return _CaptureBatchResult(
+                items=(),
+                store_write_count=int(result.get("updated_products", 0)),
+                partial_issues=errors,
+                row_count_override=int(result.get("fetched_rows", 0)),
+            )
         if request.capability_id == "stocks.quotes.intraday":
             return self._run_intraday_capture_batch(request)
         items, report = self._run_runtime_request(request)

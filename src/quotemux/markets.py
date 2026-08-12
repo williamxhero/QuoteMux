@@ -35,6 +35,19 @@ def _resolve_calendar_range(start_date: str, end_date: str) -> tuple[str, str]:
     return actual_start, actual_end
 
 
+def _base_source_report(contract_name: str, base_source_name: str, base_hit: bool) -> ContractReport:
+    from quotemux.config_runtime.runtime import get_config_runtime
+
+    active_snapshot = get_config_runtime().get_active_snapshot()
+    return ContractReport(
+        contract_name=contract_name,
+        profile_id=active_snapshot.profile_id,
+        profile_version=active_snapshot.version,
+        source_hit_counts={base_source_name: int(base_hit)},
+        source_request_counts={base_source_name: 1},
+    )
+
+
 def _build_missing_calendar_ranges(start_date: str, end_date: str, existing_dates: set[str]) -> list[tuple[str, str]]:
     start_day = parse_date_text(start_date)
     end_day = parse_date_text(end_date)
@@ -172,6 +185,14 @@ class QuoteMuxMarkets:
 
     def get_trading_calendar_with_report(self, request: TradingCalendarRequest) -> tuple[list[TradingCalendarItem], ContractReport]:
         actual_start, actual_end = _resolve_calendar_range(request.start_date, request.end_date)
+        local_items = get_local_trading_calendar(request.exchange, actual_start, actual_end, None)
+        if request.data_version != "":
+            expected_days = (datetime.fromisoformat(actual_end) - datetime.fromisoformat(actual_start)).days + 1
+            if len(local_items) != expected_days:
+                raise RuntimeError("交易日历本地事实不完整，拒绝读取冻结版本")
+            if request.is_open is not None:
+                local_items = [item for item in local_items if item.is_open == request.is_open]
+            return sorted(local_items, key=lambda item: item.trade_date), _base_source_report("markets.calendar.trading", "ref.trade_calendar", True)
         store_identity = {
             "exchange": request.exchange,
             "start_date": actual_start,
@@ -191,7 +212,7 @@ class QuoteMuxMarkets:
                 request_builder=lambda items: [(actual_start, actual_end)] if items == [] else _build_missing_calendar_ranges(actual_start, actual_end, {item.trade_date for item in items}),
                 provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("markets.calendar.trading", handlers, ("tushare", "akshare")),
                 source_order=self._settings.get_contract_source_order("markets.calendar.trading", ("tushare", "akshare")),
-                base_items=get_local_trading_calendar(request.exchange, actual_start, actual_end, None),
+                base_items=local_items,
                 base_source_name="ref.trade_calendar",
                 fact_ref_writer=get_fact_ref_writer("markets.calendar.trading"),
             )

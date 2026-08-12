@@ -1,0 +1,322 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+import time as time_module
+from typing import Iterable
+from zoneinfo import ZoneInfo
+
+from platform_models import FutureBar1mItem, FutureSeriesCoverageItem
+from quotemux.infra.db.client import _acquire_connection, _release_connection, execute_sql, query_dataframe
+from quotemux.source_packages.registry import get_default_source_package_registry
+
+
+SERIES_BACK_ADJUSTED_CONTINUOUS = "back_adjusted_continuous"
+SERIES_MAIN_CONTINUOUS = "main_continuous"
+VALID_SERIES_TYPES = (SERIES_BACK_ADJUSTED_CONTINUOUS, SERIES_MAIN_CONTINUOUS)
+_STORAGE_SERIES_TYPE = {
+    SERIES_BACK_ADJUSTED_CONTINUOUS: "apex_l0_adjusted",
+    SERIES_MAIN_CONTINUOUS: SERIES_MAIN_CONTINUOUS,
+}
+MAIN_CONTINUOUS_CAPABILITY_ID = "futures.quotes.main_continuous.1m"
+CHINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+FUTURE_EXCHANGE_PRODUCTS: dict[str, tuple[str, ...]] = {
+    "CFFEX": ("IF", "IH", "IC", "IM", "T", "TF", "TS", "TL"),
+    "SHFE": ("ad", "ag", "al", "ao", "au", "br", "bu", "cu", "fu", "hc", "ni", "op", "pb", "rb", "ru", "sn", "sp", "ss", "wr", "zn"),
+    "DCE": ("a", "b", "bz", "c", "cs", "eb", "eg", "fb", "i", "j", "jd", "jm", "l", "lg", "lh", "m", "p", "pg", "PL", "pp", "rr", "v", "y"),
+    "CZCE": ("AP", "CF", "CJ", "CY", "FG", "JR", "MA", "OI", "PF", "PK", "PR", "PX", "RM", "RS", "SA", "SF", "SH", "SM", "SR", "TA", "UR", "WH", "ZC"),
+    "INE": ("bc", "ec", "lu", "nr", "sc"),
+    "GFEX": ("lc", "pd", "ps", "pt", "si"),
+}
+PRODUCT_EXCHANGE = {product: exchange for exchange, products in FUTURE_EXCHANGE_PRODUCTS.items() for product in products}
+
+FUTURE_SCHEMA_SQL = (
+    """
+    create table if not exists ref.future_series (
+        product_code text not null,
+        exchange text not null,
+        series_type text not null,
+        display_name text not null default '',
+        loaded_at timestamp with time zone not null default now(),
+        primary key (product_code, exchange, series_type),
+        check (series_type in ('apex_l0_adjusted', 'main_continuous'))
+    )
+    """,
+    """
+    create table if not exists fact.future_bar_1m (
+        product_code text not null,
+        exchange text not null,
+        series_type text not null,
+        bar_time timestamp without time zone not null,
+        open double precision,
+        high double precision,
+        low double precision,
+        close double precision,
+        volume double precision,
+        open_interest double precision,
+        adjustment_offset double precision,
+        source_key text not null,
+        loaded_at timestamp with time zone not null default now(),
+        primary key (product_code, exchange, series_type, bar_time),
+        foreign key (product_code, exchange, series_type)
+            references ref.future_series (product_code, exchange, series_type)
+    )
+    """,
+    "create index if not exists future_bar_1m_time_idx on fact.future_bar_1m (bar_time, product_code, series_type)",
+)
+
+
+def ensure_future_schema() -> None:
+    for statement in FUTURE_SCHEMA_SQL:
+        if not execute_sql(statement):
+            raise RuntimeError("无法创建期货 1m 事实表")
+
+
+def normalize_product_codes(codes: str | Iterable[str]) -> tuple[str, ...]:
+    values = codes.split(",") if isinstance(codes, str) else list(codes)
+    result: list[str] = []
+    canonical = {code.lower(): code for code in PRODUCT_EXCHANGE}
+    for value in values:
+        text = str(value).strip()
+        if text == "":
+            continue
+        code = canonical.get(text.lower())
+        if code is None:
+            raise ValueError(f"未知期货品种代码: {text}")
+        if code not in result:
+            result.append(code)
+    return tuple(result)
+
+
+def require_series_type(series_type: str) -> str:
+    if series_type not in VALID_SERIES_TYPES:
+        raise ValueError(f"series_type 仅支持: {', '.join(VALID_SERIES_TYPES)}")
+    return series_type
+
+
+def _optional_float(value: object) -> float | None:
+    return None if value is None else float(value)
+
+
+def _format_time(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+
+def _china_market_now() -> datetime:
+    return datetime.now(CHINA_TIMEZONE).replace(tzinfo=None)
+
+
+def _call_provider_with_retry(handler, *args: object):
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            return handler(*args)
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                # 免费 HTTP 源偶发连接超时，按品种短退避重试，不重复已完成品种。
+                time_module.sleep(2**attempt)
+    assert last_error is not None
+    raise last_error
+
+
+class QuoteMuxFutures:
+    def get_quotes_1m(
+        self,
+        codes: str | Iterable[str],
+        series_type: str,
+        start_time: str = "",
+        end_time: str = "",
+        limit: int = 10000,
+    ) -> list[FutureBar1mItem]:
+        products = normalize_product_codes(codes)
+        if products == ():
+            raise ValueError("codes 不能为空")
+        actual_series_type = require_series_type(series_type)
+        ensure_future_schema()
+        storage_series_type = _STORAGE_SERIES_TYPE[actual_series_type]
+        start_value = start_time or None
+        end_value = end_time or None
+        frame = query_dataframe(
+            """
+            select product_code, exchange, series_type, bar_time, open, high, low, close,
+                   volume, open_interest, adjustment_offset
+            from fact.future_bar_1m
+            where product_code = any(%s)
+              and series_type = %s
+              and (%s::timestamp is null or bar_time >= %s::timestamp)
+              and (%s::timestamp is null or bar_time <= %s::timestamp)
+            order by bar_time asc, product_code asc
+            limit %s
+            """,
+            (list(products), storage_series_type, start_value, start_value, end_value, end_value, max(1, min(int(limit), 500000))),
+        )
+        return [
+            FutureBar1mItem(
+                product_code=str(row["product_code"]),
+                exchange=str(row["exchange"]),
+                series_type=actual_series_type,
+                bar_time=_format_time(row["bar_time"]),
+                open=_optional_float(row.get("open")),
+                high=_optional_float(row.get("high")),
+                low=_optional_float(row.get("low")),
+                close=_optional_float(row.get("close")),
+                volume=_optional_float(row.get("volume")),
+                open_interest=_optional_float(row.get("open_interest")),
+                adjustment_offset=_optional_float(row.get("adjustment_offset")),
+            )
+            for row in frame.to_dict("records")
+        ]
+
+    def list_coverage(self, series_type: str = "") -> list[FutureSeriesCoverageItem]:
+        if series_type != "":
+            require_series_type(series_type)
+        ensure_future_schema()
+        storage_series_type = _STORAGE_SERIES_TYPE.get(series_type, "")
+        frame = query_dataframe(
+            """
+            select product_code, exchange, series_type, count(*) as row_count,
+                   min(bar_time) as first_bar_time, max(bar_time) as last_bar_time
+            from fact.future_bar_1m
+            where (%s = '' or series_type = %s)
+            group by product_code, exchange, series_type
+            order by series_type, exchange, product_code
+            """,
+            (storage_series_type, storage_series_type),
+        )
+        return [
+            FutureSeriesCoverageItem(
+                product_code=str(row["product_code"]),
+                exchange=str(row["exchange"]),
+                series_type=SERIES_BACK_ADJUSTED_CONTINUOUS if str(row["series_type"]) == "apex_l0_adjusted" else str(row["series_type"]),
+                row_count=int(row["row_count"]),
+                first_bar_time=_format_time(row.get("first_bar_time")),
+                last_bar_time=_format_time(row.get("last_bar_time")),
+            )
+            for row in frame.to_dict("records")
+        ]
+
+    def update_main_continuous(self, overlap_days: int = 2) -> dict[str, object]:
+        ensure_future_schema()
+        coverage = {(item.product_code, item.series_type): item for item in self.list_coverage()}
+        handler = get_default_source_package_registry().get_handler("shinny_edb", "get_future_main_continuous_1m")
+        # EDB 的 start_time/end_time 都按中国市场本地时间解释，不能依赖服务器系统时区。
+        now = _china_market_now()
+        free_window_start = now - timedelta(days=364)
+        fetched_rows = 0
+        written_rows = 0
+        updated_products = 0
+        skipped_products: list[dict[str, str]] = []
+        errors: list[dict[str, str]] = []
+        for product_code, exchange in PRODUCT_EXCHANGE.items():
+            main_coverage = coverage.get((product_code, SERIES_MAIN_CONTINUOUS))
+            l0_coverage = coverage.get((product_code, SERIES_BACK_ADJUSTED_CONTINUOUS))
+            last_text = main_coverage.last_bar_time if main_coverage is not None else (l0_coverage.last_bar_time if l0_coverage is not None else "")
+            if last_text == "":
+                skipped_products.append({"product_code": product_code, "reason": "no_local_coverage"})
+                continue
+            last_time = datetime.fromisoformat(last_text)
+            if last_time < free_window_start:
+                skipped_products.append({"product_code": product_code, "reason": "outside_free_window"})
+                continue
+            start_time = max(free_window_start, last_time - timedelta(days=max(1, overlap_days)))
+            try:
+                items = list(
+                    _call_provider_with_retry(
+                        handler,
+                        product_code,
+                        exchange,
+                        start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        now.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                )
+                fetched_rows += len(items)
+                if items == []:
+                    skipped_products.append({"product_code": product_code, "reason": "provider_empty"})
+                    continue
+                written_rows += self._upsert_main_continuous(items)
+                updated_products += 1
+            except Exception as exc:
+                errors.append({"product_code": product_code, "error": f"{type(exc).__name__}: {exc}"})
+        return {
+            "capability_id": MAIN_CONTINUOUS_CAPABILITY_ID,
+            "fetched_rows": fetched_rows,
+            "written_rows": written_rows,
+            "updated_products": updated_products,
+            "skipped_products": skipped_products,
+            "errors": errors,
+        }
+
+    def _upsert_main_continuous(self, items: list[FutureBar1mItem]) -> int:
+        if items == []:
+            return 0
+        first = items[0]
+        connection = _acquire_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into ref.future_series (product_code, exchange, series_type, display_name)
+                    values (%s, %s, %s, %s)
+                    on conflict (product_code, exchange, series_type) do update
+                    set loaded_at = now()
+                    """,
+                    (first.product_code, first.exchange, SERIES_MAIN_CONTINUOUS, f"{first.product_code} 主力连续"),
+                )
+                cursor.execute("create temporary table future_bar_1m_stage (like fact.future_bar_1m including defaults) on commit drop")
+                with cursor.copy(
+                    """
+                    copy future_bar_1m_stage
+                        (product_code, exchange, series_type, bar_time, open, high, low, close,
+                         volume, open_interest, adjustment_offset, source_key)
+                    from stdin
+                    """
+                ) as copy:
+                    for item in items:
+                        copy.write_row(
+                            (
+                                item.product_code,
+                                item.exchange,
+                                SERIES_MAIN_CONTINUOUS,
+                                item.bar_time,
+                                item.open,
+                                item.high,
+                                item.low,
+                                item.close,
+                                item.volume,
+                                item.open_interest,
+                                None,
+                                "shinny_edb",
+                            )
+                        )
+                cursor.execute(
+                    """
+                    insert into fact.future_bar_1m
+                        (product_code, exchange, series_type, bar_time, open, high, low, close,
+                         volume, open_interest, adjustment_offset, source_key)
+                    select product_code, exchange, series_type, bar_time, open, high, low, close,
+                           volume, open_interest, adjustment_offset, source_key
+                    from future_bar_1m_stage
+                    on conflict (product_code, exchange, series_type, bar_time) do update set
+                        open = excluded.open,
+                        high = excluded.high,
+                        low = excluded.low,
+                        close = excluded.close,
+                        volume = excluded.volume,
+                        open_interest = excluded.open_interest,
+                        adjustment_offset = excluded.adjustment_offset,
+                        source_key = excluded.source_key,
+                        loaded_at = now()
+                    """
+                )
+            connection.commit()
+            return len(items)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            _release_connection(connection)

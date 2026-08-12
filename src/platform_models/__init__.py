@@ -1,23 +1,54 @@
 ﻿from __future__ import annotations
 
+from datetime import date, datetime
 import math
 
 from pydantic import BaseModel, Field
 
-from quotemux.infra.common import format_date_value, format_datetime_value
+
+def _format_date_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if text == "":
+        return ""
+    try:
+        if len(text) == 8 and text.isdigit():
+            return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except ValueError:
+        return text
+
+
+def _format_datetime_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    text = str(value).strip()
+    if text == "":
+        return ""
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return text
 
 
 def format_api_temporal_value(field_name: str, value: str) -> str:
     if not value:
         return value
     if field_name == "report_period" or field_name.endswith("_date"):
-        return format_date_value(value)
+        return _format_date_value(value)
     if field_name.endswith("_time"):
         if value.count(":") == 2 and len(value) <= 8:
             return value
         if ":" not in value:
-            return format_date_value(value)
-        return format_datetime_value(value, "1m")
+            return _format_date_value(value)
+        return _format_datetime_value(value)
     return value
 
 
@@ -78,6 +109,7 @@ class StockQuoteCodeSummary(ApiModel):
 
 
 class StockQuotesMeta(ApiModel):
+    data_version: str = ""
     total_rows: int
     returned_rows: int
     complete: bool
@@ -747,6 +779,29 @@ class StockStrategyFactorItem(ApiModel):
     net_profit_deducted_ttm_qoq_consec_min_3q: float | None = None
 
 
+class FutureBar1mItem(ApiModel):
+    product_code: str
+    exchange: str
+    series_type: str
+    bar_time: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: float | None = None
+    open_interest: float | None = None
+    adjustment_offset: float | None = None
+
+
+class FutureSeriesCoverageItem(ApiModel):
+    product_code: str
+    exchange: str
+    series_type: str
+    row_count: int
+    first_bar_time: str = ""
+    last_bar_time: str = ""
+
+
 class StockFinancialPitRawItem(ApiModel):
     code: str
     report_period: str
@@ -918,6 +973,32 @@ class RightsIssueItem(ApiModel):
     rights_price: float | None = None
     record_date: str = ""
     ex_date: str = ""
+
+
+class CorporateActionCoverage(ApiModel):
+    data_version: str = ""
+    complete: bool
+    missing_date_ranges: list[str]
+
+
+class DividendPage(ApiModel):
+    """按公告日筛选的分红事件分页结果。"""
+
+    items: list[DividendItem]
+    total: int
+    offset: int
+    limit: int
+    coverage: CorporateActionCoverage
+
+
+class RightsIssuePage(ApiModel):
+    """按公告日筛选的配股事件分页结果。"""
+
+    items: list[RightsIssueItem]
+    total: int
+    offset: int
+    limit: int
+    coverage: CorporateActionCoverage
 
 
 class ShareChangeItem(ApiModel):

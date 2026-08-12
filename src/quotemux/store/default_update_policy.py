@@ -22,6 +22,8 @@ def _policy(capability_id: str, capture_enabled: bool, capture_cadence: str, cac
 
 
 CAPABILITY_UPDATE_POLICY_DEFAULTS = (
+    _policy("futures.quotes.back_adjusted_continuous.1m", False, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
+    _policy("futures.quotes.main_continuous.1m", True, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("boards.catalog", True, "monthly", 365),
     _policy("boards.members.history", False, "weekly", 365),
     _policy("boards.quotes.daily", True, "daily", 30),
@@ -36,6 +38,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("concepts.alias.groups", False, "daily", 365),
     _policy("concepts.alias.resolve", False, "daily", 365),
     _policy("funds.etf.catalog", True, "monthly", 365),
+    _policy("funds.etf.profile", False, "monthly", 30),
     _policy("funds.etf.quotes.daily", False, "daily", 365),
     _policy("indexes.catalog", True, "monthly", 365),
     _policy("indexes.members", True, "weekly", 365),
@@ -58,9 +61,9 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("rankings.research.reports", True, "daily", 90),
     _policy("stocks.catalog", True, "daily", 365),
     _policy("stocks.catalog.archive", True, "monthly", 365),
-    _policy("stocks.corporate_actions.dividends", False, "daily", 365),
+    _policy("stocks.corporate_actions.dividends", False, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("stocks.corporate_actions.repurchases", False, "daily", 365),
-    _policy("stocks.corporate_actions.rights_issues", False, "daily", 365),
+    _policy("stocks.corporate_actions.rights_issues", False, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("stocks.corporate_actions.share_changes", False, "daily", 365),
     _policy("stocks.corporate_actions.unlock_schedules", False, "daily", 365),
     _policy("stocks.factors.adj", False, "daily", 365),
@@ -68,6 +71,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("stocks.factors.technical", True, "daily", 30),
     _policy("stocks.finance.audits", False, "daily", 365),
     _policy("stocks.finance.disclosure_dates", False, "daily", 180),
+    _policy("stocks.finance.report_disclosures", False, "daily", 30),
     _policy("stocks.finance.express", False, "daily", 180),
     _policy("stocks.finance.express.snapshot", False, "daily", 365),
     _policy("stocks.finance.forecasts", False, "daily", 180),

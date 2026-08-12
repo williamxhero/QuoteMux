@@ -8,6 +8,7 @@ class TradingCalendarRequest(BaseModel):
     start_date: str = ""
     end_date: str = ""
     is_open: bool | None = None
+    data_version: str = ""
 
 
 class PreviousTradingDaysRequest(BaseModel):
