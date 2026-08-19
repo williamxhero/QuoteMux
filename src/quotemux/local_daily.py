@@ -159,5 +159,12 @@ def get_stock_codes_missing_adj_factors(codes: list[str], start_date: str, end_d
         return normalized_codes
     work = frame.copy()
     work["adj_factor"] = pd.to_numeric(work["adj_factor"], errors="coerce")
-    valid_by_code = work.assign(_valid=work["adj_factor"] > 0).groupby("code", sort=False)["_valid"].any()
-    return [code for code in normalized_codes if not bool(valid_by_code.get(code, False))]
+    if "is_suspended" in work.columns:
+        suspended = work["is_suspended"].fillna(False).astype(bool)
+        work = work.loc[~suspended]
+    incomplete_by_code = (
+        work.assign(_missing=~(work["adj_factor"] > 0))
+        .groupby("code", sort=False)["_missing"]
+        .any()
+    )
+    return [code for code in normalized_codes if bool(incomplete_by_code.get(code, False))]

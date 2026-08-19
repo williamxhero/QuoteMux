@@ -97,6 +97,10 @@ def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
         where code <> '000000'
           and listed_date <= %s
           and (delisted_date is null or delisted_date >= %s)
+          -- B-share history is not covered by the configured stock-daily
+          -- providers with the required amount/pre-close contract.
+          and not (market = 'SHSE' and left(code, 3) = '900')
+          and not (market = 'SZSE' and left(code, 3) = '200')
         order by code
     """
     return query_dataframe(query, (trade_date, trade_date))

@@ -85,6 +85,13 @@ class IndexMembersAuditRequest(_RequestBase):
     data_version: Literal["quotemux.indexes.members.v2"]
     source_version: Literal["tushare.index_weight.v1"]
 
+    @field_validator("index_code")
+    @classmethod
+    def _validate_index_code(cls, value: str) -> str:
+        if len(value) != 6 or not value.isdigit():
+            raise ValueError("index_code 必须是 6 位数字")
+        return value
+
     @model_validator(mode="after")
     def _validate_dates(self) -> IndexMembersAuditRequest:
         try:

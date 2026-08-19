@@ -184,6 +184,7 @@ INTERNAL_CAPABILITY_IDS = (
     "boards.members.history",
     "boards.quotes.daily",
     "funds.etf.profile",
+    "stocks.factors.adj.snapshot",
     "stocks.finance.report_disclosures",
 )
 

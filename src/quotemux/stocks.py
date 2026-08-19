@@ -6,6 +6,7 @@ import os
 from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, CorporateActionCoverage, DisclosureDateItem, DividendItem, DividendPage, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, RightsIssuePage, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialPitRawItem, StockFinancialStatementItem, StockManagerItem, StockMarginItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, StockStrategyFactorItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
 from quotemux.infra.common import build_time_bounds, format_date_value, format_datetime_value, normalize_stock_code, parse_date_text
 from quotemux.infra.db.reference_reads import load_stock_active_codes_frame, load_stock_catalog_frame
+from quotemux.infra.db.market_reads import load_stock_suspension_history_frame
 from quotemux.runtime_core.executor import ProviderStep, SourceInstanceExecutor, run_fallback_chain_with_report
 from quotemux.infra.tushare.helpers import normalize_date_range
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, expected_intraday_trade_times, has_enough_stock_quote_rows, missing_expected_keys, sort_items, trim_items_per_key
@@ -185,17 +186,36 @@ def _stock_listing_windows(codes: list[str]) -> dict[str, tuple[str, str]]:
     }
 
 
+def _stock_suspension_windows(codes: list[str]) -> dict[str, list[tuple[str, str]]]:
+    suspension_frame = load_stock_suspension_history_frame(codes)
+    windows: dict[str, list[tuple[str, str]]] = {}
+    for row in suspension_frame.to_dict("records"):
+        code = str(row["code"]).zfill(6)
+        start_date = format_date_value(row.get("suspend_start_date"))
+        end_date = format_date_value(row.get("suspend_end_date"))
+        if start_date == "" or end_date == "":
+            continue
+        windows.setdefault(code, []).append((start_date, end_date))
+    return windows
+
+
+def _is_suspended_trade_date(trade_date: str, windows: list[tuple[str, str]]) -> bool:
+    return any(start_date <= trade_date <= end_date for start_date, end_date in windows)
+
+
 def _code_expected_trade_dates(
     codes: list[str],
     expected_dates: list[str],
 ) -> dict[str, list[str]]:
     listing_windows = _stock_listing_windows(codes)
+    suspension_windows = _stock_suspension_windows(codes)
     return {
         code: [
             trade_date
             for trade_date in expected_dates
             if (listing_windows.get(code, ("", ""))[0] == "" or trade_date >= listing_windows[code][0])
-            and (listing_windows.get(code, ("", ""))[1] == "" or trade_date <= listing_windows[code][1])
+            and (listing_windows.get(code, ("", ""))[1] == "" or trade_date < listing_windows[code][1])
+            and not _is_suspended_trade_date(trade_date, suspension_windows.get(code, []))
         ]
         for code in codes
     }
@@ -411,11 +431,19 @@ def _build_quote_code_summaries(
         code_expected_trade_times = _expected_quote_trade_times(freq, code_expected_dates)
         code_expected_trade_time_set = set(code_expected_trade_times)
         normalized_coverage_times = {_quote_time_key(item) for item in code_coverage_items}
-        actual_dates = (
-            {trade_time[:10] for trade_time in normalized_coverage_times if trade_time in code_expected_trade_time_set}
-            if code_expected_trade_times
-            else {_quote_item_date(item) for item in code_coverage_items}
-        )
+        if freq in {"1d", "1w", "1mo"}:
+            code_expected_date_set = set(code_expected_dates)
+            actual_dates = {
+                _quote_item_date(item)
+                for item in code_coverage_items
+                if _quote_item_date(item) in code_expected_date_set
+            }
+        else:
+            actual_dates = {
+                trade_time[:10]
+                for trade_time in normalized_coverage_times
+                if trade_time in code_expected_trade_time_set
+            }
         missing_time_keys = _missing_quote_time_keys(code, freq, code_expected_trade_times, code_coverage_items)
         missing_trade_dates = [trade_date for trade_date in code_expected_dates if trade_date not in actual_dates]
         full_missing_trade_times = [str(key[1]) for key in missing_time_keys]

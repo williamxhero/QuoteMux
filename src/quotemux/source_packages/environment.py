@@ -140,8 +140,10 @@ def _runtime_requirements_hash() -> str:
     pyproject_path = _runtime_project_root() / "pyproject.toml"
     if not pyproject_path.is_file():
         return ""
-    content = str(_runtime_project_root()).encode("utf-8") + pyproject_path.read_bytes()
-    return hashlib.sha256(content).hexdigest()
+    # Releases live under timestamped directories.  The absolute checkout path is
+    # not a dependency contract, and including it would rebuild every isolated
+    # provider environment after every otherwise-compatible deployment.
+    return hashlib.sha256(pyproject_path.read_bytes()).hexdigest()
 
 
 def _venv_python_executable(venv_path: Path) -> Path:

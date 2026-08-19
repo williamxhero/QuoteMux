@@ -274,6 +274,45 @@ def _upsert_stock_adj_factors(items: Sequence[object]) -> bool:
     )
 
 
+def _upsert_stock_money_flow_snapshot(items: Sequence[object]) -> bool:
+    """Fill missing provider-native stock money-flow facts without replacing valid values."""
+    params: list[tuple[object, ...]] = []
+    for item in items:
+        code = normalize_stock_code(str(getattr(item, "code", ""))).zfill(6)
+        trade_date = format_date_value(str(getattr(item, "trade_date", "")))
+        if code == "" or trade_date == "":
+            continue
+        params.append(
+            (
+                _stock_market(code),
+                code,
+                trade_date,
+                getattr(item, "main_inflow", None),
+                getattr(item, "main_outflow", None),
+                getattr(item, "net_inflow", None),
+                "tushare",
+                getattr(item, "active_buy_amount", None),
+            )
+        )
+    if not params or not _table_exists("fact", "stock_money_flow_daily"):
+        return False
+    return execute_many(
+        """
+        insert into fact.stock_money_flow_daily
+          (market, code, trade_date, main_inflow, main_outflow, net_inflow, source, active_buy_amount)
+        values (%s, %s, %s::date, %s, %s, %s, %s, %s)
+        on conflict (market, code, trade_date) do update set
+          main_inflow = coalesce(fact.stock_money_flow_daily.main_inflow, excluded.main_inflow),
+          main_outflow = coalesce(fact.stock_money_flow_daily.main_outflow, excluded.main_outflow),
+          net_inflow = coalesce(fact.stock_money_flow_daily.net_inflow, excluded.net_inflow),
+          source = coalesce(nullif(fact.stock_money_flow_daily.source, ''), excluded.source),
+          active_buy_amount = coalesce(fact.stock_money_flow_daily.active_buy_amount, excluded.active_buy_amount),
+          loaded_at = now()
+        """,
+        params,
+    )
+
+
 def _repair_stock_daily_reference_rows(codes: Sequence[str]) -> bool:
     if not codes:
         return True
@@ -386,7 +425,7 @@ def _complete_stock_1m_items(items: Sequence[StockQuoteItem]) -> list[StockQuote
     expected_times = set(EXPECTED_INTRADAY_BAR_TIMES["1m"])
     grouped: dict[tuple[str, str], dict[str, StockQuoteItem]] = {}
     for item in items:
-        if item.freq != "1m" or None in (item.open, item.high, item.low, item.close):
+        if item.freq != "1m" or None in (item.open, item.high, item.low, item.close, item.amount):
             continue
         code = normalize_stock_code(item.code).zfill(6)
         trade_time = format_datetime_value(item.trade_time, "1m")
@@ -456,7 +495,19 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
             loaded_at = now()
     """
     query_30m = query_1m.replace("fact.stock_bar_1m", "fact.stock_bar_30m")
-    return execute_many(query_1m, params_1m) and execute_many(query_30m, params_30m)
+    if not execute_many(query_1m, params_1m) or not execute_many(query_30m, params_30m):
+        return False
+    if not params_1m:
+        return True
+    bar_times = [str(params[2]) for params in params_1m]
+    return execute_many(
+        """
+        insert into audit.stock_bar_1m_write_event
+          (source_semantics, min_bar_time, max_bar_time, row_count)
+        values (%s, %s::timestamp, %s::timestamp, %s)
+        """,
+        [("quotemux.fact_ref_writer.complete_standard_grid", min(bar_times), max(bar_times), len(params_1m))],
+    )
 
 
 def _normalized_ohlc(open_price: float, high_price: float, low_price: float, close_price: float, volume: int, amount: float) -> tuple[float, float, float, float]:
@@ -1021,6 +1072,7 @@ def get_fact_ref_writer(capability_id: str) -> Callable[[list[BaseModel]], bool]
         "stocks.quotes.intraday": _upsert_stock_intraday,
         "stocks.quotes.daily_snapshot": _upsert_stock_daily,
         "stocks.factors.adj": _upsert_stock_adj_factors,
+        "stocks.indicators.money_flow.snapshot": _upsert_stock_money_flow_snapshot,
         "funds.etf.catalog": _upsert_etf_catalog,
         "funds.etf.quotes.daily": _upsert_etf_daily,
         "boards.quotes.daily": _upsert_board_daily,

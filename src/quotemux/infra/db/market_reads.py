@@ -141,6 +141,25 @@ def load_stock_daily_frame(codes: list[str], start_date: str, end_date: str) -> 
     return query_dataframe(query, tuple([*source_params, *outer_params]))
 
 
+def load_stock_suspension_history_frame(codes: list[str]) -> pd.DataFrame:
+    """Load authoritative non-trading windows used by quote coverage checks."""
+    if not codes or not _table_exists("fact", "stock_suspension_history"):
+        return pd.DataFrame()
+    return query_dataframe(
+        """
+        select
+            code,
+            suspend_start_date::text as suspend_start_date,
+            suspend_end_date::text as suspend_end_date
+        from fact.stock_suspension_history
+        where code = any(%s)
+          and status = 'suspended'
+        order by code, suspend_start_date, suspend_end_date
+        """,
+        (codes,),
+    )
+
+
 def load_stock_adj_factor_frame(code: str, start_date: str, end_date: str) -> pd.DataFrame:
     if code == "":
         return pd.DataFrame()

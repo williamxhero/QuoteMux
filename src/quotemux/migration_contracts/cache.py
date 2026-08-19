@@ -52,7 +52,8 @@ class BoundedMigrationCache:
         key = _cache_key(request)
         entry = _CacheEntry(
             capability_id=capability_id,
-            expires_at=time.time() + MIGRATION_CACHE_TTL_SECONDS_BY_CAPABILITY[capability_id],
+            expires_at=time.time()
+            + MIGRATION_CACHE_TTL_SECONDS_BY_CAPABILITY[capability_id],
             payload=payload,
         )
         with self._lock:

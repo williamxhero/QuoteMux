@@ -109,9 +109,16 @@ def _load_live_page(request: MigrationRequest, adapter: TypeAdapter[object]):
         raise P0QueryError(kind, str(exc)) from exc
 
 
-def _validate_page(request: MigrationRequest, page: MigrationPage[MigrationData]) -> None:
-    if page.capability_id != request.capability_id or page.data_version != request.data_version:
-        raise P0QueryError("contract_error", "audited page capability/data_version 不匹配")
+def _validate_page(
+    request: MigrationRequest, page: MigrationPage[MigrationData]
+) -> None:
+    if (
+        page.capability_id != request.capability_id
+        or page.data_version != request.data_version
+    ):
+        raise P0QueryError(
+            "contract_error", "audited page capability/data_version 不匹配"
+        )
     if page.provider != request.provider:
         raise P0QueryError("contract_error", "audited page provider 不匹配")
     if page.source != MIGRATION_SOURCE_BY_CAPABILITY[request.capability_id]:
@@ -121,7 +128,9 @@ def _validate_page(request: MigrationRequest, page: MigrationPage[MigrationData]
     event_ids: set[str] = set()
     for record in page.records:
         if record.source_event_id in event_ids:
-            raise P0QueryError("contract_error", "audited page 出现重复 source_event_id")
+            raise P0QueryError(
+                "contract_error", "audited page 出现重复 source_event_id"
+            )
         event_ids.add(record.source_event_id)
         if canonical_json_sha256(record.raw_projection) != record.raw_hash:
             raise P0QueryError("contract_error", "audited record raw_hash 不匹配")

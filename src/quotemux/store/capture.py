@@ -1341,6 +1341,16 @@ def _stock_trading_day_requests(policy: CapturePolicy, capability_id: str, now: 
             CaptureRequest(capability_id, {**request_identity, "start_date": missing_start, "end_date": missing_end})
             for missing_start, missing_end in _date_missing_ranges(capability_id, request_identity, recent_days)
         )
+    if capability_id == "stocks.quotes.auctions":
+        # Tushare's auction endpoints are market-wide per trade date. Splitting
+        # them by stock multiplied one 30-day refresh into thousands of identical
+        # source requests and kept the scheduled capture lock for hours.
+        request_identity = {"code": "", "session": "", "trade_date": "", "start_date": start_date, "end_date": end_date}
+        if recent_days == ():
+            return (CaptureRequest(capability_id, request_identity),)
+        requests: list[CaptureRequest] = []
+        _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
+        return tuple(requests)
     batch_requests = {
         "stocks.indicators.daily_basic": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.indicators.daily_valuation": lambda batch: {"code": "", "codes": ",".join(batch), "trade_date": "", "start_date": start_date, "end_date": end_date},
@@ -1364,7 +1374,6 @@ def _stock_trading_day_requests(policy: CapturePolicy, capability_id: str, now: 
             _append_missing_range_requests(requests, capability_id, request_identity, recent_days)
         return tuple(requests)
     per_code = {
-        "stocks.quotes.auctions": lambda code: {"code": code, "session": "", "trade_date": "", "start_date": start_date, "end_date": end_date},
         "stocks.factors.adj": lambda code: {"code": code, "start_date": start_date, "end_date": end_date, "base_date": ""},
         "stocks.factors.technical": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date, "adjust": "none"},
         "stocks.indicators.money_flow": lambda code: {"code": code, "trade_date": "", "start_date": start_date, "end_date": end_date, "view": ""},

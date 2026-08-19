@@ -67,6 +67,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("stocks.corporate_actions.share_changes", False, "daily", 365),
     _policy("stocks.corporate_actions.unlock_schedules", False, "daily", 365),
     _policy("stocks.factors.adj", False, "daily", 365),
+    _policy("stocks.factors.adj.snapshot", False, "daily", 365),
     _policy("stocks.factors.strategy_window", False, "daily", 365),
     _policy("stocks.factors.technical", True, "daily", 30),
     _policy("stocks.finance.audits", False, "daily", 365),
