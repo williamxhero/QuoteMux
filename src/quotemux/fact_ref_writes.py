@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, EtfCatalogItem, EtfDailyQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
-from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
+from quotemux.infra.db.client import execute_many, execute_many_with_migration_journal, execute_sql, query_dataframe
 
 
 KNOWN_INDEX_CATALOG: dict[str, IndexCatalogItem] = {
@@ -495,7 +495,17 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
             loaded_at = now()
     """
     query_30m = query_1m.replace("fact.stock_bar_1m", "fact.stock_bar_30m")
-    if not execute_many(query_1m, params_1m) or not execute_many(query_30m, params_30m):
+    if not execute_many_with_migration_journal(
+        query_1m,
+        params_1m,
+        fact_table="stock_bar_1m",
+        bar_time_index=2,
+    ) or not execute_many_with_migration_journal(
+        query_30m,
+        params_30m,
+        fact_table="stock_bar_30m",
+        bar_time_index=2,
+    ):
         return False
     if not params_1m:
         return True

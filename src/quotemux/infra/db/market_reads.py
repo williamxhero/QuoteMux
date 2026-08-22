@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quotemux.infra.common import stock_market_name
-from quotemux.infra.db.client import execute_many, query_dataframe
+from quotemux.infra.db.client import execute_many_with_migration_journal, query_dataframe
 
 
 def _existing_columns(table_schema: str, table_name: str) -> set[str]:
@@ -456,7 +456,7 @@ def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:
                 row["amount"],
             )
         )
-    return execute_many(
+    return execute_many_with_migration_journal(
         """
         insert into fact.stock_bar_30m (market, code, bar_time, open, high, low, close, volume, amount)
         values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -470,6 +470,8 @@ def upsert_stock_bar_30m_rows(rows: list[dict[str, object]]) -> bool:
             loaded_at = now()
         """,
         params,
+        fact_table="stock_bar_30m",
+        bar_time_index=2,
     )
 
 

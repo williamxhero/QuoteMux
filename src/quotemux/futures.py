@@ -6,7 +6,15 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from platform_models import FutureBar1mItem, FutureContractCatalogItem, FutureContractRealtimeQuoteItem, FutureMainContractMappingItem, FutureRealtimeQuoteItem, FutureSeriesCoverageItem
-from quotemux.infra.db.client import _acquire_connection, _release_connection, execute_sql, query_dataframe
+from quotemux.infra.db.client import (
+    _acquire_connection,
+    _release_connection,
+    append_migration_range_journals,
+    discover_migration_range_journals,
+    enable_explicit_range_journaling,
+    execute_sql,
+    query_dataframe,
+)
 from quotemux.settings import QuoteMuxSettings
 from quotemux.source_packages.instance_context import use_source_instance
 from quotemux.source_packages.registry import get_default_source_package_registry
@@ -336,6 +344,9 @@ class QuoteMuxFutures:
         connection = _acquire_connection()
         try:
             with connection.cursor() as cursor:
+                journal_state = discover_migration_range_journals(cursor, "future_bar_1m")
+                if journal_state.has_active_journal:
+                    enable_explicit_range_journaling(cursor)
                 cursor.execute(
                     """
                     insert into ref.future_series (product_code, exchange, series_type, display_name)
@@ -391,6 +402,7 @@ class QuoteMuxFutures:
                         loaded_at = now()
                     """
                 )
+                append_migration_range_journals(cursor, journal_state, [item.bar_time for item in items])
             connection.commit()
             return len(items)
         except Exception:
