@@ -94,6 +94,12 @@ class DefaultCachePolicySpec:
 
 
 def _time_field_for_capability(capability_id: str) -> str:
+    if capability_id == "futures.contracts.catalog":
+        return "metadata_time"
+    if capability_id == "futures.contracts.main_mapping":
+        return "updated_time"
+    if capability_id == "futures.quotes.contract.realtime":
+        return "quote_time"
     if capability_id == "funds.etf.quotes.daily":
         return "trade_date"
     if capability_id == "funds.etf.catalog":
@@ -168,6 +174,12 @@ def _time_field_for_capability(capability_id: str) -> str:
 
 
 def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "futures.contracts.catalog":
+        return ("provider_symbol",)
+    if capability_id == "futures.contracts.main_mapping":
+        return ("product_code", "exchange")
+    if capability_id == "futures.quotes.contract.realtime":
+        return ("provider_symbol",)
     if capability_id == "funds.etf.quotes.daily":
         return ("ts_code", "trade_date")
     if capability_id == "funds.etf.catalog":
@@ -304,6 +316,12 @@ def _key_fields_for_capability(capability_id: str) -> tuple[str, ...]:
 
 
 def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "futures.contracts.catalog":
+        return ("codes", "include_expired")
+    if capability_id == "futures.contracts.main_mapping":
+        return ("codes",)
+    if capability_id == "futures.quotes.contract.realtime":
+        return ("symbols",)
     if capability_id == "funds.etf.catalog":
         return ("ts_codes", "name", "include_delisted")
     if capability_id == "funds.etf.quotes.daily":

@@ -817,7 +817,28 @@ class QuoteMuxStocks:
         fetcher,
         payload_builder=None,
     ) -> list[object]:
-        items, _ = execute_capability_query(
+        items, _ = self._store_list_with_report(
+            capability_id,
+            store_identity,
+            model_type,
+            unique_fields,
+            sort_fields,
+            fetcher,
+            payload_builder,
+        )
+        return items
+
+    def _store_list_with_report(
+        self,
+        capability_id: str,
+        store_identity: dict[str, object],
+        model_type: type[object],
+        unique_fields: tuple[str, ...],
+        sort_fields: tuple[str, ...],
+        fetcher,
+        payload_builder=None,
+    ) -> tuple[list[object], ContractReport]:
+        items, report = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id=capability_id,
                 store_identity=store_identity,
@@ -830,7 +851,7 @@ class QuoteMuxStocks:
                 payload_builder=payload_builder,
             )
         )
-        return list(items)
+        return list(items), report
 
     def _source_list(self, capability_id: str, handlers: dict[str, object], source_order: tuple[str, ...], key_fields: tuple[str, ...]) -> list[object]:
         items, _ = run_fallback_chain_with_report(
@@ -1549,11 +1570,12 @@ class QuoteMuxStocks:
         return sorted_items
 
     def get_risk_flags(self, trade_date: str, start_date: str, end_date: str, flag_type: str, status: str, limit: int, offset: int) -> list[StockRiskFlagItem]:
-        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "flag_type": flag_type, "status": status, "limit": ensure_limit(limit), "offset": offset}
+        actual_limit = ensure_limit(limit)
+        store_identity = {"trade_date": trade_date, "start_date": start_date, "end_date": end_date, "flag_type": flag_type, "status": status, "limit": actual_limit, "offset": offset}
         handlers = {
-            "get_stock_risk_flags": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_risk_flags", trade_date, start_date, end_date, flag_type, status, ensure_limit(limit), offset),
+            "get_stock_risk_flags": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_risk_flags", trade_date, start_date, end_date, flag_type, status, actual_limit, offset),
         }
-        return self._store_list(
+        items, report = self._store_list_with_report(
             "stocks.indicators.risk_flags",
             store_identity,
             StockRiskFlagItem,
@@ -1561,6 +1583,9 @@ class QuoteMuxStocks:
             ("start_date", "code", "flag_type"),
             lambda: self._source_list("stocks.indicators.risk_flags", handlers, ("tushare",), ("code", "flag_type", "start_date", "end_date", "status")),
         )
+        if report.store_hit_count > 0 or report.store_partial_hit_count > 0:
+            return items[offset: offset + actual_limit]
+        return items[:actual_limit]
 
     def get_premarket(self, code: str, trade_date: str, start_date: str, end_date: str) -> list[StockPremarketItem]:
         store_identity = {"code": code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date}

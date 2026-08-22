@@ -49,12 +49,17 @@ class PublicApiCapabilityBinding:
 
 
 PUBLIC_API_CAPABILITY_BINDINGS = (
+    PublicApiCapabilityBinding("/api/futures/contracts", ("futures.contracts.catalog",)),
+    PublicApiCapabilityBinding("/api/futures/contracts/main-mapping", ("futures.contracts.main_mapping",)),
+    PublicApiCapabilityBinding("/api/futures/contracts/realtime", ("futures.quotes.contract.realtime",)),
     PublicApiCapabilityBinding("/api/futures/quotes/1m", ("futures.quotes.back_adjusted_continuous.1m", "futures.quotes.main_continuous.1m")),
+    PublicApiCapabilityBinding("/api/futures/quotes/realtime", ("futures.quotes.main_continuous.realtime",)),
     PublicApiCapabilityBinding("/api/futures/coverage", ("futures.quotes.back_adjusted_continuous.1m", "futures.quotes.main_continuous.1m")),
     PublicApiCapabilityBinding("/api/funds/etfs", ("funds.etf.catalog",)),
     PublicApiCapabilityBinding("/api/funds/etfs/quotes/daily", ("funds.etf.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/quotes", ("stocks.quotes.intraday", "stocks.quotes.daily")),
     PublicApiCapabilityBinding("/api/stocks/quotes/query", ("stocks.quotes.intraday", "stocks.quotes.daily")),
+    PublicApiCapabilityBinding("/api/stocks/quotes/daily-window/query", ("stocks.quotes.daily", "stocks.catalog", "markets.calendar.trading")),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-snapshot", ("stocks.quotes.daily_snapshot",)),
     PublicApiCapabilityBinding("/api/stocks/quotes/daily-local-window", ("stocks.quotes.daily",)),
     PublicApiCapabilityBinding("/api/stocks/catalog", ("stocks.catalog",)),
@@ -207,6 +212,12 @@ def _default_merge_strategy(result_shape: str) -> str:
 
 
 def _infer_result_shape(capability_id: str) -> str:
+    if capability_id == "futures.contracts.catalog":
+        return RESULT_SHAPE_REFERENCE_TABLE
+    if capability_id in {"futures.contracts.main_mapping", "futures.quotes.contract.realtime"}:
+        return RESULT_SHAPE_KEYED_RECORDS
+    if capability_id == "futures.quotes.main_continuous.realtime":
+        return RESULT_SHAPE_KEYED_RECORDS
     if capability_id == "markets.events.news":
         return RESULT_SHAPE_EVENT_STREAM
     if capability_id == "stocks.factors.strategy_window":
@@ -238,6 +249,14 @@ def _infer_result_shape(capability_id: str) -> str:
 
 
 def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
+    if capability_id == "futures.contracts.catalog":
+        return ("provider_symbol",)
+    if capability_id == "futures.contracts.main_mapping":
+        return ("product_code", "exchange")
+    if capability_id == "futures.quotes.contract.realtime":
+        return ("provider_symbol",)
+    if capability_id == "futures.quotes.main_continuous.realtime":
+        return ("product_code", "exchange", "quote_time")
     if capability_id.startswith("futures.quotes."):
         return ("product_code", "exchange", "series_type", "bar_time")
     if capability_id == "boards.catalog":
@@ -302,6 +321,14 @@ def _infer_key_fields(capability_id: str) -> tuple[str, ...]:
 
 
 def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
+    if capability_id in {
+        "futures.contracts.catalog",
+        "futures.contracts.main_mapping",
+        "futures.quotes.contract.realtime",
+    }:
+        return ("shinny_tqsdk",)
+    if capability_id == "futures.quotes.main_continuous.realtime":
+        return ("shinny_tqsdk",)
     if capability_id == "futures.quotes.main_continuous.1m":
         return ("shinny_edb",)
     if capability_id == "futures.quotes.back_adjusted_continuous.1m":
@@ -436,6 +463,12 @@ def _infer_policy_mode(capability_id: str) -> str:
 
 
 def _infer_freshness_seconds(capability_id: str) -> int:
+    if capability_id in {"futures.quotes.main_continuous.realtime", "futures.quotes.contract.realtime"}:
+        return 0
+    if capability_id == "futures.contracts.catalog":
+        return 24 * 3600
+    if capability_id == "futures.contracts.main_mapping":
+        return 300
     return DEFAULT_FRESHNESS_SECONDS
 
 

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from platform_models import IndexMemberItem, IndexQuoteItem, StockQuoteItem, TradingCalendarItem
+from platform_models import FutureContractCatalogItem, FutureContractRealtimeQuoteItem, FutureMainContractMappingItem, IndexMemberItem, IndexQuoteItem, StockQuoteItem, TradingCalendarItem
 from quotemux.capabilities import get_capability_definition, is_independently_configurable_capability_id, is_known_capability_id, list_capability_definitions, list_capability_ids, normalize_capability_id
 from quotemux.contracts.strategies import allowed_merge_strategies
 from quotemux.requests import IndexMembersRequest, IndexQuotesRequest, StockDailySnapshotRequest, StockQuotesRequest, TradingCalendarRequest
@@ -37,6 +37,9 @@ _REQUEST_TYPES = {
 }
 
 _RESULT_TYPES = {
+    "futures.contracts.catalog": FutureContractCatalogItem,
+    "futures.contracts.main_mapping": FutureMainContractMappingItem,
+    "futures.quotes.contract.realtime": FutureContractRealtimeQuoteItem,
     "indexes.members": IndexMemberItem,
     "indexes.quotes.daily": IndexQuoteItem,
     "markets.calendar.trading": TradingCalendarItem,
@@ -92,13 +95,13 @@ def get_contract_allowed_merge_strategies(contract_name: str) -> tuple[str, ...]
 
 def get_contract_definition(contract_name: str) -> ContractDefinition:
     normalized = normalize_capability_id(contract_name)
-    if normalized not in _REQUEST_TYPES:
+    if normalized not in _REQUEST_TYPES and normalized not in _RESULT_TYPES:
         raise KeyError(f"未知 capability 定义: {contract_name}")
     return _build_definition(normalized)
 
 
 def list_contract_definitions() -> tuple[ContractDefinition, ...]:
-    return tuple(_build_definition(capability_id) for capability_id in _REQUEST_TYPES)
+    return tuple(_build_definition(capability_id) for capability_id in sorted(set(_REQUEST_TYPES) | set(_RESULT_TYPES)))
 
 
 def list_contract_names() -> tuple[str, ...]:

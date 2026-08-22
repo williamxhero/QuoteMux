@@ -802,6 +802,99 @@ class FutureSeriesCoverageItem(ApiModel):
     last_bar_time: str = ""
 
 
+class FutureRealtimeQuoteItem(ApiModel):
+    product_code: str
+    exchange: str
+    provider_symbol: str
+    contract_symbol: str = ""
+    quote_time: str = ""
+    last_price: float | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    pre_close: float | None = None
+    volume: float | None = None
+    open_interest: float | None = None
+    bid_price1: float | None = None
+    ask_price1: float | None = None
+    trading_status: str = ""
+
+
+class FutureContractCatalogItem(ApiModel):
+    provider_symbol: str = Field(description="TqSdk 原始合约标识；不可按交易所代码自行拼接。", examples=["SHFE.rb2610"])
+    contract_symbol: str = Field(default="", description="交易所交割合约代码；provider 未提供时为空。", examples=["SHFE.rb2610"])
+    product_code: str = Field(default="", description="QuoteMux 品种代码；仅在可识别时填写。", examples=["rb"])
+    exchange: str = Field(default="", description="QuoteMux 交易所代码；仅在可识别时填写。", examples=["SHFE"])
+    name: str = Field(default="", description="TqSdk 合约名称。", examples=["螺纹钢2610"])
+    ins_class: str = Field(default="", description="TqSdk instrument class 原始分类。", examples=["FUTURE"])
+    underlying_symbol: str = Field(default="", description="TqSdk 标的合约标识。", examples=["SHFE.rb2610"])
+    expired: bool | None = Field(default=None, description="TqSdk 是否标记为到期；未知为 null。", examples=[False])
+    expire_datetime: str = Field(default="", description="TqSdk 到期时间，Asia/Shanghai 格式；未提供为空。", examples=["2026-10-15 15:00:00"])
+    last_exercise_datetime: str = Field(default="", description="TqSdk 最后行权时间，Asia/Shanghai 格式；未提供为空。", examples=[""])
+    delivery_year: int | None = Field(default=None, description="交割年份；非交割合约或未知为 null。", examples=[2026])
+    delivery_month: int | None = Field(default=None, description="交割月份；非交割合约或未知为 null。", examples=[10])
+    volume_multiple: float | None = Field(default=None, description="每手合约乘数。", examples=[10.0])
+    price_tick: float | None = Field(default=None, description="最小变动价位。", examples=[1.0])
+    price_decs: int | None = Field(default=None, description="报价小数位数。", examples=[0])
+    max_limit_order_volume: int | None = Field(default=None, description="限价单最大下单量；未知为 null。", examples=[500])
+    max_market_order_volume: int | None = Field(default=None, description="市价单最大下单量；未知为 null。", examples=[500])
+    min_limit_order_volume: int | None = Field(default=None, description="限价单最小下单量；未知为 null。", examples=[1])
+    min_market_order_volume: int | None = Field(default=None, description="市价单最小下单量；未知为 null。", examples=[1])
+    metadata_time: str = Field(default="", description="本条 TqSdk 元数据的提供或采集时间，Asia/Shanghai；未知为空。", examples=["2026-08-20 09:31:00"])
+    raw_metadata: dict[str, object] = Field(default_factory=dict, description="未进入稳定字段的 TqSdk 原始 metadata，保持 provider 口径。", examples=[{"exchange_id": "SHFE"}])
+
+
+class FutureMainContractMappingItem(ApiModel):
+    product_code: str = Field(description="QuoteMux 主力映射请求的品种代码。", examples=["rb"])
+    exchange: str = Field(description="品种所属交易所代码。", examples=["SHFE"])
+    provider_symbol: str = Field(description="TqSdk 主力连续订阅标识；不可按规则自行生成。", examples=["KQ.m@SHFE.rb"])
+    contract_symbol: str = Field(default="", description="当前映射到的具体交割合约；无映射时为空。", examples=["SHFE.rb2610"])
+    updated_time: str = Field(default="", description="provider 返回或读取映射的时间，Asia/Shanghai；未知为空。", examples=["2026-08-20 09:31:00"])
+
+
+class FutureContractRealtimeQuoteItem(ApiModel):
+    provider_symbol: str = Field(description="请求的 TqSdk 精确交割合约标识。", examples=["SHFE.rb2610"])
+    contract_symbol: str = Field(description="provider 确认的精确交割合约标识。", examples=["SHFE.rb2610"])
+    product_code: str = Field(default="", description="QuoteMux 品种代码；无法识别时为空。", examples=["rb"])
+    exchange: str = Field(default="", description="QuoteMux 交易所代码；无法识别时为空。", examples=["SHFE"])
+    quote_time: str = Field(default="", description="行情时间，Asia/Shanghai；交易所未给时间时为空。", examples=["2026-08-20 09:31:00"])
+    last_price: float | None = Field(default=None, description="最新价。", examples=[3400.0])
+    open: float | None = Field(default=None, description="今开价。", examples=[3380.0])
+    high: float | None = Field(default=None, description="最高价。", examples=[3420.0])
+    low: float | None = Field(default=None, description="最低价。", examples=[3375.0])
+    pre_close: float | None = Field(default=None, description="昨收价。", examples=[3388.0])
+    pre_settlement: float | None = Field(default=None, description="昨结算价。", examples=[3390.0])
+    settlement: float | None = Field(default=None, description="今结算价；盘中未提供时为 null。", examples=[3402.0])
+    average: float | None = Field(default=None, description="成交均价。", examples=[3398.0])
+    volume: float | None = Field(default=None, description="累计成交量，单位为手。", examples=[12345.0])
+    amount: float | None = Field(default=None, description="累计成交额，货币单位遵循交易所口径。", examples=[419000000.0])
+    open_interest: float | None = Field(default=None, description="持仓量，单位为手。", examples=[1800000.0])
+    bid_price1: float | None = Field(default=None, description="买一价。", examples=[3399.0])
+    bid_price2: float | None = Field(default=None, description="买二价。", examples=[3398.0])
+    bid_price3: float | None = Field(default=None, description="买三价。", examples=[3397.0])
+    bid_price4: float | None = Field(default=None, description="买四价。", examples=[3396.0])
+    bid_price5: float | None = Field(default=None, description="买五价。", examples=[3395.0])
+    ask_price1: float | None = Field(default=None, description="卖一价。", examples=[3400.0])
+    ask_price2: float | None = Field(default=None, description="卖二价。", examples=[3401.0])
+    ask_price3: float | None = Field(default=None, description="卖三价。", examples=[3402.0])
+    ask_price4: float | None = Field(default=None, description="卖四价。", examples=[3403.0])
+    ask_price5: float | None = Field(default=None, description="卖五价。", examples=[3404.0])
+    bid_volume1: float | None = Field(default=None, description="买一量，单位为手。", examples=[10.0])
+    bid_volume2: float | None = Field(default=None, description="买二量，单位为手。", examples=[8.0])
+    bid_volume3: float | None = Field(default=None, description="买三量，单位为手。", examples=[6.0])
+    bid_volume4: float | None = Field(default=None, description="买四量，单位为手。", examples=[4.0])
+    bid_volume5: float | None = Field(default=None, description="买五量，单位为手。", examples=[2.0])
+    ask_volume1: float | None = Field(default=None, description="卖一量，单位为手。", examples=[10.0])
+    ask_volume2: float | None = Field(default=None, description="卖二量，单位为手。", examples=[8.0])
+    ask_volume3: float | None = Field(default=None, description="卖三量，单位为手。", examples=[6.0])
+    ask_volume4: float | None = Field(default=None, description="卖四量，单位为手。", examples=[4.0])
+    ask_volume5: float | None = Field(default=None, description="卖五量，单位为手。", examples=[2.0])
+    upper_limit: float | None = Field(default=None, description="涨停价；CFFEX 等 provider 未提供时为 null。", examples=[3729.0])
+    lower_limit: float | None = Field(default=None, description="跌停价；CFFEX 等 provider 未提供时为 null。", examples=[3051.0])
+    trading_status: str = Field(default="", description="TqSdk 原始交易状态。", examples=["TRADING"])
+    expired: bool | None = Field(default=None, description="TqSdk 是否标记为到期；未知为 null。", examples=[False])
+
+
 class StockFinancialPitRawItem(ApiModel):
     code: str
     report_period: str

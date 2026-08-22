@@ -22,8 +22,12 @@ def _policy(capability_id: str, capture_enabled: bool, capture_cadence: str, cac
 
 
 CAPABILITY_UPDATE_POLICY_DEFAULTS = (
+    _policy("futures.contracts.catalog", True, "weekly", 30),
+    _policy("futures.contracts.main_mapping", True, "daily", 1),
+    _policy("futures.quotes.contract.realtime", False, "daily", 0),
     _policy("futures.quotes.back_adjusted_continuous.1m", False, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
     _policy("futures.quotes.main_continuous.1m", True, "daily", CACHE_NEVER_EXPIRE_TTL_DAYS),
+    _policy("futures.quotes.main_continuous.realtime", False, "daily", 0),
     _policy("boards.catalog", True, "monthly", 365),
     _policy("boards.members.history", False, "weekly", 365),
     _policy("boards.quotes.daily", True, "daily", 30),

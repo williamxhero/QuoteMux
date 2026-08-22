@@ -19,7 +19,7 @@ class QuoteMux:
         self.settings = settings or QuoteMuxSettings()
         self.stocks = QuoteMuxStocks(self.settings)
         self.etfs = QuoteMuxEtfs(self.settings)
-        self.futures = QuoteMuxFutures()
+        self.futures = QuoteMuxFutures(self.settings)
         self.indexes = QuoteMuxIndexes(self.settings)
         self.markets = QuoteMuxMarkets(self.settings)
         self.concepts = QuoteMuxConceptRuntime(self.settings)

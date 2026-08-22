@@ -11,3 +11,9 @@
 `config_runtime/` 只负责 source instance、RuntimeProfile、draft policy、active snapshot、publish/rollback 的配置状态。
 
 `infra/` 只放底层通用基础设施，例如 DB、缓存路径、provider runtime gate、日期和代码规范化工具。
+
+## 期货数据口径
+
+`shinny_tqsdk` 提供三个独立的 P0 原始能力：`futures.contracts.catalog`（期货交割合约目录与规格）、`futures.contracts.main_mapping`（当前主力合约映射）和 `futures.quotes.contract.realtime`（指定交割合约实时完整行情）。目录保留 TqSdk 无法统一的原始字段到 `raw_metadata`；主力映射与完整实时行情都由 provider 直接返回，QuoteMux core 不推导合约代码或主力关系。
+
+实时交割合约行情不写入缓存或事实表（TTL=0）。目录按周采集并保留 30 天缓存，主力映射按日采集并保留 1 天缓存；公开 facade 仍会向已配置的 `shinny_tqsdk` instance 直接请求最新值。它们不能与 `shinny_edb` 的 T+1 `futures.quotes.main_continuous.1m`，或 Apex 的回调连续历史序列混用。

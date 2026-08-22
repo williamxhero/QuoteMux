@@ -9,8 +9,5 @@ __pycache__
 /docs
 /tools
 tests/
-/tests/*
 CHANGELOG.md
 /verification_tests
-!/tests/
-!/tests/test_p0_fundamentals.py

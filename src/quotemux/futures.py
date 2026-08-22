@@ -5,8 +5,10 @@ import time as time_module
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from platform_models import FutureBar1mItem, FutureSeriesCoverageItem
+from platform_models import FutureBar1mItem, FutureContractCatalogItem, FutureContractRealtimeQuoteItem, FutureMainContractMappingItem, FutureRealtimeQuoteItem, FutureSeriesCoverageItem
 from quotemux.infra.db.client import _acquire_connection, _release_connection, execute_sql, query_dataframe
+from quotemux.settings import QuoteMuxSettings
+from quotemux.source_packages.instance_context import use_source_instance
 from quotemux.source_packages.registry import get_default_source_package_registry
 
 
@@ -18,6 +20,11 @@ _STORAGE_SERIES_TYPE = {
     SERIES_MAIN_CONTINUOUS: SERIES_MAIN_CONTINUOUS,
 }
 MAIN_CONTINUOUS_CAPABILITY_ID = "futures.quotes.main_continuous.1m"
+REALTIME_MAIN_CONTINUOUS_CAPABILITY_ID = "futures.quotes.main_continuous.realtime"
+FUTURE_CONTRACT_CATALOG_CAPABILITY_ID = "futures.contracts.catalog"
+FUTURE_MAIN_CONTRACT_MAPPING_CAPABILITY_ID = "futures.contracts.main_mapping"
+FUTURE_CONTRACT_REALTIME_CAPABILITY_ID = "futures.quotes.contract.realtime"
+REALTIME_MAIN_CONTINUOUS_PROVIDER_ID = "shinny_tqsdk"
 CHINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 FUTURE_EXCHANGE_PRODUCTS: dict[str, tuple[str, ...]] = {
@@ -88,6 +95,16 @@ def normalize_product_codes(codes: str | Iterable[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def normalize_contract_symbols(symbols: str | Iterable[str]) -> tuple[str, ...]:
+    values = symbols.split(",") if isinstance(symbols, str) else list(symbols)
+    result: list[str] = []
+    for value in values:
+        symbol = str(value).strip()
+        if symbol != "" and symbol not in result:
+            result.append(symbol)
+    return tuple(result)
+
+
 def require_series_type(series_type: str) -> str:
     if series_type not in VALID_SERIES_TYPES:
         raise ValueError(f"series_type 仅支持: {', '.join(VALID_SERIES_TYPES)}")
@@ -125,6 +142,67 @@ def _call_provider_with_retry(handler, *args: object):
 
 
 class QuoteMuxFutures:
+    def __init__(self, settings: QuoteMuxSettings | None = None) -> None:
+        self._settings = settings or QuoteMuxSettings()
+
+    def _tqsdk_handler(self, capability_id: str, handler_name: str):
+        source_instance = next(
+            (
+                instance
+                for instance in self._settings.get_contract_source_instances(
+                    capability_id,
+                    (REALTIME_MAIN_CONTINUOUS_PROVIDER_ID,),
+                )
+                if instance.package_id == REALTIME_MAIN_CONTINUOUS_PROVIDER_ID and instance.enabled
+            ),
+            None,
+        )
+        if source_instance is None:
+            raise RuntimeError("未配置或未启用 shinny_tqsdk 的期货 source instance")
+        handler = get_default_source_package_registry().get_handler(REALTIME_MAIN_CONTINUOUS_PROVIDER_ID, handler_name)
+        return source_instance, handler
+
+    def get_contract_catalog(
+        self,
+        codes: str | Iterable[str] = (),
+        include_expired: bool = False,
+    ) -> list[FutureContractCatalogItem]:
+        products = normalize_product_codes(codes)
+        source_instance, handler = self._tqsdk_handler(FUTURE_CONTRACT_CATALOG_CAPABILITY_ID, "get_future_contract_catalog")
+        with use_source_instance(source_instance):
+            return list(handler([(product_code, PRODUCT_EXCHANGE[product_code]) for product_code in products], include_expired))
+
+    def get_main_contract_mappings(
+        self,
+        codes: str | Iterable[str] = (),
+    ) -> list[FutureMainContractMappingItem]:
+        products = normalize_product_codes(codes) or tuple(PRODUCT_EXCHANGE)
+        source_instance, handler = self._tqsdk_handler(FUTURE_MAIN_CONTRACT_MAPPING_CAPABILITY_ID, "get_future_main_contract_mapping")
+        with use_source_instance(source_instance):
+            return list(handler([(product_code, PRODUCT_EXCHANGE[product_code]) for product_code in products]))
+
+    def get_contract_realtime(
+        self,
+        symbols: str | Iterable[str],
+    ) -> list[FutureContractRealtimeQuoteItem]:
+        contract_symbols = normalize_contract_symbols(symbols)
+        if contract_symbols == ():
+            raise ValueError("symbols 不能为空")
+        source_instance, handler = self._tqsdk_handler(FUTURE_CONTRACT_REALTIME_CAPABILITY_ID, "get_future_contract_realtime_quotes")
+        with use_source_instance(source_instance):
+            return list(handler(list(contract_symbols)))
+
+    def get_main_continuous_realtime(self, codes: str | Iterable[str]) -> list[FutureRealtimeQuoteItem]:
+        products = normalize_product_codes(codes)
+        if products == ():
+            raise ValueError("codes 不能为空")
+        source_instance, handler = self._tqsdk_handler(
+            REALTIME_MAIN_CONTINUOUS_CAPABILITY_ID,
+            "get_future_main_continuous_realtime",
+        )
+        with use_source_instance(source_instance):
+            return list(handler([(product_code, PRODUCT_EXCHANGE[product_code]) for product_code in products]))
+
     def get_quotes_1m(
         self,
         codes: str | Iterable[str],

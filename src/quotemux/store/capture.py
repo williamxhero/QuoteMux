@@ -184,7 +184,7 @@ def _default_profile_for_capability(capability_id: str) -> str:
         return PROFILE_BOARDS_RECENT_TRADING_DAYS
     if capability_id == "markets.calendar.trading":
         return PROFILE_TRADING_CALENDAR_YEAR_WINDOW
-    if capability_id in {"stocks.catalog", "stocks.catalog.archive", "indexes.catalog", "concepts.catalog", "concepts.reference.categories", "markets.participants.hot_money"}:
+    if capability_id in {"futures.contracts.catalog", "futures.contracts.main_mapping", "stocks.catalog", "stocks.catalog.archive", "indexes.catalog", "concepts.catalog", "concepts.reference.categories", "markets.participants.hot_money"}:
         return PROFILE_CATALOG_SNAPSHOT
     if capability_id in {"stocks.profile.basic", "stocks.profile.company", "stocks.profile.managers", "stocks.profile.management_rewards", "stocks.profile.name_history", "indexes.profile", "concepts.profile"}:
         return PROFILE_SINGLE_ENTITY_SNAPSHOT
@@ -1255,6 +1255,8 @@ def _recent_months(window_count: int, now: datetime) -> tuple[str, ...]:
 def _catalog_snapshot_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     start_date, end_date = _date_window(policy, now)
     identities = {
+        "futures.contracts.catalog": {"codes": [], "include_expired": False},
+        "futures.contracts.main_mapping": {"codes": []},
         "stocks.catalog": {"codes": [], "name": "", "exchange": "", "list_status": "", "include_delisted": True, "limit": 10000, "offset": 0, "refresh": True},
         "stocks.catalog.archive": {"trade_date": end_date, "code": "", "name": "", "industry": "", "area": "", "limit": 10000, "offset": 0},
         "indexes.catalog": {"category": "", "market": "", "publisher": "", "status": "active", "limit": 10000, "offset": 0},
@@ -1723,6 +1725,8 @@ def _policy_local_now(policy: CapturePolicy, now: datetime) -> datetime:
 
 
 RUNTIME_METHODS: dict[str, tuple[str, str]] = {
+    "futures.contracts.catalog": ("futures", "get_contract_catalog"),
+    "futures.contracts.main_mapping": ("futures", "get_main_contract_mappings"),
     "concepts.catalog": ("concepts", "get_catalog"),
     "concepts.indicators.money_flow": ("concepts", "get_money_flow"),
     "concepts.indicators.money_flow.snapshot": ("concepts", "get_market_money_flow"),
