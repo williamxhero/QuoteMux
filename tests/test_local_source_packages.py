@@ -263,14 +263,14 @@ def test_tushare_catalog_adds_replaced_bse_code_as_delisted() -> None:
 
     catalog = pd.DataFrame(
         [
-            {"code": "920489", "list_status2": "listed", "delist_date": ""},
+            {"code": "920489", "list_status2": "listed", "list_date": "20200727", "delist_date": ""},
         ]
     )
     mappings = [
         BSECodeMappingItem(
             old_code="430489",
             new_code="920489",
-            effective_date="20200727",
+            effective_date="20250506",
             status="active",
         )
     ]
@@ -280,9 +280,48 @@ def test_tushare_catalog_adds_replaced_bse_code_as_delisted() -> None:
     old_code = result[result["code"] == "430489"].iloc[0]
     new_code = result[result["code"] == "920489"].iloc[0]
     assert old_code["list_status2"] == "delisted"
-    assert old_code["delist_date"] == "20200727"
+    assert old_code["delist_date"] == "20250506"
     assert new_code["list_status2"] == "listed"
+    assert new_code["list_date"] == "20250506"
     assert new_code["delist_date"] == ""
+
+
+def test_tushare_bse_code_mapping_uses_official_first_batch_effective_date(monkeypatch) -> None:
+    from platform_models import BSECodeMappingItem
+    from quotemux_packages.tushare import stocks
+
+    monkeypatch.setattr(
+        stocks,
+        "read_cached_once",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            [{"o_code": "430489.BJ", "n_code": "920489.BJ", "list_date": "20200727"}]
+        ),
+    )
+
+    mappings = stocks.get_bse_code_mappings("430489", "920489", "active")
+
+    assert mappings == [
+        BSECodeMappingItem(old_code="430489", new_code="920489", effective_date="20250506", status="active")
+    ]
+
+
+def test_tushare_bse_code_mapping_uses_official_full_batch_effective_date(monkeypatch) -> None:
+    from platform_models import BSECodeMappingItem
+    from quotemux_packages.tushare import stocks
+
+    monkeypatch.setattr(
+        stocks,
+        "read_cached_once",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            [{"o_code": "835305.BJ", "n_code": "920305.BJ", "list_date": "20210826"}]
+        ),
+    )
+
+    mappings = stocks.get_bse_code_mappings("835305", "920305", "active")
+
+    assert mappings == [
+        BSECodeMappingItem(old_code="835305", new_code="920305", effective_date="20251009", status="active")
+    ]
 
 
 def test_tushare_pro_client_uses_configured_request_timeout(monkeypatch) -> None:
