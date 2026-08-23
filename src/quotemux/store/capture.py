@@ -284,11 +284,13 @@ CAPTURE_SCHEMA_SQL = (
         window_count integer not null,
         batch_size integer not null,
         notes text not null default '',
+        managed_by_default boolean not null default true,
         created_at timestamp without time zone not null default now(),
         updated_at timestamp without time zone not null default now()
     )
     """,
     "alter table capability_capture_policy add column if not exists month integer",
+    "alter table capability_capture_policy add column if not exists managed_by_default boolean",
     "create unique index if not exists idx_capture_policy_capability_id_unique on capability_capture_policy (capability_id)",
     """
     create table if not exists capability_capture_runs (
@@ -315,6 +317,11 @@ _CACHE_MISSING_PLANNER = CacheMissingPlanner()
 _CAPTURE_SCHEMA_READY = False
 _CAPTURE_SCHEMA_FAILED = False
 
+_LEGACY_CAPTURE_ENABLED_OVERRIDES = {
+    # This was enabled before the batch endpoint became the scheduled default.
+    "stocks.indicators.money_flow": True,
+}
+
 
 def _ensure_capture_schema() -> bool:
     global _CAPTURE_SCHEMA_FAILED, _CAPTURE_SCHEMA_READY
@@ -326,6 +333,51 @@ def _ensure_capture_schema() -> bool:
         _CAPTURE_SCHEMA_FAILED = True
         return False
     for statement in CAPTURE_SCHEMA_SQL:
+        if not execute_sql(statement):
+            _CAPTURE_SCHEMA_FAILED = True
+            return False
+    # Existing rows predate provenance. Only rows that still exactly match the
+    # former shipped defaults are safe to keep managing; every other row is a
+    # user configuration and must survive future default changes untouched.
+    legacy_params = [
+        (
+            spec.capability_id,
+            _LEGACY_CAPTURE_ENABLED_OVERRIDES.get(spec.capability_id, spec.enabled),
+            spec.cadence,
+            spec.run_time,
+            spec.timezone,
+            spec.scope_profile,
+            spec.window_count,
+            spec.batch_size,
+        )
+        for spec in DEFAULT_CAPTURE_POLICY_SPECS
+    ]
+    if not execute_many(
+        """
+        update capability_capture_policy
+        set managed_by_default = true
+        where managed_by_default is null
+          and capability_id = %s
+          and enabled = %s
+          and cadence = %s
+          and run_time = %s
+          and timezone = %s
+          and weekday is null
+          and month is null
+          and month_day is null
+          and scope_profile = %s
+          and window_count = %s
+          and batch_size = %s
+          and notes = ''
+        """,
+        legacy_params,
+    ):
+        _CAPTURE_SCHEMA_FAILED = True
+        return False
+    for statement in (
+        "update capability_capture_policy set managed_by_default = false where managed_by_default is null",
+        "alter table capability_capture_policy alter column managed_by_default set default true, alter column managed_by_default set not null",
+    ):
         if not execute_sql(statement):
             _CAPTURE_SCHEMA_FAILED = True
             return False
@@ -343,6 +395,7 @@ def _ensure_capture_schema() -> bool:
             spec.window_count,
             spec.batch_size,
             "",
+            True,
         )
         for spec in DEFAULT_CAPTURE_POLICY_SPECS
     ]
@@ -350,16 +403,37 @@ def _ensure_capture_schema() -> bool:
         """
         insert into capability_capture_policy (
             capability_id, enabled, cadence, run_time, timezone, weekday,
-            month, month_day, scope_profile, window_count, batch_size, notes
+            month, month_day, scope_profile, window_count, batch_size, notes,
+            managed_by_default
         )
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         on conflict (capability_id) do update set
-            scope_profile = excluded.scope_profile,
+            scope_profile = case
+                when capability_capture_policy.managed_by_default
+                then excluded.scope_profile
+                else capability_capture_policy.scope_profile
+            end,
             cadence = capability_capture_policy.cadence,
             updated_at = now()
         """,
         params,
     )
+    if ok:
+        ok = execute_sql(
+            """
+            update capability_capture_policy single_policy
+            set enabled = false,
+                updated_at = now()
+            where single_policy.capability_id = 'stocks.indicators.money_flow'
+              and single_policy.managed_by_default
+              and exists (
+                  select 1
+                  from capability_capture_policy batch_policy
+                  where batch_policy.capability_id = 'stocks.indicators.money_flow.batch'
+                    and batch_policy.enabled
+              )
+            """
+        )
     _CAPTURE_SCHEMA_READY = ok
     _CAPTURE_SCHEMA_FAILED = not ok
     return ok
@@ -502,6 +576,7 @@ class CapturePolicyRepository:
                 window_count = %s,
                 batch_size = %s,
                 notes = %s,
+                managed_by_default = false,
                 updated_at = now()
             where capability_id = %s
             """,

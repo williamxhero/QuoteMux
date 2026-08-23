@@ -91,7 +91,7 @@ CAPABILITY_UPDATE_POLICY_DEFAULTS = (
     _policy("stocks.indicators.daily_basic", True, "daily", 180),
     _policy("stocks.indicators.daily_market_value", True, "daily", 180),
     _policy("stocks.indicators.daily_valuation", True, "daily", 180),
-    _policy("stocks.indicators.money_flow", True, "daily", 180),
+    _policy("stocks.indicators.money_flow", False, "daily", 180),
     _policy("stocks.indicators.money_flow.batch", True, "daily", 180),
     _policy("stocks.indicators.money_flow.snapshot", False, "daily", 180),
     _policy("stocks.indicators.margin.snapshot", False, "daily", 365),
