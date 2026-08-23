@@ -13,6 +13,7 @@ import tempfile
 import threading
 
 from quotemux.source_packages.manifest import SourcePackageManifest
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 DEFAULT_PACKAGE_REPO_SPEC = "git+https://github.com/williamxhero/QuoteMux_Packages.git@main"
@@ -55,6 +56,7 @@ def package_uses_isolated_environment(manifest: SourcePackageManifest) -> bool:
 
 
 def ensure_package_environment(manifest: SourcePackageManifest) -> PackageEnvironment:
+    reject_in_strict_public_read("package_environment:ensure")
     with _ENVIRONMENT_LOCK:
         return _ensure_package_environment(manifest)
 

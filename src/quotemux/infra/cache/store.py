@@ -7,6 +7,7 @@ import pandas as pd
 
 from quotemux.infra.config import DATA_ROOT
 from quotemux.infra.common import format_date_value, parse_date_text
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 CACHE_ROOT = DATA_ROOT / "type=cache" / "service=integration_api"
@@ -43,6 +44,7 @@ def read_cache_frame(path: Path) -> pd.DataFrame:
 
 
 def write_cache_frame(path: Path, df: pd.DataFrame) -> None:
+    reject_in_strict_public_read("file_cache_write:parquet")
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
 

@@ -16,13 +16,17 @@ class _Policies:
 
 
 class _Runs:
-    def __init__(self, existing: CaptureRun | None = None) -> None:
+    def __init__(self, existing: CaptureRun | None = None, existing_fingerprint: str = "") -> None:
         self.existing = existing
+        self.existing_fingerprint = existing_fingerprint
         self.fingerprints: list[tuple[str, str]] = []
 
     def latest_success_for_repair_fingerprint(self, capability_id: str, fingerprint: str) -> CaptureRun | None:
         self.fingerprints.append((capability_id, fingerprint))
-        return self.existing
+        return self.existing if self.existing_fingerprint in {"", fingerprint} else None
+
+    def get_by_id(self, run_id: int) -> CaptureRun | None:
+        return self.existing if self.existing is not None and self.existing.id == run_id else None
 
 
 class _Lock:
@@ -63,8 +67,13 @@ def test_admin_repair_reuses_successful_dataset_scope_fingerprint() -> None:
     runs = _Runs(existing)
     locks = _Locks()
     job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=runs, locks=locks, cache_store=_Cache())
+    runs.existing_fingerprint = job.repair_fingerprint(
+        "stocks.quotes.intraday",
+        {"codes": ["600000", "000001"], "start_date": "2026-08-21", "end_date": "2026-08-21"},
+        "bars-v2",
+    )
 
-    result = job.run_repair("stocks.quotes.intraday", {"codes": ["600000", "000001"], "start_date": "2026-08-21", "end_date": "2026-08-21"})
+    result = job.run_repair("stocks.quotes.intraday", {"codes": ["600000", "000001"], "start_date": "2026-08-21", "end_date": "2026-08-21"}, "bars-v2")
 
     assert result["id"] == 7
     assert result["repair_reused"] is True
@@ -84,15 +93,42 @@ def test_admin_repair_uses_canonical_scope_fingerprint_and_existing_capture_exec
         return {"status": CAPTURE_SUCCESS, "detail_json": detail}
 
     monkeypatch.setattr(job, "_run_capture_requests", fake_run)
-    left = job.run_repair("stocks.quotes.intraday", {"end_date": "2026-08-21", "codes": ["600000", "000001"], "start_date": "2026-08-21"})
-    right_fingerprint = job.repair_fingerprint("stocks.quotes.intraday", {"codes": ["600000", "000001"], "start_date": "2026-08-21", "end_date": "2026-08-21"})
+    left = job.run_repair("stocks.quotes.intraday", {"end_date": "2026-08-21", "codes": ["600000", "000001"], "start_date": "2026-08-21", "dataset_version": "bars-v2"})
+    right_fingerprint = job.repair_fingerprint("stocks.quotes.intraday", {"codes": ["600000", "000001"], "start_date": "2026-08-21", "end_date": "2026-08-21"}, "bars-v2")
 
     assert left["status"] == CAPTURE_SUCCESS
     assert captured["detail"]["mode"] == "repair"
     assert captured["detail"]["repair_fingerprint"] == right_fingerprint
+    assert captured["detail"]["repair_dataset_version"] == "bars-v2"
     request = captured["requests"][0]
     assert request.capability_id == "stocks.quotes.intraday"
     assert request.request_identity["codes"] == ["000001", "600000"]
+    assert "dataset_version" not in request.request_identity
+
+
+def test_repair_different_dataset_version_does_not_reuse_previous_success(monkeypatch) -> None:
+    planned = datetime(2026, 8, 23, 12)
+    existing = CaptureRun(7, "stocks.quotes.intraday", CAPTURE_SUCCESS, planned, planned, planned, 48000, 48000, "", {"mode": "repair"})
+    runs = _Runs(existing)
+    locks = _Locks()
+    job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=runs, locks=locks, cache_store=_Cache())
+    scope = {"codes": ["600000"], "start_date": "2026-08-21", "end_date": "2026-08-21"}
+    runs.existing_fingerprint = job.repair_fingerprint("stocks.quotes.intraday", scope, "bars-v1")
+    monkeypatch.setattr(job, "_run_capture_requests", lambda *_args, **_kwargs: {"status": CAPTURE_SUCCESS})
+
+    assert job.run_repair("stocks.quotes.intraday", scope, "bars-v2")["status"] == CAPTURE_SUCCESS
+    assert runs.fingerprints == [("stocks.quotes.intraday", job.repair_fingerprint("stocks.quotes.intraday", scope, "bars-v2"))]
+
+
+def test_repair_status_can_be_loaded_by_run_id() -> None:
+    planned = datetime(2026, 8, 23, 12)
+    existing = CaptureRun(7, "stocks.quotes.intraday", CAPTURE_SUCCESS, planned, planned, planned, 48000, 48000, "", {"mode": "repair", "repair_dataset_version": "bars-v2"})
+    job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=_Runs(existing), locks=_Locks(), cache_store=_Cache())
+
+    result = job.get_repair_run(7)
+
+    assert result["id"] == 7
+    assert result["detail_json"]["repair_dataset_version"] == "bars-v2"
 
 
 def test_repair_idempotency_lookup_uses_successful_persisted_run(monkeypatch) -> None:

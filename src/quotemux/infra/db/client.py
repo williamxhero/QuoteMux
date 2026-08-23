@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from quotemux.infra.db.availability_gate import DbAvailabilityGate
 from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from quotemux.infra.provider_runtime.core import call_provider_api
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 def _int_env(name: str, default: int) -> int:
@@ -269,6 +270,7 @@ def _execute_sql_once(query: str, params: tuple[object, ...]) -> bool:
 
 
 def execute_sql(query: str, params: tuple[object, ...] = ()) -> bool:
+    reject_in_strict_public_read("sql_write:execute_sql")
     if not _db_available_for_attempt():
         return False
     try:
@@ -294,6 +296,7 @@ def _execute_many_once(query: str, params_list: list[tuple[object, ...]]) -> boo
 
 
 def execute_many(query: str, params_list: list[tuple[object, ...]]) -> bool:
+    reject_in_strict_public_read("sql_write:execute_many")
     if not params_list:
         return True
     if not _db_available_for_attempt():
@@ -415,6 +418,7 @@ def execute_many_with_migration_journal(
     fact_table: str,
     bar_time_index: int,
 ) -> bool:
+    reject_in_strict_public_read("sql_write:execute_many_with_migration_journal")
     _migration_journal_tables(fact_table)
     if bar_time_index < 0:
         raise ValueError("bar_time_index must be non-negative")

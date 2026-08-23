@@ -8,6 +8,7 @@ from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardQuote
 from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
 from quotemux.infra.db.client import execute_many, execute_many_with_migration_journal, execute_sql, query_dataframe
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 KNOWN_INDEX_CATALOG: dict[str, IndexCatalogItem] = {
@@ -1165,4 +1166,8 @@ def get_fact_ref_writer(capability_id: str) -> Callable[[list[BaseModel]], bool]
     writer = writers.get(capability_id)
     if writer is None:
         return None
-    return lambda items: writer(items)
+    def guarded_writer(items: list[BaseModel]) -> bool:
+        reject_in_strict_public_read(f"fact_write:{capability_id}")
+        return writer(items)
+
+    return guarded_writer

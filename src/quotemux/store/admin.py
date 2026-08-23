@@ -168,8 +168,11 @@ class QuoteMuxCaptureAdmin:
     def run_capture(self, capability_id: str) -> dict[str, object]:
         return self._job.run_capture(get_capability_config_root(capability_id))
 
-    def run_repair(self, dataset: str, scope: dict[str, object]) -> dict[str, object]:
-        return self._job.run_repair(get_capability_config_root(dataset), scope)
+    def run_repair(self, dataset: str, scope: dict[str, object], dataset_version: str = "") -> dict[str, object]:
+        return self._job.run_repair(get_capability_config_root(dataset), scope, dataset_version)
+
+    def get_repair_run(self, run_id: int) -> dict[str, object]:
+        return self._job.get_repair_run(run_id)
 
     def run_due_captures(self) -> tuple[dict[str, object], ...]:
         return self._job.run_due_captures()

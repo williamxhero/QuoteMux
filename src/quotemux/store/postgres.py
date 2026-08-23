@@ -13,6 +13,7 @@ from quotemux.reports import ContractReport
 from quotemux.store.cache_db import execute_many, execute_sql, query_dataframe
 from quotemux.store.default_update_policy import cache_enabled_from_ttl_days, get_capability_update_policy_default, ttl_seconds_from_days
 from quotemux.store.payload_store import CachePayloadRef, get_payload, put_payload
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 CACHE_HIT = "hit"
@@ -1305,6 +1306,7 @@ class UnifiedPostgresCacheStore:
         return tuple(payloads)
 
     def write(self, capability_id: str, request_identity: dict[str, object], items: Sequence[object], report: ContractReport) -> CacheWriteResult:
+        reject_in_strict_public_read(f"cache_write:{capability_id}")
         policy = self.policies.get(capability_id)
         if policy is None or not policy.write_enabled:
             self.audit.write(capability_id, "cache_skip", "", None, None, {"reason": "policy_disabled"})

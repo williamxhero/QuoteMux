@@ -10,6 +10,7 @@ from quotemux.config_runtime.runtime import get_config_runtime
 from quotemux.reports import ContractReport
 from quotemux.runtime_core.audit import record_provider_event
 from quotemux.store.postgres import CACHE_HIT, CACHE_MISS, CACHE_PARTIAL_HIT, CACHE_SKIP, CACHE_STALE, CacheReadResult, CacheWriteResult, get_postgres_cache_store
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -103,6 +104,7 @@ def load_store_result(capability_id: str, request_identity: dict[str, object], m
 
 
 def store_result(capability_id: str, request_identity: dict[str, object], items: Sequence[object], report: ContractReport, quarantine_count: int = 0) -> CacheWriteResult:
+    reject_in_strict_public_read(f"cache_write:{capability_id}")
     result = get_postgres_cache_store().write(capability_id, request_identity, items, report)
     _record_store_event(
         capability_id,

@@ -4,11 +4,14 @@ from datetime import datetime
 from pathlib import Path
 from shutil import copy2, copytree, ignore_patterns
 
+from quotemux.strict_read import reject_in_strict_public_read
+
 
 MANIFEST_FILE_NAME = "quotemux_package.json"
 
 
 def install_source_package_directory(source_path: Path, install_root: Path) -> str:
+    reject_in_strict_public_read("package_install:source_directory")
     source_root = _resolve_source_root(source_path)
     installed_root = install_root / datetime.now().strftime("install-%Y%m%d%H%M%S%f")
     installed_root.mkdir(parents=True, exist_ok=False)

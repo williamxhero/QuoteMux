@@ -1,5 +1,5 @@
 from quotemux.store.admin import CachePolicyUpdate, CapturePolicyPayload, QuoteMuxCacheAdmin, QuoteMuxCaptureAdmin
-from quotemux.store.api import get_admin_cache_audit, get_admin_cache_policies, get_admin_cache_policy, get_admin_cache_status, get_admin_capability_timeout_metrics, get_admin_capability_timeout_policies, get_admin_capture_overview, get_admin_capture_policies, get_admin_capture_policy, get_admin_capture_runs, get_admin_effective_capability_timeouts, get_admin_effective_provider_timeouts, get_admin_provider_timeout_metrics, get_admin_provider_timeout_policies, post_admin_run_capture, post_admin_run_due_captures, post_admin_run_repair, post_admin_timeout_sync_defaults, put_admin_cache_policy, put_admin_capability_timeout_policy, put_admin_capture_policy, put_admin_provider_timeout_policy
+from quotemux.store.api import get_admin_cache_audit, get_admin_cache_policies, get_admin_cache_policy, get_admin_cache_status, get_admin_capability_timeout_metrics, get_admin_capability_timeout_policies, get_admin_capture_overview, get_admin_capture_policies, get_admin_capture_policy, get_admin_capture_runs, get_admin_effective_capability_timeouts, get_admin_effective_provider_timeouts, get_admin_provider_timeout_metrics, get_admin_provider_timeout_policies, get_admin_repair_run, post_admin_run_capture, post_admin_run_due_captures, post_admin_run_repair, post_admin_timeout_sync_defaults, put_admin_cache_policy, put_admin_capability_timeout_policy, put_admin_capture_policy, put_admin_provider_timeout_policy
 from quotemux.store.capture import CapturePolicy, CaptureRun, reconcile_stale_capture_runs, run_capture, run_due_captures, run_repair
 from quotemux.store.planner import CacheMissingPlanner, CacheMissingRange
 from quotemux.store.runtime import CapabilityStoreReadResult, load_store_result, store_result
@@ -32,6 +32,7 @@ __all__ = [
     "get_admin_effective_provider_timeouts",
     "get_admin_provider_timeout_metrics",
     "get_admin_provider_timeout_policies",
+    "get_admin_repair_run",
     "load_store_result",
     "post_admin_run_capture",
     "post_admin_run_due_captures",

@@ -7,6 +7,8 @@ from importlib import invalidate_caches
 from pathlib import Path
 import sys
 
+from quotemux.strict_read import reject_in_strict_public_read
+
 from quotemux.config_runtime.store import read_import_roots
 from quotemux.source_packages.environment import package_uses_isolated_environment
 from quotemux.source_packages.isolated import IsolatedPackageHandler
@@ -62,6 +64,7 @@ class SourcePackageRegistry:
         return manifest
 
     def get_handler(self, package_id: str, handler_name: str):
+        reject_in_strict_public_read(f"source_package:{package_id}.{handler_name}")
         manifest_handlers = self._handlers.get(package_id)
         if manifest_handlers is None:
             raise KeyError(f"未知 source package: {package_id}")

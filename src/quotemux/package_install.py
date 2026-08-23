@@ -11,6 +11,7 @@ import sys
 from quotemux.source_packages.registry import clear_loaded_source_package_modules, refresh_default_source_package_registry
 from quotemux.source_packages.environment import ensure_package_environment, package_uses_isolated_environment
 from quotemux.source_packages.manifest import SourcePackageManifest
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 import os
@@ -28,6 +29,7 @@ class PackageInstallResult:
 
 
 def install_all_packages() -> PackageInstallResult:
+    reject_in_strict_public_read("package_install:all")
     from quotemux.config_runtime.runtime import get_config_runtime
 
     python_executable = sys.executable
@@ -52,6 +54,7 @@ def _ensure_isolated_package_environments(packages: tuple[SourcePackageManifest,
 
 
 def install_distribution_for_python(python_executable: str) -> None:
+    reject_in_strict_public_read("package_install:distribution")
     _install_distribution(python_executable)
 
 

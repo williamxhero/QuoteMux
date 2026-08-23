@@ -600,6 +600,23 @@ class CapturePolicyRepository:
 
 
 class CaptureRunRepository:
+    def get_by_id(self, run_id: int) -> CaptureRun | None:
+        if not _ensure_capture_schema():
+            return None
+        frame = query_dataframe(
+            """
+            select id, capability_id, status, planned_time, started_at, finished_at,
+                   row_count, coverage_count, error_message, detail_json
+            from capability_capture_runs
+            where id = %s
+            limit 1
+            """,
+            (run_id,),
+        )
+        if _is_empty_dataframe(frame):
+            return None
+        return _run_from_row(frame.iloc[0].to_dict())
+
     def list(self, capability_id: str = "", status: str = "", limit: int = 100) -> tuple[CaptureRun, ...]:
         if not _ensure_capture_schema():
             return ()
@@ -2159,29 +2176,30 @@ class QuoteMuxCaptureJob:
         return self._run_capture_requests(policy, None, {"mode": "scheduled"}, actual_planned_time, lock)
 
     @staticmethod
-    def repair_fingerprint(dataset: str, scope: dict[str, object]) -> str:
+    def repair_fingerprint(dataset: str, scope: dict[str, object], dataset_version: str = "") -> str:
         root_capability_id = get_capability_config_root(dataset)
-        canonical_scope = _canonical_repair_scope(scope)
+        canonical_scope, actual_dataset_version = _repair_scope_and_version(scope, dataset_version)
         payload = json.dumps(
-            {"dataset": root_capability_id, "scope": canonical_scope},
+            {"dataset": root_capability_id, "dataset_version": actual_dataset_version, "scope": canonical_scope},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def run_repair(self, dataset: str, scope: dict[str, object]) -> dict[str, object]:
+    def run_repair(self, dataset: str, scope: dict[str, object], dataset_version: str = "") -> dict[str, object]:
         """Run one explicit, idempotent repair through the existing capture executor."""
         root_capability_id = get_capability_config_root(dataset)
         policy = self._get_policy(root_capability_id)
-        canonical_scope = _canonical_repair_scope(scope)
-        fingerprint = self.repair_fingerprint(root_capability_id, canonical_scope)
+        canonical_scope, actual_dataset_version = _repair_scope_and_version(scope, dataset_version)
+        fingerprint = self.repair_fingerprint(root_capability_id, canonical_scope, actual_dataset_version)
         planned_time = self._now_provider().replace(tzinfo=None)
         detail = {
             "mode": "repair",
             "repair_dataset": root_capability_id,
             "repair_scope": canonical_scope,
             "repair_fingerprint": fingerprint,
+            "repair_dataset_version": actual_dataset_version,
         }
         lock = self._locks.create(root_capability_id)
         if not lock.acquire():
@@ -2218,6 +2236,12 @@ class QuoteMuxCaptureJob:
         except BaseException:
             lock.release()
             raise
+
+    def get_repair_run(self, run_id: int) -> dict[str, object]:
+        run = self._runs.get_by_id(run_id)
+        if run is None or run.detail_json.get("mode") != "repair":
+            raise KeyError(f"未知 repair run: {run_id}")
+        return self._run_to_dict(run)
 
     def _run_capture_requests(
         self,
@@ -2552,6 +2576,15 @@ def _canonical_repair_scope(scope: dict[str, object]) -> dict[str, object]:
     return normalize(scope)  # type: ignore[return-value]
 
 
+def _repair_scope_and_version(scope: dict[str, object], dataset_version: str) -> tuple[dict[str, object], str]:
+    raw_scope = dict(scope)
+    scope_version = str(raw_scope.pop("dataset_version", ""))
+    explicit_version = str(dataset_version)
+    if explicit_version != "" and scope_version != "" and explicit_version != scope_version:
+        raise ValueError("conflicting repair dataset_version values")
+    return _canonical_repair_scope(raw_scope), explicit_version or scope_version
+
+
 def run_due_captures() -> tuple[dict[str, object], ...]:
     return QuoteMuxCaptureJob().run_due_captures()
 
@@ -2560,8 +2593,8 @@ def run_capture(capability_id: str) -> dict[str, object]:
     return QuoteMuxCaptureJob().run_capture(capability_id)
 
 
-def run_repair(dataset: str, scope: dict[str, object]) -> dict[str, object]:
-    return QuoteMuxCaptureJob().run_repair(dataset, scope)
+def run_repair(dataset: str, scope: dict[str, object], dataset_version: str = "") -> dict[str, object]:
+    return QuoteMuxCaptureJob().run_repair(dataset, scope, dataset_version)
 
 
 def reconcile_stale_capture_runs(started_before: datetime | None = None) -> dict[str, object]:

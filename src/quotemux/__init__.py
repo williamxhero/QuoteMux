@@ -17,6 +17,7 @@ __all__ = [
     "QuoteMux",
     "QuoteMuxPublicReader",
     "QuoteMuxSettings",
+    "StrictReadViolation",
     "StockBar1mRequest",
     "StockDailyOhlcvaRepairRequest",
     "StockDailySnapshotRequest",
@@ -27,6 +28,7 @@ __all__ = [
     "YearlyTradingCalendarRequest",
     "PackageInstallResult",
     "install_all_packages",
+    "strict_public_read_boundary",
 ]
 
 
@@ -37,6 +39,8 @@ _LAZY_EXPORTS = {
     "QuoteMuxSettings": ("quotemux.settings", "QuoteMuxSettings"),
     "PackageInstallResult": ("quotemux.package_install", "PackageInstallResult"),
     "install_all_packages": ("quotemux.package_install", "install_all_packages"),
+    "StrictReadViolation": ("quotemux.strict_read", "StrictReadViolation"),
+    "strict_public_read_boundary": ("quotemux.strict_read", "strict_public_read_boundary"),
 }
 for _request_name in (
     "EtfDailyQuotesRequest",

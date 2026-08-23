@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Callable, TypeVar
 
+from quotemux.strict_read import reject_in_strict_public_read
+
 
 T = TypeVar("T")
 
@@ -228,6 +230,7 @@ def _acquire_semaphore(semaphore: threading.BoundedSemaphore, timeout_seconds: f
 
 
 def call_provider_api(provider: str, api_name: str, func: Callable[..., T], *args: object, **kwargs: object) -> T:
+    reject_in_strict_public_read(f"provider:{provider}.{api_name}")
     gate = _GATES.get(provider)
     if gate is None:
         return func(*args, **kwargs)

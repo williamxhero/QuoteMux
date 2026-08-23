@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from quotemux.infra.config import DATA_ROOT
+from quotemux.strict_read import reject_in_strict_public_read
 
 
 AUDIT_ROOT = DATA_ROOT / "type=cache" / "service=fallback"
@@ -26,6 +27,7 @@ def _serialize_value(value: object) -> object:
 
 
 def record_provider_event(contract_name: str, provider: str, status: str, detail: dict[str, object]) -> None:
+    reject_in_strict_public_read("file_cache_write:provider_audit")
     day_text = datetime.now().strftime("%Y%m%d")
     path = AUDIT_ROOT / "audit" / f"date={day_text}" / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,6 +43,7 @@ def record_provider_event(contract_name: str, provider: str, status: str, detail
 
 
 def write_stage_frame(stage_name: str, contract_name: str, identity: dict[str, str], df: pd.DataFrame) -> Path:
+    reject_in_strict_public_read("file_cache_write:stage_frame")
     path = AUDIT_ROOT / stage_name / f"contract={contract_name}"
     for key, value in identity.items():
         path = path / f"{key}={value}"
