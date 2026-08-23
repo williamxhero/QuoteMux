@@ -321,10 +321,28 @@ def _missing_quote_time_keys(code: str, freq: str, expected_trade_times: list[st
     return missing_expected_keys(expected_keys, existing_keys)
 
 
+def _group_quote_items_by_code(items: list[StockQuoteItem], freq: str = "") -> dict[str, list[StockQuoteItem]]:
+    grouped: dict[str, list[StockQuoteItem]] = {}
+    for item in items:
+        if freq != "" and item.freq != freq:
+            continue
+        grouped.setdefault(item.code, []).append(item)
+    return grouped
+
+
 def _quote_time_key(item: StockQuoteItem) -> str:
     trade_time = item.trade_time.strip().replace("T", " ")
     if len(trade_time) == 16:
         trade_time += ":00"
+    if (
+        len(trade_time) == 19
+        and trade_time[4] == "-"
+        and trade_time[7] == "-"
+        and trade_time[10] == " "
+        and trade_time[13] == ":"
+        and trade_time[16] == ":"
+    ):
+        return trade_time
     return format_datetime_value(trade_time, item.freq)
 
 
@@ -404,10 +422,13 @@ def _build_quote_code_summaries(
     expected_trade_times = _expected_quote_trade_times(freq, expected_dates)
     expected_bar_count = len(expected_dates) if freq in {"1d", "1w", "1mo"} else len(expected_trade_times)
     code_expected_dates_by_code = _code_expected_trade_dates(codes, expected_dates)
+    total_items_by_code = _group_quote_items_by_code(total_items, freq)
+    returned_items_by_code = total_items_by_code if returned_items is total_items else _group_quote_items_by_code(returned_items, freq)
+    coverage_items_by_code = total_items_by_code if coverage_items is total_items else _group_quote_items_by_code(coverage_items, freq)
     for code in codes:
-        code_total_items = [item for item in total_items if item.code == code]
-        code_returned_items = [item for item in returned_items if item.code == code]
-        code_coverage_items = [item for item in coverage_items if item.code == code]
+        code_total_items = total_items_by_code.get(code, [])
+        code_returned_items = returned_items_by_code.get(code, [])
+        code_coverage_items = coverage_items_by_code.get(code, [])
         trade_times = [item.trade_time for item in code_returned_items]
         excluded_by_st = code in excluded_st_codes
         if excluded_by_st:
@@ -631,10 +652,11 @@ def _build_missing_quote_requests(
     count: int | None,
     settings: QuoteMuxSettings,
 ) -> list[tuple[list[str], str, str]]:
+    current_items_by_code = _group_quote_items_by_code(current_items, freq)
     if trade_date == "" and start_date == "" and end_date == "" and start_time == "" and end_time == "" and count:
         if has_enough_stock_quote_rows(current_items, codes, count, "code"):
             return []
-        missing_codes = [code for code in codes if sum(1 for item in current_items if item.code == code) < count]
+        missing_codes = [code for code in codes if len(current_items_by_code.get(code, [])) < count]
         return [(code_batch, "", "") for code_batch in _chunk_quote_codes(missing_codes)] if missing_codes else []
     if freq in {"1w", "1mo"}:
         return [] if current_items else [(codes, trade_date or start_date, trade_date or end_date)]
@@ -645,7 +667,7 @@ def _build_missing_quote_requests(
         actual_start_date = request_start_dt.strftime("%Y-%m-%d") if request_start_dt is not None else ""
         actual_end_date = request_end_dt.strftime("%Y-%m-%d") if request_end_dt is not None else ""
         if actual_start_date == "" and actual_end_date == "":
-            missing_codes = [code for code in codes if sum(1 for item in current_items if item.code == code) < (count or 1)]
+            missing_codes = [code for code in codes if len(current_items_by_code.get(code, [])) < (count or 1)]
             return [(code_batch, "", "") for code_batch in _chunk_quote_codes(missing_codes)]
         if actual_start_date == "":
             actual_start_date = actual_end_date
@@ -656,7 +678,7 @@ def _build_missing_quote_requests(
         expected_trade_times = _expected_quote_trade_times(freq, expected_trade_dates)
         code_expected_dates_by_code = _code_expected_trade_dates(codes, expected_trade_dates)
         for code in codes:
-            code_items = [item for item in current_items if item.code == code and item.freq == freq]
+            code_items = current_items_by_code.get(code, [])
             existing_dates = {_quote_item_date(item) for item in code_items if not _is_suspended_zero_amount_daily_item(item)}
             code_expected_dates = code_expected_dates_by_code.get(code, [])
             code_expected_trade_times = _expected_quote_trade_times(freq, code_expected_dates)
@@ -686,7 +708,7 @@ def _build_missing_quote_requests(
     code_expected_dates_by_code = _code_expected_trade_dates(codes, expected_trade_dates)
     grouped_ranges: dict[tuple[str, str], list[str]] = {}
     for code in codes:
-        existing_dates = {_quote_item_date(item) for item in current_items if item.code == code and item.freq == "1d" and not _is_suspended_zero_amount_daily_item(item)}
+        existing_dates = {_quote_item_date(item) for item in current_items_by_code.get(code, []) if not _is_suspended_zero_amount_daily_item(item)}
         code_expected_dates = code_expected_dates_by_code.get(code, [])
         missing_ranges = build_missing_expected_date_ranges(code_expected_dates, existing_dates)
         if missing_ranges == [] and expected_trade_dates == []:
@@ -715,8 +737,9 @@ def _has_market_wide_snapshot_placeholders(trade_date: str, items: list[StockQuo
     return placeholder_count >= int(active_count * 0.9)
 
 
-def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0) -> list[str]:
-    active_frame = load_stock_active_codes_frame(trade_date)
+def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit: int = MARKET_DAILY_SNAPSHOT_LIMIT, offset: int = 0, active_frame=None) -> list[str]:
+    if active_frame is None:
+        active_frame = load_stock_active_codes_frame(trade_date)
     if active_frame.empty:
         return [item.code for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and not _has_complete_stock_snapshot_item(item)]
     active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
@@ -729,7 +752,19 @@ def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit
     active_frame = load_stock_active_codes_frame(trade_date)
     if not active_frame.empty and _has_market_wide_snapshot_placeholders(trade_date, items, len(active_frame)):
         return [([], trade_date)]
-    missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset)
+    if not active_frame.empty:
+        active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
+        expected_codes = set(active_codes[: offset + limit])
+        expected_count = len(expected_codes)
+        expected_min = expected_count if expected_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD else int(expected_count * 0.9)
+        actual_codes = {
+            normalize_stock_code(item.code).zfill(6)
+            for item in items
+            if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)
+        }
+        if len(actual_codes & expected_codes) >= expected_min:
+            return []
+    missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset, active_frame)
     if missing_codes != []:
         if offset == 0 and len(missing_codes) >= SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD:
             return [([], trade_date)]

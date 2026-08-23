@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from threading import Lock
 import time as time_module
 from typing import Iterable
 from zoneinfo import ZoneInfo
@@ -268,11 +269,21 @@ FUTURE_SCHEMA_SQL = (
     """,
 )
 
+_FUTURE_SCHEMA_READY = False
+_FUTURE_SCHEMA_LOCK = Lock()
+
 
 def ensure_future_schema() -> None:
-    for statement in FUTURE_SCHEMA_SQL:
-        if not execute_sql(statement):
-            raise RuntimeError("无法创建期货 1m 事实表")
+    global _FUTURE_SCHEMA_READY
+    if _FUTURE_SCHEMA_READY:
+        return
+    with _FUTURE_SCHEMA_LOCK:
+        if _FUTURE_SCHEMA_READY:
+            return
+        for statement in FUTURE_SCHEMA_SQL:
+            if not execute_sql(statement):
+                raise RuntimeError("无法创建期货 1m 事实表")
+        _FUTURE_SCHEMA_READY = True
 
 
 def normalize_product_codes(codes: str | Iterable[str]) -> tuple[str, ...]:

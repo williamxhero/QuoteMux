@@ -21,7 +21,7 @@ def _frame_to_stock_quote_items(frame: pd.DataFrame, freq: str):
     items: list[StockQuoteItem] = []
     for code, code_frame in work.groupby("code", sort=False):
         result_frame = code_frame.drop(columns=["code"]).sort_values("trade_time")
-        for _, row in result_frame.iterrows():
+        for row in result_frame.to_dict("records"):
             items.append(
                 StockQuoteItem(
                     code=str(code).zfill(6),

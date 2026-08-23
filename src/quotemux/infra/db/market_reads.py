@@ -264,6 +264,7 @@ def load_etf_daily_frame(ts_codes: list[str], start_date: str, end_date: str) ->
 def _stock_daily_snapshot_query(*, paged: bool = False) -> str:
     existing_columns = _existing_columns("fact", "stock_daily_1d")
     pagination = "limit %s\n            offset %s" if paged else ""
+    previous_close_guard = "and day_rows.pre_close is null" if "pre_close" in existing_columns else ""
     return f"""
         with target_rows as materialized (
             select
@@ -306,6 +307,7 @@ def _stock_daily_snapshot_query(*, paged: bool = False) -> str:
             where previous_rows.market = day_rows.market
               and previous_rows.code = day_rows.code
               and previous_rows.trade_date < day_rows.trade_date
+              {previous_close_guard}
             order by previous_rows.trade_date desc
             limit 1
         ) previous_day on true
@@ -381,7 +383,7 @@ def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: ob
     if freq in {"5m", "30m"}:
         return _load_stock_aggregated_bar_frame(codes, start_time, end_time, freq)
     requested_codes = sorted(set(codes))
-    where_clauses = ["bars.code = requested.code"]
+    where_clauses = ["bars.code = any(%s::character(6)[])"]
     params: list[object] = [requested_codes]
     if start_time is not None:
         where_clauses.append("bars.bar_time >= %s::timestamp")
@@ -390,11 +392,6 @@ def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: ob
         where_clauses.append("bars.bar_time <= %s::timestamp")
         params.append(end_time)
     query = f"""
-        with requested_codes as materialized (
-            select distinct requested_rows.code
-            from unnest(%s::character(6)[]) as requested_rows(code)
-            order by requested_rows.code
-        )
         select
             bars.code,
             bars.bar_time as trade_time,
@@ -404,15 +401,9 @@ def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: ob
             bars.close,
             bars.volume,
             bars.amount
-        from requested_codes requested
-        cross join lateral (
-            select bars.code, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
-                   bars.volume, bars.amount
-            from fact.stock_bar_1m bars
-            where {' and '.join(where_clauses)}
-            order by bars.bar_time
-        ) bars
-        order by requested.code, bars.bar_time
+        from fact.stock_bar_1m bars
+        where {' and '.join(where_clauses)}
+        order by bars.code, bars.bar_time
     """
     return query_dataframe(query, tuple(params))
 
