@@ -2,12 +2,9 @@ __pycache__
 .pytest_cache
 /build
 /dist
-/tests
 /src/quotemux.egg-info
 /ops/yosef_server
 /migrations
 /docs
-/tools
-tests/
 CHANGELOG.md
 /verification_tests
