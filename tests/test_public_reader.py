@@ -75,6 +75,7 @@ import sys
 from quotemux import QuoteMuxPublicReader
 assert QuoteMuxPublicReader.__name__ == 'QuoteMuxPublicReader'
 assert 'quotemux.runtime' not in sys.modules
+assert 'quotemux.futures' not in sys.modules
 assert 'quotemux.package_install' not in sys.modules
 assert 'quotemux.fact_ref_writes' not in sys.modules
 assert 'quotemux.infra.provider_runtime.core' not in sys.modules
@@ -310,3 +311,47 @@ def test_stock_1m_direct_arrow_stream_is_one_sql_without_dataframe() -> None:
     assert len(client.calls) == 1
     assert client.calls[0][0] == "stock_1m_stream"
     assert "order by bars.code, bars.bar_time" in client.calls[0][1].lower()
+
+
+def test_futures_coverage_reader_is_strict_local_sorted_and_filtered() -> None:
+    from quotemux.infra.db.read_client import QueryBatch
+    from quotemux.public_reader import QuoteMuxPublicReader
+    from quotemux.strict_read import strict_public_read_boundary
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, tuple[object, ...]]] = []
+
+        def query_batch(self, query: str, params: tuple[object, ...] = (), *, stage: str = "sql") -> QueryBatch:
+            self.calls.append((stage, query, params))
+            return QueryBatch(
+                ("product_code", "exchange", "series_type", "row_count", "first_bar_time", "last_bar_time"),
+                (("IF", "CFFEX", "back_adjusted_continuous", 240, "2026-08-21 09:31:00", "2026-08-21 15:00:00"),),
+            )
+
+    client = Client()
+    with strict_public_read_boundary():
+        batch = QuoteMuxPublicReader(client=client).list_futures_coverage_batch("back_adjusted_continuous")
+
+    stage, query, params = client.calls[0]
+    normalized = " ".join(query.lower().split())
+    assert stage == "futures_coverage"
+    assert "from fact.future_bar_1m_coverage" in normalized
+    assert "create " not in normalized
+    assert "case when coverage.series_type = 'apex_l0_adjusted' then 'back_adjusted_continuous'" in normalized
+    assert "order by coverage.series_type, coverage.exchange, coverage.product_code" in normalized
+    assert params == ("apex_l0_adjusted", "apex_l0_adjusted")
+    assert batch.rows[0][2] == "back_adjusted_continuous"
+
+
+def test_futures_coverage_reader_all_series_and_rejects_unknown_filter() -> None:
+    from quotemux.public_reader import QuoteMuxPublicReader
+
+    client = _ReaderClient()
+    reader = QuoteMuxPublicReader(client=client)
+
+    reader.list_futures_coverage_batch()
+    assert client.calls[0][2] == ("", "")
+    with pytest.raises(ValueError, match="series_type"):
+        reader.list_futures_coverage_batch("contract")
+    assert len(client.calls) == 1

@@ -107,6 +107,26 @@ _STOCK_1M_COVERAGE_QUERY = """
     order by coverage.code
 """
 
+_FUTURES_SERIES_STORAGE = {
+    "back_adjusted_continuous": "apex_l0_adjusted",
+    "main_continuous": "main_continuous",
+}
+
+_FUTURES_COVERAGE_QUERY = """
+    select coverage.product_code,
+           coverage.exchange,
+           case when coverage.series_type = 'apex_l0_adjusted'
+                then 'back_adjusted_continuous'
+                else coverage.series_type
+           end as series_type,
+           coverage.row_count,
+           coverage.first_bar_time::text as first_bar_time,
+           coverage.last_bar_time::text as last_bar_time
+    from fact.future_bar_1m_coverage coverage
+    where (%s = '' or coverage.series_type = %s)
+    order by coverage.series_type, coverage.exchange, coverage.product_code
+"""
+
 
 def _date_text(value: str, field_name: str) -> str:
     text = str(value).strip()
@@ -274,6 +294,17 @@ class QuoteMuxPublicReader:
             _STOCK_1M_COVERAGE_QUERY,
             (normalized_codes, actual_start, actual_end),
             stage="stock_1m_coverage",
+        )
+
+    def list_futures_coverage_batch(self, series_type: str = "") -> QueryBatch:
+        if series_type and series_type not in _FUTURES_SERIES_STORAGE:
+            supported = ", ".join(_FUTURES_SERIES_STORAGE)
+            raise ValueError(f"series_type must be one of: {supported}")
+        storage_series_type = _FUTURES_SERIES_STORAGE.get(series_type, "")
+        return self._client.query_batch(
+            _FUTURES_COVERAGE_QUERY,
+            (storage_series_type, storage_series_type),
+            stage="futures_coverage",
         )
 
     @staticmethod
