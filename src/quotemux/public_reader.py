@@ -95,16 +95,16 @@ _STOCK_1M_QUERY = """
 """
 
 _STOCK_1M_COVERAGE_QUERY = """
-    select bars.code,
-           count(*)::bigint as row_count,
-           min(bars.bar_time) as first_trade_time,
-           max(bars.bar_time) as last_trade_time
-    from fact.stock_bar_1m bars
-    where bars.code = any(%s::character(6)[])
-      and bars.bar_time >= %s::timestamp
-      and bars.bar_time <= %s::timestamp
-    group by bars.code
-    order by bars.code
+    select coverage.code,
+           sum(coverage.row_count)::bigint as row_count,
+           min(coverage.first_bar_time) as first_trade_time,
+           max(coverage.last_bar_time) as last_trade_time
+    from readmodel.stock_bar_1m_daily_coverage coverage
+    where coverage.code = any(%s::character(6)[])
+      and coverage.trade_date >= (%s::timestamp)::date
+      and coverage.trade_date <= (%s::timestamp)::date
+    group by coverage.code
+    order by coverage.code
 """
 
 

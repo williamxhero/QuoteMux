@@ -510,6 +510,8 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
         return False
     if not params_1m:
         return True
+    if not _refresh_stock_1m_daily_coverage(params_1m):
+        return False
     bar_times = [str(params[2]) for params in params_1m]
     return execute_many(
         """
@@ -518,6 +520,49 @@ def _upsert_stock_intraday(items: Sequence[StockQuoteItem]) -> bool:
         values (%s, %s::timestamp, %s::timestamp, %s)
         """,
         [("quotemux.fact_ref_writer.complete_standard_grid", min(bar_times), max(bar_times), len(params_1m))],
+    )
+
+
+def _refresh_stock_1m_daily_coverage(params_1m: Sequence[tuple[object, ...]]) -> bool:
+    affected = sorted({(str(params[0]), str(params[1]), str(params[2])[:10]) for params in params_1m})
+    if not affected:
+        return True
+    markets = [market for market, _code, _trade_date in affected]
+    codes = [code for _market, code, _trade_date in affected]
+    trade_dates = [trade_date for _market, _code, trade_date in affected]
+    return execute_sql(
+        """
+        with affected as (
+            select market, code, trade_date
+            from unnest(%s::text[], %s::character(6)[], %s::date[])
+              as affected(market, code, trade_date)
+        ), refreshed as (
+            select
+                bars.market,
+                bars.code,
+                affected.trade_date,
+                count(*)::bigint as row_count,
+                min(bars.bar_time) as first_bar_time,
+                max(bars.bar_time) as last_bar_time
+            from fact.stock_bar_1m bars
+            join affected
+             on affected.market = bars.market
+             and affected.code = bars.code
+             and bars.bar_time >= affected.trade_date::timestamp
+             and bars.bar_time < affected.trade_date::timestamp + interval '1 day'
+            group by bars.market, bars.code, affected.trade_date
+        )
+        insert into readmodel.stock_bar_1m_daily_coverage
+          (market, code, trade_date, row_count, first_bar_time, last_bar_time, updated_at)
+        select market, code, trade_date, row_count, first_bar_time, last_bar_time, now()
+        from refreshed
+        on conflict (market, code, trade_date) do update set
+            row_count = excluded.row_count,
+            first_bar_time = excluded.first_bar_time,
+            last_bar_time = excluded.last_bar_time,
+            updated_at = excluded.updated_at
+        """,
+        (markets, codes, trade_dates),
     )
 
 

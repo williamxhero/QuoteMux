@@ -287,7 +287,10 @@ def test_stock_1m_reader_uses_one_grouped_coverage_and_one_ordered_stream() -> N
     assert [call[0] for call in client.snapshot_value.calls] == ["query", "stream"]
     coverage_query = client.snapshot_value.calls[0][1].lower()
     stream_query = client.snapshot_value.calls[1][1].lower()
-    assert "group by bars.code" in coverage_query
+    assert "from readmodel.stock_bar_1m_daily_coverage coverage" in coverage_query
+    assert "sum(coverage.row_count)::bigint" in coverage_query
+    assert "group by coverage.code" in coverage_query
+    assert "from fact.stock_bar_1m" not in coverage_query
     assert "order by bars.code, bars.bar_time" in stream_query
     assert "bars.code = any(%s::character(6)[])" in stream_query
     assert client.snapshot_value.calls[0][2][0] == ["000001", "600000"]
