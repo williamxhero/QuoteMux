@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from platform_models import BoardCatalogItem, BoardCategoryItem, BoardMemberHistoryItem, BoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, ConceptCatalogItem, ConceptCategoryItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptMoneyFlowItem, ConceptQuoteItem, StockMoneyFlowItem
 from quotemux.infra.common import format_date_value, parse_date_text
+from quotemux.infra.db.reference_reads import load_derivable_concept_ids_frame
 from quotemux.common import MARKET_DAILY_SNAPSHOT_LIMIT, build_missing_expected_date_ranges, ensure_limit, has_enough_stock_quote_rows, trim_items_per_key
 from quotemux.concepts import ConceptBoardAlias, QuoteMuxConcepts, _source_instance, is_concept_id
 from quotemux.fact_ref_writes import get_fact_ref_writer
@@ -544,9 +545,9 @@ class QuoteMuxConceptRuntime:
             return None
         return ConceptCatalogItem(concept_id=group.concept_id, concept_name=group.canonical_name, category="concept", market="a_share", status="active", start_date=group.start_date, end_date=group.end_date)
 
-    def get_members(self, concept_id: str, trade_date: str) -> list[ConceptMemberItem]:
+    def _get_members(self, concept_id: str, trade_date: str, refresh: bool) -> list[ConceptMemberItem]:
         local_items = get_local_concept_members(concept_id, trade_date)
-        if local_items != [] and not any(item.name == "" for item in local_items):
+        if not refresh and local_items != [] and not any(item.name == "" for item in local_items):
             return local_items
         aliases = self._concept_aliases(concept_id, trade_date, "concepts.members", CONCEPT_MEMBERS_SOURCE_ORDER)
         items: list[ConceptMemberItem] = []
@@ -569,8 +570,14 @@ class QuoteMuxConceptRuntime:
             if isinstance(raw_items, list):
                 items.extend(_rewrite_provider_member_items([item for item in raw_items if isinstance(item, BoardMemberItem)], alias))
         if items != []:
-            return _dedupe_member_union([*local_items, *items])
+            return _dedupe_member_union(items if refresh else [*local_items, *items])
         return local_items
+
+    def get_members(self, concept_id: str, trade_date: str) -> list[ConceptMemberItem]:
+        return self._get_members(concept_id, trade_date, False)
+
+    def refresh_members(self, concept_id: str, trade_date: str) -> list[ConceptMemberItem]:
+        return self._get_members(concept_id, trade_date, True)
 
     def get_member_history(self, concept_id: str, start_date: str, end_date: str) -> list[ConceptMemberHistoryItem]:
         aliases = self._concept_aliases(concept_id, start_date or end_date, "concepts.members.history", CONCEPT_MEMBER_HISTORY_SOURCE_ORDER)
@@ -758,6 +765,65 @@ class QuoteMuxConceptRuntime:
         if _has_concept_snapshot_metrics_for_ids(merged_items, concept_ids):
             return sorted([item for item in merged_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
         return sorted([item for item in merged_items if item.concept_id in concept_ids], key=lambda item: item.concept_id)[offset: offset + actual_limit]
+
+    def rebuild_daily_facts(self, start_date: str, end_date: str) -> dict[str, object]:
+        actual_start = format_date_value(start_date)
+        actual_end = format_date_value(end_date)
+        if actual_start == "" or actual_end == "":
+            raise ValueError("概念日线重建需要有效的 start_date 和 end_date")
+        if actual_start > actual_end:
+            raise ValueError("概念日线重建 start_date 不能晚于 end_date")
+        writer = get_fact_ref_writer("concepts.quotes.daily")
+        if writer is None:
+            raise RuntimeError("concepts.quotes.daily fact writer 不可用")
+
+        trade_dates = _expected_trade_dates(actual_start, actual_end, self._settings)
+        date_results: list[dict[str, object]] = []
+        written_row_count = 0
+        for trade_date in trade_dates:
+            candidate_ids = [
+                group.concept_id
+                for group in self._concepts.list_alias_groups(trade_date)
+                if group.concept_id != ""
+            ]
+            expected_frame = load_derivable_concept_ids_frame(candidate_ids, trade_date)
+            expected_ids = tuple(
+                str(row["concept_id"])
+                for row in expected_frame.to_dict("records")
+                if str(row["concept_id"]) != ""
+            )
+            derived_items = self._get_derived_snapshot_items(list(expected_ids), trade_date)
+            complete_by_id = {
+                item.concept_id: item
+                for item in derived_items
+                if item.trade_time == trade_date and item.amount is not None and item.pct_chg is not None
+            }
+            missing_ids = tuple(sorted(set(expected_ids) - set(complete_by_id)))
+            if missing_ids != ():
+                sample = ",".join(missing_ids[:10])
+                raise RuntimeError(
+                    f"概念日线重建覆盖不完整: trade_date={trade_date} expected={len(expected_ids)} "
+                    f"actual={len(complete_by_id)} missing={len(missing_ids)} sample={sample}"
+                )
+            write_items = [complete_by_id[concept_id] for concept_id in expected_ids]
+            if write_items != [] and not writer(write_items):
+                raise RuntimeError(f"概念日线重建写入失败: trade_date={trade_date}")
+            written_row_count += len(write_items)
+            date_results.append(
+                {
+                    "trade_date": trade_date,
+                    "expected_count": len(expected_ids),
+                    "written_count": len(write_items),
+                }
+            )
+        return {
+            "source_package": "derived_core",
+            "start_date": actual_start,
+            "end_date": actual_end,
+            "trade_dates": trade_dates,
+            "written_row_count": written_row_count,
+            "date_results": date_results,
+        }
 
     def get_categories(self, parent_code: str, level: int | None) -> list[ConceptCategoryItem]:
         store_identity = {"parent_code": parent_code, "level": level}

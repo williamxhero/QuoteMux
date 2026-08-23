@@ -579,17 +579,21 @@ def _upsert_concept_daily(items: Sequence[ConceptQuoteItem]) -> bool:
         params.append((item.concept_id, trade_date, item.open, item.high, item.low, item.close, item.volume, item.amount, *optional_values))
     optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
     optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
+    optional_update_sql = "".join(
+        f",\n            {column_name} = coalesce(excluded.{column_name}, existing.{column_name})"
+        for column_name in optional_columns
+    )
     return execute_many(
         f"""
-        insert into fact.concept_daily_1d (concept_id, trade_date, open, high, low, close, volume, amount{optional_column_sql})
+        insert into fact.concept_daily_1d as existing (concept_id, trade_date, open, high, low, close, volume, amount{optional_column_sql})
         values (%s, %s::date, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
         on conflict (concept_id, trade_date) do update set
-            open = excluded.open,
-            high = excluded.high,
-            low = excluded.low,
-            close = excluded.close,
-            volume = excluded.volume,
-            amount = excluded.amount{_optional_update_assignments(existing_columns, optional_columns)},
+            open = coalesce(excluded.open, existing.open),
+            high = coalesce(excluded.high, existing.high),
+            low = coalesce(excluded.low, existing.low),
+            close = coalesce(excluded.close, existing.close),
+            volume = coalesce(excluded.volume, existing.volume),
+            amount = coalesce(excluded.amount, existing.amount){optional_update_sql},
             loaded_at = now()
         """,
         params,
@@ -884,7 +888,13 @@ def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
         """,
         valid_params,
     )
-    return members_ok
+    if not members_ok:
+        return False
+    if not _prune_concept_member_snapshots(valid_params):
+        return False
+    return _invalidate_concept_daily_for_membership_changes(
+        tuple(sorted({(str(item[0]), str(item[3])) for item in valid_params}))
+    )
 
 
 def _filter_concept_member_params(params: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
@@ -924,15 +934,6 @@ def _filter_concept_member_params(params: list[tuple[object, ...]]) -> list[tupl
                     and daily_rows.trade_date = incoming.valid_from
               )
           )
-          and (
-              incoming.valid_from = date '1900-01-01'
-              or exists (
-                  select 1
-                  from fact.concept_daily_1d concept_rows
-                  where concept_rows.concept_id = incoming.concept_id
-                    and concept_rows.trade_date = incoming.valid_from
-              )
-          )
         """,
         (concept_ids, markets, codes, valid_froms, weights),
     )
@@ -942,6 +943,63 @@ def _filter_concept_member_params(params: list[tuple[object, ...]]) -> list[tupl
         (row["concept_id"], row["stock_market"], row["stock_code"], row["valid_from"], row["weight"])
         for row in frame.to_dict("records")
     ]
+
+
+def _prune_concept_member_snapshots(params: list[tuple[object, ...]]) -> bool:
+    if params == []:
+        return True
+    concept_ids = [str(item[0]) for item in params]
+    markets = [str(item[1]) for item in params]
+    codes = [str(item[2]) for item in params]
+    valid_froms = [str(item[3]) for item in params]
+    return execute_sql(
+        """
+        with incoming as (
+            select distinct *
+            from unnest(%s::text[], %s::text[], %s::text[], %s::date[])
+              as rows(concept_id, stock_market, stock_code, valid_from)
+        ),
+        snapshots as (
+            select distinct concept_id, valid_from
+            from incoming
+        )
+        delete from ref.concept_stock_membership existing
+        using snapshots
+        where existing.concept_id = snapshots.concept_id
+          and existing.valid_from = snapshots.valid_from
+          and not exists (
+              select 1
+              from incoming
+              where incoming.concept_id = existing.concept_id
+                and incoming.stock_market = existing.stock_market
+                and incoming.stock_code = existing.stock_code
+                and incoming.valid_from = existing.valid_from
+          )
+        """,
+        (concept_ids, markets, codes, valid_froms),
+    )
+
+
+def _invalidate_concept_daily_for_membership_changes(changes: tuple[tuple[str, str], ...]) -> bool:
+    if changes == () or not _table_exists("fact", "concept_daily_1d"):
+        return True
+    return execute_many(
+        """
+        delete from fact.concept_daily_1d concept_rows
+        where concept_rows.concept_id = %s
+          and concept_rows.trade_date >= %s::date
+          and concept_rows.trade_date < coalesce(
+              (
+                  select min(next_snapshot.valid_from)
+                  from ref.concept_stock_membership next_snapshot
+                  where next_snapshot.concept_id = %s
+                    and next_snapshot.valid_from > %s::date
+              ),
+              date 'infinity'
+          )
+        """,
+        [(concept_id, valid_from, concept_id, valid_from) for concept_id, valid_from in changes],
+    )
 
 
 def _upsert_concept_member_history(items: Sequence[ConceptMemberHistoryItem]) -> bool:
@@ -978,7 +1036,10 @@ def _upsert_concept_member_history(items: Sequence[ConceptMemberHistoryItem]) ->
         """,
         out_params,
     )
-    return insert_ok and update_ok
+    if not insert_ok or not update_ok:
+        return False
+    changes = tuple(sorted({(str(item[1]), str(item[0])) for item in out_params} | {(str(item[0]), str(item[3])) for item in in_params}))
+    return _invalidate_concept_daily_for_membership_changes(changes)
 
 
 def _upsert_index_catalog(items: Sequence[IndexCatalogItem]) -> bool:

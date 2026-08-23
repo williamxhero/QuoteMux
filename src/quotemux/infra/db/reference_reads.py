@@ -236,6 +236,62 @@ def load_concept_members_frame(concept_id: str, trade_date: str) -> pd.DataFrame
     return query_dataframe(query, (trade_date, concept_id, trade_date, trade_date, concept_id, trade_date, concept_id, trade_date))
 
 
+def load_derivable_concept_ids_frame(concept_ids: list[str], trade_date: str) -> pd.DataFrame:
+    if concept_ids == [] or trade_date == "":
+        return pd.DataFrame()
+    return query_dataframe(
+        """
+        with snapshot_dates as (
+            select
+                membership.concept_id,
+                coalesce(
+                    max(membership.valid_from) filter (where membership.valid_from <= %s::date),
+                    min(membership.valid_from)
+                ) as valid_from
+            from ref.concept_stock_membership membership
+            where membership.concept_id = any(%s)
+            group by membership.concept_id
+        ),
+        member_rows as (
+            select
+                membership.concept_id,
+                membership.stock_market,
+                membership.stock_code
+            from ref.concept_stock_membership membership
+            join snapshot_dates snapshot
+              on snapshot.concept_id = membership.concept_id
+             and snapshot.valid_from = membership.valid_from
+            where membership.valid_to is null or membership.valid_to >= %s::date
+        ),
+        previous_trade_date as (
+            select max(trade_date) as trade_date
+            from fact.stock_daily_1d
+            where trade_date < %s::date
+        )
+        select member_rows.concept_id
+        from member_rows
+        join fact.stock_daily_1d stock_rows
+          on stock_rows.market = member_rows.stock_market
+         and stock_rows.code = member_rows.stock_code
+         and stock_rows.trade_date = %s::date
+        join fact.stock_daily_1d previous_rows
+          on previous_rows.market = stock_rows.market
+         and previous_rows.code = stock_rows.code
+         and previous_rows.trade_date = (select trade_date from previous_trade_date)
+        where coalesce(stock_rows.is_suspended, false) = false
+          and coalesce(stock_rows.is_st, false) = false
+          and stock_rows.close is not null
+          and stock_rows.amount is not null
+          and stock_rows.amount > 0
+        group by member_rows.concept_id
+        having count(*) filter (where stock_rows.pct_chg is not null) > 0
+           and count(*) filter (where previous_rows.close is not null) > 0
+        order by member_rows.concept_id
+        """,
+        (trade_date, concept_ids, trade_date, trade_date, trade_date),
+    )
+
+
 def load_index_catalog_frame(index_codes: list[str]) -> pd.DataFrame:
     where_clauses = []
     params: list[object] = []

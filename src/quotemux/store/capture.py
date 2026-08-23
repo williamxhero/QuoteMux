@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from quotemux.infra.common import format_date_value
 from quotemux.infra.db.client import execute_many, execute_sql, query_dataframe
 from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
-from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
+from quotemux.infra.db.reference_reads import load_concept_catalog_frame, load_derivable_concept_ids_frame, load_index_catalog_frame, load_stock_active_codes_frame, load_trade_calendar_frame
 from quotemux.capabilities import get_capability_config_root, is_independently_configurable_capability_id
 from quotemux.capabilities.inventory import list_capability_ids
 from quotemux.concepts import QuoteMuxConcepts
@@ -1085,7 +1085,22 @@ def _daily_count_complete(actual_count: int, expected_count: int) -> bool:
 
 
 def _concept_daily_fact_missing(trade_date: str) -> bool:
-    return not _daily_count_complete(_fact_daily_count("fact.concept_daily_1d", trade_date), len(_concept_ids()))
+    expected_ids = _derivable_concept_ids(trade_date)
+    if expected_ids == ():
+        return False
+    frame = query_dataframe(
+        """
+        select concept_id
+        from fact.concept_daily_1d
+        where trade_date = %s::date
+          and concept_id = any(%s)
+          and amount is not null
+          and pct_chg is not null
+        """,
+        (trade_date, list(expected_ids)),
+    )
+    actual_ids = set() if _is_empty_dataframe(frame) else {str(row["concept_id"]) for row in frame.to_dict("records")}
+    return actual_ids != set(expected_ids)
 
 
 def _complete_stock_daily_count(trade_date: str) -> int:
@@ -1205,6 +1220,23 @@ def _append_missing_range_requests(
 
 def _concept_ids() -> tuple[str, ...]:
     return tuple(group.concept_id for group in QuoteMuxConcepts().list_alias_groups("") if group.concept_id != "")
+
+
+def _derivable_concept_ids(trade_date: str, concept_ids: Sequence[str] | None = None) -> tuple[str, ...]:
+    requested_ids = list(dict.fromkeys(concept_ids or _concept_ids()))
+    frame = load_derivable_concept_ids_frame(requested_ids, trade_date)
+    if _is_empty_dataframe(frame):
+        return ()
+    return tuple(str(row["concept_id"]) for row in frame.to_dict("records") if str(row["concept_id"]) != "")
+
+
+def _missing_derivable_concept_ids(items: Sequence[object], expected_ids: Sequence[str]) -> tuple[str, ...]:
+    complete_ids = {
+        str(getattr(item, "concept_id", ""))
+        for item in items
+        if getattr(item, "amount", None) is not None and getattr(item, "pct_chg", None) is not None
+    }
+    return tuple(sorted(set(expected_ids) - complete_ids))
 
 
 def _industry_count() -> int:
@@ -1378,7 +1410,6 @@ def _concept_member_requests(policy: CapturePolicy, capability_id: str, now: dat
         CaptureRequest(capability_id, {"concept_id": concept_id, "trade_date": trade_date})
         for trade_date in trading_days
         for concept_id in concept_ids
-        if _single_date_missing(capability_id, {"concept_id": concept_id, "trade_date": trade_date})
     )
 
 
@@ -1829,29 +1860,44 @@ def build_capture_requests(policy: CapturePolicy, now: datetime) -> tuple[Captur
 def _scheduled_time(policy: CapturePolicy, now: datetime) -> datetime | None:
     local_now = now.astimezone(ZoneInfo(policy.timezone)) if now.tzinfo is not None else now.replace(tzinfo=ZoneInfo(policy.timezone))
     local_date = local_now.date()
-    if local_now.time() < policy.run_time:
-        return None
+    timezone = ZoneInfo(policy.timezone)
+
+    def occurrence(year: int, month: int, day: int) -> datetime:
+        return datetime.combine(date(year, month, day), policy.run_time, timezone)
+
     if policy.cadence == CADENCE_DAILY:
-        scheduled_day = local_date
+        scheduled = occurrence(local_date.year, local_date.month, local_date.day)
+        if scheduled > local_now:
+            previous_day = local_date - timedelta(days=1)
+            scheduled = occurrence(previous_day.year, previous_day.month, previous_day.day)
     elif policy.cadence == CADENCE_WEEKLY:
         expected_weekday = 6 if policy.weekday is None else policy.weekday
-        if local_date.weekday() != expected_weekday:
-            return None
-        scheduled_day = local_date
+        scheduled_day = local_date - timedelta(days=(local_date.weekday() - expected_weekday) % 7)
+        scheduled = occurrence(scheduled_day.year, scheduled_day.month, scheduled_day.day)
+        if scheduled > local_now:
+            scheduled_day -= timedelta(days=7)
+            scheduled = occurrence(scheduled_day.year, scheduled_day.month, scheduled_day.day)
     elif policy.cadence == CADENCE_MONTHLY:
         expected_day = monthrange(local_date.year, local_date.month)[1] if policy.month_day is None else min(policy.month_day, monthrange(local_date.year, local_date.month)[1])
-        if local_date.day != expected_day:
-            return None
-        scheduled_day = local_date
+        scheduled = occurrence(local_date.year, local_date.month, expected_day)
+        if scheduled > local_now:
+            previous_year = local_date.year if local_date.month > 1 else local_date.year - 1
+            previous_month = local_date.month - 1 if local_date.month > 1 else 12
+            previous_day = monthrange(previous_year, previous_month)[1] if policy.month_day is None else min(policy.month_day, monthrange(previous_year, previous_month)[1])
+            scheduled = occurrence(previous_year, previous_month, previous_day)
     elif policy.cadence == CADENCE_YEARLY:
         expected_month = 12 if policy.month is None else policy.month
         expected_day = monthrange(local_date.year, expected_month)[1] if policy.month_day is None else min(policy.month_day, monthrange(local_date.year, expected_month)[1])
-        if local_date.month != expected_month or local_date.day != expected_day:
-            return None
-        scheduled_day = local_date
+        scheduled = occurrence(local_date.year, expected_month, expected_day)
+        if scheduled > local_now:
+            previous_year = local_date.year - 1
+            previous_day = monthrange(previous_year, expected_month)[1] if policy.month_day is None else min(policy.month_day, monthrange(previous_year, expected_month)[1])
+            scheduled = occurrence(previous_year, expected_month, previous_day)
     else:
-        scheduled_day = local_date
-    scheduled = datetime.combine(scheduled_day, policy.run_time, ZoneInfo(policy.timezone))
+        scheduled = occurrence(local_date.year, local_date.month, local_date.day)
+        if scheduled > local_now:
+            previous_day = local_date - timedelta(days=1)
+            scheduled = occurrence(previous_day.year, previous_day.month, previous_day.day)
     return scheduled.replace(tzinfo=None)
 
 
@@ -1871,9 +1917,11 @@ CAPTURE_DUE_PRIORITY: dict[str, int] = {
     "stocks.quotes.daily_snapshot": 1,
     "stocks.quotes.daily": 2,
     "boards.quotes.daily": 3,
-    "concepts.quotes.daily": 4,
-    "indexes.quotes.daily": 5,
-    "markets.calendar.trading": 6,
+    "concepts.members.history": 3,
+    "concepts.members": 4,
+    "concepts.quotes.daily": 5,
+    "indexes.quotes.daily": 6,
+    "markets.calendar.trading": 7,
 }
 
 
@@ -2242,9 +2290,17 @@ class QuoteMuxCaptureJob:
                 items = self._normalize_runtime_items(self._runtime.concepts.get_quotes(**request.request_identity))
             else:
                 items = self._normalize_runtime_items(self._runtime.concepts.get_market_daily_snapshot(**request.request_identity))
-            expected_count = len(request.request_identity.get("concept_ids", [])) if "concept_ids" in request.request_identity else len(_concept_ids())
-            if expected_count > 0 and len(items) < int(expected_count * 0.9):
-                raise RuntimeError(f"概念日线快照覆盖不完整: expected={expected_count} actual={len(items)}")
+            trade_date = format_date_value(request.request_identity.get("trade_date", ""))
+            requested_ids = request.request_identity.get("concept_ids")
+            candidate_ids = tuple(str(item) for item in requested_ids) if isinstance(requested_ids, list) else _concept_ids()
+            expected_ids = _derivable_concept_ids(trade_date, candidate_ids)
+            missing_ids = _missing_derivable_concept_ids(items, expected_ids)
+            if missing_ids != ():
+                sample = ",".join(missing_ids[:10])
+                raise RuntimeError(
+                    f"概念日线快照覆盖不完整: expected={len(expected_ids)} "
+                    f"actual={len(expected_ids) - len(missing_ids)} missing={len(missing_ids)} sample={sample}"
+                )
             normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
             store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
             fact_write_count = self._write_fact_ref_items(request.capability_id, normalized_items)
@@ -2260,7 +2316,8 @@ class QuoteMuxCaptureJob:
             fact_write_count = self._write_fact_ref_items(request.capability_id, normalized_items)
             return normalized_items, _CaptureRuntimeReport("boards.quotes.daily", fact_write_count)
         if request.capability_id == "concepts.members":
-            items = self._normalize_runtime_items(self._runtime.concepts.get_members(**request.request_identity))
+            refresh_members = getattr(self._runtime.concepts, "refresh_members", self._runtime.concepts.get_members)
+            items = self._normalize_runtime_items(refresh_members(**request.request_identity))
             normalized_items = _normalized_capture_items(request.capability_id, request.request_identity, items)
             write_result = store_result(request.capability_id, request.request_identity, normalized_items, ContractReport(contract_name=request.capability_id))
             self._write_fact_ref_items(request.capability_id, normalized_items)
