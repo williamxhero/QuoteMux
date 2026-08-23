@@ -170,15 +170,39 @@ FUTURE_SCHEMA_SQL = (
     $$
     """,
     """
-    create or replace function fact.maintain_future_bar_1m_coverage_after_key_update()
+    create or replace function fact.maintain_future_bar_1m_coverage_after_update()
     returns trigger language plpgsql as $$
+    declare
+        affected record;
     begin
-        perform fact.refresh_future_bar_1m_coverage_group(old.product_code, old.exchange, old.series_type);
-        if row(old.product_code, old.exchange, old.series_type)
-               is distinct from row(new.product_code, new.exchange, new.series_type) then
-            perform fact.refresh_future_bar_1m_coverage_group(new.product_code, new.exchange, new.series_type);
+        if not exists (
+            (select old_rows.product_code, old_rows.exchange, old_rows.series_type, old_rows.bar_time
+             from updated_old_rows old_rows
+             except
+             select new_rows.product_code, new_rows.exchange, new_rows.series_type, new_rows.bar_time
+             from updated_new_rows new_rows)
+            union all
+            (select new_rows.product_code, new_rows.exchange, new_rows.series_type, new_rows.bar_time
+             from updated_new_rows new_rows
+             except
+             select old_rows.product_code, old_rows.exchange, old_rows.series_type, old_rows.bar_time
+             from updated_old_rows old_rows)
+        ) then
+            return null;
         end if;
-        return new;
+
+        for affected in
+            select old_rows.product_code, old_rows.exchange, old_rows.series_type
+            from updated_old_rows old_rows
+            union
+            select new_rows.product_code, new_rows.exchange, new_rows.series_type
+            from updated_new_rows new_rows
+        loop
+            perform fact.refresh_future_bar_1m_coverage_group(
+                affected.product_code, affected.exchange, affected.series_type
+            );
+        end loop;
+        return null;
     end
     $$
     """,
@@ -219,15 +243,25 @@ FUTURE_SCHEMA_SQL = (
     """
     do $$
     begin
-        if not exists (
+        if exists (
             select 1 from pg_trigger
             where tgrelid = 'fact.future_bar_1m'::regclass
               and tgname = 'future_bar_1m_coverage_after_key_update'
               and not tgisinternal
         ) then
-            create trigger future_bar_1m_coverage_after_key_update
-            after update of product_code, exchange, series_type, bar_time on fact.future_bar_1m
-            for each row execute function fact.maintain_future_bar_1m_coverage_after_key_update();
+            drop trigger future_bar_1m_coverage_after_key_update on fact.future_bar_1m;
+        end if;
+
+        if not exists (
+            select 1 from pg_trigger
+            where tgrelid = 'fact.future_bar_1m'::regclass
+              and tgname = 'future_bar_1m_coverage_after_update'
+              and not tgisinternal
+        ) then
+            create trigger future_bar_1m_coverage_after_update
+            after update on fact.future_bar_1m
+            referencing old table as updated_old_rows new table as updated_new_rows
+            for each statement execute function fact.maintain_future_bar_1m_coverage_after_update();
         end if;
     end
     $$

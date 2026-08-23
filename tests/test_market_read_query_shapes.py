@@ -116,4 +116,8 @@ def test_futures_coverage_schema_has_one_time_backfill_and_write_maintenance() -
     assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_insert" in schema
     assert "after delete on fact.future_bar_1m" in schema
     assert "referencing old table as deleted_rows" in schema
-    assert "after update of product_code, exchange, series_type, bar_time on fact.future_bar_1m" in schema
+    assert "after update on fact.future_bar_1m" in schema
+    assert "referencing old table as updated_old_rows new table as updated_new_rows" in schema
+    assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_update" in schema
+    assert "for each row execute function fact.maintain_future_bar_1m_coverage" not in schema
+    assert "except" in schema
