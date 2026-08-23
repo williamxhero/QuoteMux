@@ -248,7 +248,7 @@ def query_dataframe(query: str, params: tuple[object, ...] = ()) -> pd.DataFrame
     if not _db_available_for_attempt():
         return pd.DataFrame()
     try:
-        return call_provider_api("store_db", "query_dataframe", _query_dataframe_once, query, params)
+        return _query_dataframe_once(query, params)
     except Exception as exc:
         _mark_db_unavailable()
         print(f"store db query failed: {exc}")

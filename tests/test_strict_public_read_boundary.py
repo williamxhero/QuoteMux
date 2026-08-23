@@ -86,6 +86,58 @@ def test_fact_cache_and_sql_write_choke_points_reject_inside_boundary(monkeypatc
     assert not (tmp_path / "data.parquet").exists()
 
 
+def test_strict_boundary_allows_local_database_reads_without_provider_or_availability_pollution(monkeypatch) -> None:
+    from quotemux.infra.db import client as fact_db
+    from quotemux.store import cache_db
+    from quotemux.strict_read import strict_public_read_boundary
+
+    fact_frame = pd.DataFrame([{"code": "600000"}])
+    cache_frame = pd.DataFrame([{"capability_id": "stocks.catalog"}])
+    monkeypatch.setattr(fact_db, "_db_available_for_attempt", lambda: True)
+    monkeypatch.setattr(cache_db, "_cache_db_available_for_attempt", lambda: True)
+    monkeypatch.setattr(fact_db, "_query_dataframe_once", lambda _query, _params: fact_frame)
+    monkeypatch.setattr(cache_db, "_query_dataframe_once", lambda _query, _params: cache_frame)
+    monkeypatch.setattr(
+        fact_db,
+        "call_provider_api",
+        lambda *_args, **_kwargs: pytest.fail("local fact read must not use the provider gate"),
+    )
+    monkeypatch.setattr(
+        cache_db,
+        "call_provider_api",
+        lambda *_args, **_kwargs: pytest.fail("local cache read must not use the provider gate"),
+    )
+    monkeypatch.setattr(
+        fact_db,
+        "_mark_db_unavailable",
+        lambda: pytest.fail("successful fact read must not mark the database unavailable"),
+    )
+    monkeypatch.setattr(
+        cache_db,
+        "_mark_cache_db_unavailable",
+        lambda: pytest.fail("successful cache read must not mark the database unavailable"),
+    )
+
+    with strict_public_read_boundary():
+        assert fact_db.query_dataframe("select * from fact.stock_daily_1d").equals(fact_frame)
+        assert cache_db.query_dataframe("select * from capability_cache_rows").equals(cache_frame)
+
+
+def test_strict_boundary_allows_local_stream_reads(monkeypatch) -> None:
+    from quotemux.infra.db import client as fact_db
+    from quotemux.strict_read import strict_public_read_boundary
+
+    expected = [[{"code": "600000"}]]
+    monkeypatch.setattr(
+        fact_db,
+        "_stream_query_batches",
+        lambda _query, _params, _batch_size: iter(expected),
+    )
+
+    with strict_public_read_boundary():
+        assert list(fact_db.stream_query_batches("select code from fact.stock_bar_1m")) == expected
+
+
 def test_admin_capture_and_repair_remain_available_outside_boundary() -> None:
     from quotemux.infra.provider_runtime.core import call_provider_api
     from quotemux.store.admin import QuoteMuxCaptureAdmin

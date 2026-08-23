@@ -146,7 +146,7 @@ def query_dataframe(query: str, params: tuple[object, ...] = ()) -> pd.DataFrame
     if not _cache_db_available_for_attempt():
         return pd.DataFrame()
     try:
-        return call_provider_api("quotemux_cache_db", "query_dataframe", _query_dataframe_once, query, params)
+        return _query_dataframe_once(query, params)
     except Exception as exc:
         _mark_cache_db_unavailable()
         print(f"quotemux cache db query failed: {exc}")
