@@ -41,11 +41,11 @@ def _optional_column(existing_columns: set[str], column_name: str) -> str:
     return f"null as {column_name}"
 
 
-def _daily_metric_selects(existing_columns: set[str], row_alias: str) -> str:
+def _daily_metric_selects(existing_columns: set[str], row_alias: str, previous_close_expr: str | None = None) -> str:
     pre_close_value = f"{row_alias}.pre_close" if "pre_close" in existing_columns else "null"
     change_value = f"{row_alias}.change" if "change" in existing_columns else "null"
     pct_chg_value = f"{row_alias}.pct_chg" if "pct_chg" in existing_columns else "null"
-    previous_close = f"coalesce({pre_close_value}, {row_alias}.previous_close)"
+    previous_close = f"coalesce({pre_close_value}, {previous_close_expr or f'{row_alias}.previous_close'})"
     change_expr = f"coalesce({change_value}, {row_alias}.close - {previous_close})"
     pct_chg_expr = f"coalesce({pct_chg_value}, {change_expr} / nullif({previous_close}, 0) * 100)"
     return f"""
@@ -261,28 +261,31 @@ def load_etf_daily_frame(ts_codes: list[str], start_date: str, end_date: str) ->
     return query_dataframe(query, tuple(params))
 
 
-def _stock_daily_snapshot_query() -> str:
+def _stock_daily_snapshot_query(*, paged: bool = False) -> str:
     existing_columns = _existing_columns("fact", "stock_daily_1d")
+    pagination = "limit %s\n            offset %s" if paged else ""
     return f"""
-        with day_rows as (
+        with target_rows as materialized (
             select
-                code,
-                trade_date,
-                open,
-                high,
-                low,
-                close,
+                day_rows.market,
+                day_rows.code,
+                day_rows.trade_date,
+                day_rows.open,
+                day_rows.high,
+                day_rows.low,
+                day_rows.close,
                 {_optional_column(existing_columns, "pre_close")},
                 {_optional_column(existing_columns, "change")},
                 {_optional_column(existing_columns, "pct_chg")},
-                volume,
-                amount,
+                day_rows.volume,
+                day_rows.amount,
                 {_optional_column(existing_columns, "is_suspended")},
-                {_optional_column(existing_columns, "is_st")},
-                lag(day_rows.close) over (partition by day_rows.code order by day_rows.trade_date) as previous_close
+                {_optional_column(existing_columns, "is_st")}
             from fact.stock_daily_1d day_rows
-            where trade_date <= %s
+            where day_rows.trade_date = %s::date
               and {_canonical_stock_market_condition("day_rows")}
+            order by day_rows.code
+            {pagination}
         )
         select
             day_rows.code,
@@ -291,13 +294,21 @@ def _stock_daily_snapshot_query() -> str:
             day_rows.high,
             day_rows.low,
             day_rows.close,
-            {_daily_metric_selects(existing_columns, "day_rows")}
+            {_daily_metric_selects(existing_columns, "day_rows", "previous_day.previous_close")}
             day_rows.volume,
             day_rows.amount,
             day_rows.is_suspended,
             day_rows.is_st
-        from day_rows
-        where day_rows.trade_date = %s
+        from target_rows day_rows
+        left join lateral (
+            select previous_rows.close as previous_close
+            from fact.stock_daily_1d previous_rows
+            where previous_rows.market = day_rows.market
+              and previous_rows.code = day_rows.code
+              and previous_rows.trade_date < day_rows.trade_date
+            order by previous_rows.trade_date desc
+            limit 1
+        ) previous_day on true
         order by day_rows.code
     """
 
@@ -306,19 +317,13 @@ def load_stock_daily_snapshot_full_frame(trade_date: str) -> pd.DataFrame:
     """读取单个交易日的全市场股票日线快照。"""
     if not trade_date:
         return pd.DataFrame()
-    return query_dataframe(_stock_daily_snapshot_query(), (trade_date, trade_date))
+    return query_dataframe(_stock_daily_snapshot_query(), (trade_date,))
 
 
 def load_stock_daily_snapshot_frame(trade_date: str, limit: int, offset: int) -> pd.DataFrame:
     if not trade_date:
         return pd.DataFrame()
-    query = f"""
-        select *
-        from ({_stock_daily_snapshot_query()}) as snapshot_rows
-        limit %s
-        offset %s
-    """
-    return query_dataframe(query, (trade_date, trade_date, limit, offset))
+    return query_dataframe(_stock_daily_snapshot_query(paged=True), (trade_date, limit, offset))
 
 
 def load_stock_daily_local_window_frame(start_date: str, end_date: str, limit: int | None, offset: int) -> pd.DataFrame:
@@ -375,27 +380,39 @@ def load_stock_intraday_frame(codes: list[str], start_time: object, end_time: ob
         return pd.DataFrame()
     if freq in {"5m", "30m"}:
         return _load_stock_aggregated_bar_frame(codes, start_time, end_time, freq)
-    where_clauses = ["code = any(%s)"]
-    params: list[object] = [codes]
+    requested_codes = sorted(set(codes))
+    where_clauses = ["bars.code = requested.code"]
+    params: list[object] = [requested_codes]
     if start_time is not None:
-        where_clauses.append("bar_time >= %s")
+        where_clauses.append("bars.bar_time >= %s::timestamp")
         params.append(start_time)
     if end_time is not None:
-        where_clauses.append("bar_time <= %s")
+        where_clauses.append("bars.bar_time <= %s::timestamp")
         params.append(end_time)
     query = f"""
+        with requested_codes as materialized (
+            select distinct requested_rows.code
+            from unnest(%s::character(6)[]) as requested_rows(code)
+            order by requested_rows.code
+        )
         select
-            code,
-            bar_time as trade_time,
-            open,
-            high,
-            low,
-            close,
-            volume,
-            amount
-        from fact.stock_bar_1m
-        where {' and '.join(where_clauses)}
-        order by code, bar_time
+            bars.code,
+            bars.bar_time as trade_time,
+            bars.open,
+            bars.high,
+            bars.low,
+            bars.close,
+            bars.volume,
+            bars.amount
+        from requested_codes requested
+        cross join lateral (
+            select bars.code, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
+                   bars.volume, bars.amount
+            from fact.stock_bar_1m bars
+            where {' and '.join(where_clauses)}
+            order by bars.bar_time
+        ) bars
+        order by requested.code, bars.bar_time
     """
     return query_dataframe(query, tuple(params))
 

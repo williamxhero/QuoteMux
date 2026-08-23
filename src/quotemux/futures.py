@@ -78,6 +78,160 @@ FUTURE_SCHEMA_SQL = (
     )
     """,
     "create index if not exists future_bar_1m_time_idx on fact.future_bar_1m (bar_time, product_code, series_type)",
+    """
+    create table if not exists fact.future_bar_1m_coverage (
+        product_code text not null,
+        exchange text not null,
+        series_type text not null,
+        row_count bigint not null,
+        first_bar_time timestamp without time zone not null,
+        last_bar_time timestamp without time zone not null,
+        updated_at timestamp with time zone not null default now(),
+        primary key (product_code, exchange, series_type),
+        check (row_count > 0)
+    )
+    """,
+    """
+    insert into fact.future_bar_1m_coverage (
+        product_code, exchange, series_type, row_count, first_bar_time, last_bar_time, updated_at
+    )
+    select bars.product_code, bars.exchange, bars.series_type, count(*),
+           min(bars.bar_time), max(bars.bar_time), now()
+    from fact.future_bar_1m bars
+    where not exists (select 1 from fact.future_bar_1m_coverage)
+    group by bars.product_code, bars.exchange, bars.series_type
+    on conflict (product_code, exchange, series_type) do update set
+        row_count = excluded.row_count,
+        first_bar_time = excluded.first_bar_time,
+        last_bar_time = excluded.last_bar_time,
+        updated_at = now()
+    """,
+    """
+    create or replace function fact.refresh_future_bar_1m_coverage_group(
+        target_product_code text,
+        target_exchange text,
+        target_series_type text
+    ) returns void language plpgsql as $$
+    begin
+        delete from fact.future_bar_1m_coverage
+        where product_code = target_product_code
+          and exchange = target_exchange
+          and series_type = target_series_type;
+
+        insert into fact.future_bar_1m_coverage (
+            product_code, exchange, series_type, row_count, first_bar_time, last_bar_time, updated_at
+        )
+        select bars.product_code, bars.exchange, bars.series_type, count(*),
+               min(bars.bar_time), max(bars.bar_time), now()
+        from fact.future_bar_1m bars
+        where bars.product_code = target_product_code
+          and bars.exchange = target_exchange
+          and bars.series_type = target_series_type
+        group by bars.product_code, bars.exchange, bars.series_type;
+    end
+    $$
+    """,
+    """
+    create or replace function fact.maintain_future_bar_1m_coverage_after_insert()
+    returns trigger language plpgsql as $$
+    begin
+        insert into fact.future_bar_1m_coverage (
+            product_code, exchange, series_type, row_count, first_bar_time, last_bar_time, updated_at
+        )
+        select inserted.product_code, inserted.exchange, inserted.series_type, count(*),
+               min(inserted.bar_time), max(inserted.bar_time), now()
+        from inserted_rows inserted
+        group by inserted.product_code, inserted.exchange, inserted.series_type
+        on conflict (product_code, exchange, series_type) do update set
+            row_count = fact.future_bar_1m_coverage.row_count + excluded.row_count,
+            first_bar_time = least(fact.future_bar_1m_coverage.first_bar_time, excluded.first_bar_time),
+            last_bar_time = greatest(fact.future_bar_1m_coverage.last_bar_time, excluded.last_bar_time),
+            updated_at = now();
+        return null;
+    end
+    $$
+    """,
+    """
+    create or replace function fact.maintain_future_bar_1m_coverage_after_delete()
+    returns trigger language plpgsql as $$
+    declare
+        affected record;
+    begin
+        for affected in
+            select distinct deleted.product_code, deleted.exchange, deleted.series_type
+            from deleted_rows deleted
+        loop
+            perform fact.refresh_future_bar_1m_coverage_group(
+                affected.product_code, affected.exchange, affected.series_type
+            );
+        end loop;
+        return null;
+    end
+    $$
+    """,
+    """
+    create or replace function fact.maintain_future_bar_1m_coverage_after_key_update()
+    returns trigger language plpgsql as $$
+    begin
+        perform fact.refresh_future_bar_1m_coverage_group(old.product_code, old.exchange, old.series_type);
+        if row(old.product_code, old.exchange, old.series_type)
+               is distinct from row(new.product_code, new.exchange, new.series_type) then
+            perform fact.refresh_future_bar_1m_coverage_group(new.product_code, new.exchange, new.series_type);
+        end if;
+        return new;
+    end
+    $$
+    """,
+    """
+    do $$
+    begin
+        if not exists (
+            select 1 from pg_trigger
+            where tgrelid = 'fact.future_bar_1m'::regclass
+              and tgname = 'future_bar_1m_coverage_after_insert'
+              and not tgisinternal
+        ) then
+            create trigger future_bar_1m_coverage_after_insert
+            after insert on fact.future_bar_1m
+            referencing new table as inserted_rows
+            for each statement execute function fact.maintain_future_bar_1m_coverage_after_insert();
+        end if;
+    end
+    $$
+    """,
+    """
+    do $$
+    begin
+        if not exists (
+            select 1 from pg_trigger
+            where tgrelid = 'fact.future_bar_1m'::regclass
+              and tgname = 'future_bar_1m_coverage_after_delete'
+              and not tgisinternal
+        ) then
+            create trigger future_bar_1m_coverage_after_delete
+            after delete on fact.future_bar_1m
+            referencing old table as deleted_rows
+            for each statement execute function fact.maintain_future_bar_1m_coverage_after_delete();
+        end if;
+    end
+    $$
+    """,
+    """
+    do $$
+    begin
+        if not exists (
+            select 1 from pg_trigger
+            where tgrelid = 'fact.future_bar_1m'::regclass
+              and tgname = 'future_bar_1m_coverage_after_key_update'
+              and not tgisinternal
+        ) then
+            create trigger future_bar_1m_coverage_after_key_update
+            after update of product_code, exchange, series_type, bar_time on fact.future_bar_1m
+            for each row execute function fact.maintain_future_bar_1m_coverage_after_key_update();
+        end if;
+    end
+    $$
+    """,
 )
 
 
@@ -265,11 +419,10 @@ class QuoteMuxFutures:
         storage_series_type = _STORAGE_SERIES_TYPE.get(series_type, "")
         frame = query_dataframe(
             """
-            select product_code, exchange, series_type, count(*) as row_count,
-                   min(bar_time) as first_bar_time, max(bar_time) as last_bar_time
-            from fact.future_bar_1m
+            select product_code, exchange, series_type, row_count,
+                   first_bar_time, last_bar_time
+            from fact.future_bar_1m_coverage
             where (%s = '' or series_type = %s)
-            group by product_code, exchange, series_type
             order by series_type, exchange, product_code
             """,
             (storage_series_type, storage_series_type),
