@@ -89,6 +89,10 @@ def post_admin_run_capture(capability_id: str) -> dict[str, object]:
     return QuoteMuxCaptureAdmin().run_capture(capability_id)
 
 
+def post_admin_run_repair(dataset: str, scope: dict[str, object]) -> dict[str, object]:
+    return QuoteMuxCaptureAdmin().run_repair(dataset, scope)
+
+
 def post_admin_run_due_captures() -> tuple[dict[str, object], ...]:
     return QuoteMuxCaptureAdmin().run_due_captures()
 

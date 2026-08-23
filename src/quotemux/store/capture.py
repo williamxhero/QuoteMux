@@ -3,6 +3,8 @@ from __future__ import annotations
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+import hashlib
+import json
 from typing import Callable, Sequence
 from zoneinfo import ZoneInfo
 
@@ -640,6 +642,26 @@ class CaptureRunRepository:
             limit 1
             """,
             (root_capability_id, planned_time),
+        )
+        if _is_empty_dataframe(frame):
+            return None
+        return _run_from_row(frame.iloc[0].to_dict())
+
+    def latest_success_for_repair_fingerprint(self, capability_id: str, fingerprint: str) -> CaptureRun | None:
+        if not _ensure_capture_schema():
+            return None
+        frame = query_dataframe(
+            """
+            select id, capability_id, status, planned_time, started_at, finished_at,
+                   row_count, coverage_count, error_message, detail_json
+            from capability_capture_runs
+            where capability_id = %s
+              and status = 'success'
+              and detail_json ->> 'repair_fingerprint' = %s
+            order by started_at desc
+            limit 1
+            """,
+            (get_capability_config_root(capability_id), fingerprint),
         )
         if _is_empty_dataframe(frame):
             return None
@@ -2136,6 +2158,67 @@ class QuoteMuxCaptureJob:
             return self._run_to_dict(run)
         return self._run_capture_requests(policy, None, {"mode": "scheduled"}, actual_planned_time, lock)
 
+    @staticmethod
+    def repair_fingerprint(dataset: str, scope: dict[str, object]) -> str:
+        root_capability_id = get_capability_config_root(dataset)
+        canonical_scope = _canonical_repair_scope(scope)
+        payload = json.dumps(
+            {"dataset": root_capability_id, "scope": canonical_scope},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def run_repair(self, dataset: str, scope: dict[str, object]) -> dict[str, object]:
+        """Run one explicit, idempotent repair through the existing capture executor."""
+        root_capability_id = get_capability_config_root(dataset)
+        policy = self._get_policy(root_capability_id)
+        canonical_scope = _canonical_repair_scope(scope)
+        fingerprint = self.repair_fingerprint(root_capability_id, canonical_scope)
+        planned_time = self._now_provider().replace(tzinfo=None)
+        detail = {
+            "mode": "repair",
+            "repair_dataset": root_capability_id,
+            "repair_scope": canonical_scope,
+            "repair_fingerprint": fingerprint,
+        }
+        lock = self._locks.create(root_capability_id)
+        if not lock.acquire():
+            run = self._create_finished_run(
+                policy,
+                planned_time,
+                CAPTURE_SKIPPED,
+                0,
+                0,
+                "",
+                {**detail, "reason": "advisory_lock_busy"},
+            )
+            return self._run_to_dict(run)
+        try:
+            existing = self._runs.latest_success_for_repair_fingerprint(root_capability_id, fingerprint)
+            if existing is not None:
+                lock.release()
+                return {**self._run_to_dict(existing), "repair_reused": True}
+            skipped = self._precheck_skip(policy, planned_time)
+            if skipped is not None:
+                lock.release()
+                return {**self._run_to_dict(skipped), "repair_fingerprint": fingerprint}
+        except BaseException:
+            lock.release()
+            raise
+        try:
+            return self._run_capture_requests(
+                policy,
+                (CaptureRequest(root_capability_id, canonical_scope),),
+                detail,
+                planned_time,
+                lock,
+            )
+        except BaseException:
+            lock.release()
+            raise
+
     def _run_capture_requests(
         self,
         policy: CapturePolicy,
@@ -2445,12 +2528,40 @@ class QuoteMuxCaptureJob:
         }
 
 
+def _canonical_repair_scope(scope: dict[str, object]) -> dict[str, object]:
+    if not isinstance(scope, dict):
+        raise TypeError("repair scope must be an object")
+
+    def normalize(value: object, key: str = "") -> object:
+        if isinstance(value, dict):
+            return {
+                str(item_key): normalize(item_value, str(item_key))
+                for item_key, item_value in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            items = [normalize(item) for item in value]
+            if key in {"codes", "concept_ids", "index_codes", "product_codes"}:
+                return sorted(set(str(item) for item in items))
+            return items
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        raise TypeError(f"repair scope contains unsupported value: {type(value).__name__}")
+
+    return normalize(scope)  # type: ignore[return-value]
+
+
 def run_due_captures() -> tuple[dict[str, object], ...]:
     return QuoteMuxCaptureJob().run_due_captures()
 
 
 def run_capture(capability_id: str) -> dict[str, object]:
     return QuoteMuxCaptureJob().run_capture(capability_id)
+
+
+def run_repair(dataset: str, scope: dict[str, object]) -> dict[str, object]:
+    return QuoteMuxCaptureJob().run_repair(dataset, scope)
 
 
 def reconcile_stale_capture_runs(started_before: datetime | None = None) -> dict[str, object]:
