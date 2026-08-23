@@ -645,6 +645,47 @@ class CaptureRunRepository:
             return None
         return _run_from_row(frame.iloc[0].to_dict())
 
+    def list_running_started_before(self, started_before: datetime, capability_id: str = "") -> tuple[CaptureRun, ...]:
+        if not _ensure_capture_schema():
+            raise RuntimeError("capture schema 初始化失败")
+        clauses = ["status = 'running'"]
+        params: list[object] = []
+        if capability_id != "":
+            clauses.append("capability_id = %s")
+            params.append(get_capability_config_root(capability_id))
+        clauses.append("started_at <= %s")
+        params.append(started_before)
+        frame = query_dataframe(
+            f"""
+            select id, capability_id, status, planned_time, started_at, finished_at,
+                   row_count, coverage_count, error_message, detail_json
+            from capability_capture_runs
+            where {" and ".join(clauses)}
+            order by capability_id asc, started_at asc
+            """,
+            tuple(params),
+        )
+        if _is_empty_dataframe(frame):
+            return ()
+        return tuple(_run_from_row(row) for row in frame.to_dict("records"))
+
+    def fail_stale_running(self, run_ids: tuple[int, ...], detail_json: dict[str, object]) -> bool:
+        if run_ids == ():
+            return True
+        if not _ensure_capture_schema():
+            return False
+        return execute_sql(
+            """
+            update capability_capture_runs
+            set status = 'failed',
+                finished_at = now(),
+                error_message = 'stale-reconciled: capture 进程已退出且 capability advisory lock 空闲',
+                detail_json = coalesce(detail_json, '{}'::jsonb) || %s
+            where id = any(%s) and status = 'running'
+            """,
+            (Jsonb(detail_json), list(run_ids)),
+        )
+
     def create(self, capability_id: str, status: str, planned_time: datetime, detail_json: dict[str, object]) -> CaptureRun:
         if not _ensure_capture_schema():
             raise RuntimeError("capture schema 初始化失败")
@@ -743,6 +784,57 @@ class PostgresAdvisoryLock:
 class PostgresAdvisoryLockFactory:
     def create(self, capability_id: str) -> PostgresAdvisoryLock:
         return PostgresAdvisoryLock(capability_id)
+
+
+class CaptureRunMaintenance:
+    """Reconcile orphaned run rows without overriding a live lock owner."""
+
+    def __init__(
+        self,
+        runs: CaptureRunRepository | None = None,
+        locks: PostgresAdvisoryLockFactory | None = None,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._runs = runs or CaptureRunRepository()
+        self._locks = locks or PostgresAdvisoryLockFactory()
+        self._now_provider = now_provider or _current_datetime
+
+    def reconcile_stale_running(self, started_before: datetime | None = None) -> dict[str, object]:
+        cutoff = (started_before or self._now_provider()).replace(tzinfo=None)
+        candidates = self._runs.list_running_started_before(cutoff)
+        capability_ids = sorted({run.capability_id for run in candidates})
+        reconciled_run_ids: list[int] = []
+        active_capability_ids: list[str] = []
+
+        for capability_id in capability_ids:
+            lock = self._locks.create(capability_id)
+            if not lock.acquire():
+                active_capability_ids.append(capability_id)
+                continue
+            try:
+                # A run may finish between the initial scan and lock acquisition.
+                # Re-read while holding the same lock every capture job holds.
+                stale_runs = self._runs.list_running_started_before(cutoff, capability_id)
+                stale_run_ids = tuple(run.id for run in stale_runs)
+                if stale_run_ids == ():
+                    continue
+                detail_json = {
+                    "phase": "maintenance",
+                    "reason": "stale_running_after_process_exit",
+                    "reconciled_at": _serialize_value(cutoff),
+                }
+                if not self._runs.fail_stale_running(stale_run_ids, detail_json):
+                    raise RuntimeError(f"capture running 状态修复失败: {capability_id}")
+                reconciled_run_ids.extend(stale_run_ids)
+            finally:
+                lock.release()
+
+        return {
+            "started_before": _serialize_value(cutoff),
+            "candidate_count": len(candidates),
+            "reconciled_run_ids": reconciled_run_ids,
+            "active_capability_ids": active_capability_ids,
+        }
 
 
 def _chunk(items: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
@@ -2302,3 +2394,8 @@ def run_due_captures() -> tuple[dict[str, object], ...]:
 
 def run_capture(capability_id: str) -> dict[str, object]:
     return QuoteMuxCaptureJob().run_capture(capability_id)
+
+
+def reconcile_stale_capture_runs(started_before: datetime | None = None) -> dict[str, object]:
+    """Fail orphaned running rows whose capability advisory lock is free."""
+    return CaptureRunMaintenance().reconcile_stale_running(started_before)
