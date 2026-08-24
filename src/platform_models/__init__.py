@@ -70,10 +70,36 @@ class ApiModel(BaseModel):
         return {field_name: format_api_dump_value(field_name, value) for field_name, value in payload.items()}
 
 
+class ApiErrorRepairScope(ApiModel):
+    codes: list[str] = Field(default_factory=list, description="Repair scope product or instrument codes.", examples=[[]])
+    include_expired: bool = Field(default=False, description="Whether the repair scope includes expired contracts.", examples=[False])
+
+
+class ApiErrorRepairTemplate(ApiModel):
+    dataset_id: str = Field(description="Dataset identifier accepted by the repair endpoint.", examples=["future_contract_reference"])
+    dataset_version: str | None = Field(default=None, description="Optional expected dataset version; supplied by the owning runtime when known.", examples=[None])
+    scope: ApiErrorRepairScope = Field(default_factory=ApiErrorRepairScope, description="Canonical repair scope.")
+
+
+class ApiErrorDetails(ApiModel):
+    """Bounded structured details for fail-closed data and repair responses."""
+
+    dataset_id: str | None = Field(default=None, description="Dataset whose local publication is incomplete.", examples=["future_contract_reference"])
+    dataset_version: str | None = Field(default=None, description="Dataset version observed by the owning runtime, if available.", examples=["mhd-v1-example"])
+    reason: str | None = Field(default=None, description="Stable machine-readable incompleteness reason.", examples=["published_snapshot_checksum_mismatch"])
+    requested_codes: list[str] = Field(default_factory=list, description="Normalized product codes requested by the caller.", examples=[["rb"]])
+    include_expired: bool | None = Field(default=None, description="Requested catalog expiry scope.", examples=[False])
+    missing_products: list[str] = Field(default_factory=list, description="Configured products missing from a required complete publication.", examples=[["rb"]])
+    missing_fields: list[str] = Field(default_factory=list, description="Required native fields missing from the publication.", examples=[["price_tick"]])
+    blocked_operation: str | None = Field(default=None, description="Operation intentionally refused by the strict public-read boundary.", examples=["source_package:shinny_tqsdk.get_future_contract_catalog"])
+    repair_endpoint: str | None = Field(default=None, description="Admin endpoint that can create the missing local publication.", examples=["/api/admin/data-repairs"])
+    repair_template: ApiErrorRepairTemplate | None = Field(default=None, description="Bounded repair request template; null when no repair is available.")
+
+
 class ApiError(ApiModel):
     code: str
     message: str
-    details: str = ""
+    details: str | ApiErrorDetails = Field(default="", description="Legacy diagnostic text or bounded structured repair/details object.")
 
 
 class StockQuoteItem(ApiModel):
