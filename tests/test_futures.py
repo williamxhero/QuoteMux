@@ -15,6 +15,31 @@ from quotemux.store.capture import CapturePolicy, CaptureRequest, DEFAULT_CAPTUR
 from quotemux.store.default_update_policy import get_capability_update_policy_default
 
 
+def _published_catalog_rows(*, include_expired: bool = False) -> list[dict[str, object]]:
+    snapshot_id = "snapshot-1"
+    captured_at = "2026-08-24 10:12:00"
+    source = {"package_id": "shinny_tqsdk", "source_instance_id": "test", "provider_version": {"availability": "unavailable"}}
+    items = [
+        futures._normalize_catalog_item(
+            FutureContractCatalogItem(
+                provider_symbol=f"{exchange}.{product}2609", contract_symbol=f"{exchange}.{product}2609",
+                product_code=product, exchange=exchange, ins_class="FUTURE",
+                price_tick=1.0, price_decs=0, volume_multiple=10.0,
+            ), snapshot_id=snapshot_id, captured_at=captured_at, source=source,
+        )
+        for product, exchange in futures.PRODUCT_EXCHANGE.items()
+    ]
+    checksum = futures._catalog_content_checksum(items)
+    items = [item.model_copy(update={"content_checksum": checksum}) for item in items]
+    header = {
+        "snapshot_id": snapshot_id, "scope_include_expired": include_expired,
+        "schema_version": futures.FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION, "captured_at": captured_at,
+        "source_package_id": "shinny_tqsdk", "source_instance_id": "test", "content_checksum": checksum,
+        "row_count": len(items), "product_count": len(futures.PRODUCT_EXCHANGE), "complete": True,
+    }
+    return [{**header, "item_provider_symbol": item.provider_symbol, "payload": item.model_dump(mode="json")} for item in items]
+
+
 def test_future_product_map_covers_apex_l0_universe() -> None:
     assert len(futures.PRODUCT_EXCHANGE) == 84
     assert futures.PRODUCT_EXCHANGE["IF"] == "CFFEX"
@@ -271,18 +296,10 @@ def test_tqsdk_p0_contract_capture_dispatches_in_enabled_instance_context(monkey
 
 
 def test_contract_catalog_public_read_is_local_only_and_exposes_normalized_contract(monkeypatch) -> None:
-    payload = FutureContractCatalogItem(
-        provider_symbol="SHFE.rb2610", contract_symbol="SHFE.rb2610", product_code="rb", exchange="SHFE",
-        ins_class="FUTURE", price_tick=1.0, price_decs=0, volume_multiple=10.0,
-    )
-    payload = futures._normalize_catalog_item(
-        payload, snapshot_id="snapshot-1", captured_at="2026-08-24 10:12:00",
-        source={"package_id": "shinny_tqsdk", "kind": "provider_capture"},
-    )
     monkeypatch.setattr(futures, "get_default_source_package_registry", lambda: pytest.fail("GET 不得调用 provider"))
     monkeypatch.setattr(futures, "ensure_future_schema", lambda: pytest.fail("GET 不得运行 DDL"))
     monkeypatch.setattr(futures, "execute_sql", lambda: pytest.fail("GET 不得写库"))
-    monkeypatch.setattr(futures, "query_dataframe", lambda *_args, **_kwargs: pd.DataFrame([{"payload": payload.model_dump(mode="json")}]))
+    monkeypatch.setattr(futures, "query_dataframe", lambda *_args, **_kwargs: pd.DataFrame(_published_catalog_rows()))
 
     item = futures.QuoteMuxFutures().get_contract_catalog("rb")[0]
 
@@ -292,7 +309,7 @@ def test_contract_catalog_public_read_is_local_only_and_exposes_normalized_contr
     assert item.currency == "CNY"
     assert item.lot_size is None and item.asset_class is None
     assert item.commission_open is None and item.initial_margin is None
-    assert item.snapshot_complete is True and item.content_checksum == ""
+    assert item.snapshot_complete is True and len(item.content_checksum) == 64
     assert item.provenance["currency"] == {"kind": "market_rule", "rule_id": "cn_futures_currency_v1"}
     assert item.availability["execution_profile_required"] is True
 
@@ -304,13 +321,67 @@ def test_contract_catalog_public_read_fails_closed_when_snapshot_or_product_is_m
     assert absent.value.details["dataset_id"] == "future_contract_reference"
     assert absent.value.details["repair_endpoint"] == "/api/admin/data-repairs"
     assert absent.value.details["repair_template"] == {
-        "dataset_id": "future_contract_reference", "dataset_version": "",
+        "dataset_id": "future_contract_reference",
         "scope": {"codes": [], "include_expired": False},
     }
 
     with pytest.raises(futures.FutureContractCatalogIncompleteError) as expired:
         futures.QuoteMuxFutures().get_contract_catalog("rb", include_expired=True)
     assert expired.value.details["reason"] == "complete_published_expired_scope_unavailable"
+
+
+@pytest.mark.parametrize("mutation, reason", [
+    (lambda rows: rows.__setitem__(0, {**rows[0], "content_checksum": "bad"}), "published_snapshot_header_inconsistent"),
+    (lambda rows: rows[0].__setitem__("row_count", 1), "published_snapshot_header_inconsistent"),
+    (lambda rows: rows.pop(), "published_snapshot_count_mismatch"),
+])
+def test_contract_catalog_public_read_rejects_corrupt_complete_snapshot(monkeypatch, mutation, reason) -> None:
+    rows = _published_catalog_rows()
+    mutation(rows)
+    monkeypatch.setattr(futures, "query_dataframe", lambda *_args, **_kwargs: pd.DataFrame(rows))
+    with pytest.raises(futures.FutureContractCatalogIncompleteError) as error:
+        futures.QuoteMuxFutures().get_contract_catalog("rb")
+    assert error.value.details["reason"] == reason
+
+
+def test_contract_catalog_expired_scope_is_independent_and_repairable(monkeypatch) -> None:
+    rows = _published_catalog_rows(include_expired=True)
+    seen_params: list[tuple[object, ...]] = []
+
+    def query(_sql: str, params: tuple[object, ...]):
+        seen_params.append(params)
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr(futures, "query_dataframe", query)
+    assert futures.QuoteMuxFutures().get_contract_catalog("rb", include_expired=True)[0].product_code == "rb"
+    assert seen_params == [(True,)]
+
+
+def test_contract_catalog_expired_capture_combines_active_and_expired_rows(monkeypatch) -> None:
+    runtime = futures.QuoteMuxFutures()
+    calls: list[bool] = []
+
+    def handler(products, expired):
+        calls.append(expired)
+        return [
+            FutureContractCatalogItem(
+                provider_symbol=f"{exchange}.{product}2609", contract_symbol=f"{exchange}.{product}2609",
+                product_code=product, exchange=exchange, ins_class="FUTURE",
+                price_tick=1.0, price_decs=0, volume_multiple=10.0,
+            )
+            for product, exchange in products
+        ]
+
+    monkeypatch.setattr(runtime, "_tqsdk_handler", lambda *_args: (object(), handler))
+    monkeypatch.setattr(futures, "ensure_future_schema", lambda: None)
+    published: list[tuple[object, ...]] = []
+    monkeypatch.setattr(runtime, "_publish_contract_catalog_snapshot", lambda *args: published.append(args))
+
+    captured = runtime.capture_contract_catalog(include_expired=True)
+
+    assert calls == [False, True]
+    assert len(captured) == len(futures.PRODUCT_EXCHANGE)
+    assert published[0][-1] is True
 
 
 def test_contract_catalog_capture_rejects_partial_universe_without_publishing(monkeypatch) -> None:
