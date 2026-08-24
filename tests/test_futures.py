@@ -45,6 +45,8 @@ def test_future_product_map_covers_apex_l0_universe() -> None:
     assert futures.PRODUCT_EXCHANGE["IF"] == "CFFEX"
     assert futures.PRODUCT_EXCHANGE["au"] == "SHFE"
     assert futures.PRODUCT_EXCHANGE["MA"] == "CZCE"
+    assert futures.PRODUCT_EXCHANGE["PL"] == "CZCE"
+    assert "PL" not in futures.FUTURE_EXCHANGE_PRODUCTS["DCE"]
 
 
 def test_main_continuous_default_capture_is_daily_at_0030_with_two_day_overlap() -> None:
@@ -288,6 +290,7 @@ def test_tqsdk_p0_contract_capture_dispatches_in_enabled_instance_context(monkey
     assert runtime.get_contract_realtime("SHFE.rb2610,SHFE.rb2610")[0].bid_price5 == 3400.0
     assert calls[0][0] == "catalog"
     assert len(calls[0][1][0]) == 84
+    assert ("PL", "CZCE") in calls[0][1][0]
     assert calls[0][1][1] is False
     assert len(published) == 1
     assert calls[1][0] == "mapping"

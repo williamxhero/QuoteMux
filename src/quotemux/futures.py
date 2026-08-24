@@ -42,8 +42,8 @@ CHINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 FUTURE_EXCHANGE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "CFFEX": ("IF", "IH", "IC", "IM", "T", "TF", "TS", "TL"),
     "SHFE": ("ad", "ag", "al", "ao", "au", "br", "bu", "cu", "fu", "hc", "ni", "op", "pb", "rb", "ru", "sn", "sp", "ss", "wr", "zn"),
-    "DCE": ("a", "b", "bz", "c", "cs", "eb", "eg", "fb", "i", "j", "jd", "jm", "l", "lg", "lh", "m", "p", "pg", "PL", "pp", "rr", "v", "y"),
-    "CZCE": ("AP", "CF", "CJ", "CY", "FG", "JR", "MA", "OI", "PF", "PK", "PR", "PX", "RM", "RS", "SA", "SF", "SH", "SM", "SR", "TA", "UR", "WH", "ZC"),
+    "DCE": ("a", "b", "bz", "c", "cs", "eb", "eg", "fb", "i", "j", "jd", "jm", "l", "lg", "lh", "m", "p", "pg", "pp", "rr", "v", "y"),
+    "CZCE": ("AP", "CF", "CJ", "CY", "FG", "JR", "MA", "OI", "PF", "PK", "PL", "PR", "PX", "RM", "RS", "SA", "SF", "SH", "SM", "SR", "TA", "UR", "WH", "ZC"),
     "INE": ("bc", "ec", "lu", "nr", "sc"),
     "GFEX": ("lc", "pd", "ps", "pt", "si"),
 }
