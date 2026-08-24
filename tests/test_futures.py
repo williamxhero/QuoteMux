@@ -198,7 +198,7 @@ def test_tqsdk_p0_contract_inventory_and_update_policies() -> None:
         )
 
 
-def test_tqsdk_p0_contract_facades_dispatch_in_enabled_instance_context(monkeypatch) -> None:
+def test_tqsdk_p0_contract_capture_dispatches_in_enabled_instance_context(monkeypatch) -> None:
     instance = SourceInstanceConfig(
         instance_id="shinny-tqsdk-default",
         package_id="shinny_tqsdk",
@@ -219,7 +219,14 @@ def test_tqsdk_p0_contract_facades_dispatch_in_enabled_instance_context(monkeypa
     def catalog_handler(products: list[tuple[str, str]], include_expired: bool):
         assert current_source_instance() == instance
         calls.append(("catalog", (products, include_expired)))
-        return [FutureContractCatalogItem(provider_symbol="SHFE.rb2610", contract_symbol="SHFE.rb2610", metadata_time="2026-08-20 09:31:00")]
+        return [
+            FutureContractCatalogItem(
+                provider_symbol=f"{exchange}.{product}2609", contract_symbol=f"{exchange}.{product}2609",
+                product_code=product, exchange=exchange, ins_class="FUTURE",
+                price_tick=1.0, price_decs=0, volume_multiple=10.0,
+            )
+            for product, exchange in products
+        ]
 
     def mapping_handler(products: list[tuple[str, str]]):
         assert current_source_instance() == instance
@@ -241,15 +248,70 @@ def test_tqsdk_p0_contract_facades_dispatch_in_enabled_instance_context(monkeypa
             }[handler_name]
 
     monkeypatch.setattr(futures, "get_default_source_package_registry", lambda: Registry())
+    monkeypatch.setattr(futures, "ensure_future_schema", lambda: None)
     runtime = futures.QuoteMuxFutures(Settings())
+    published: list[object] = []
+    monkeypatch.setattr(runtime, "_publish_contract_catalog_snapshot", lambda *args: published.append(args))
 
-    assert runtime.get_contract_catalog("rb", include_expired=True)[0].provider_symbol == "SHFE.rb2610"
+    captured_catalog = runtime.capture_contract_catalog()
+    assert captured_catalog[0].catalog_schema_version == futures.FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION
+    assert {"ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"} <= {item.product_code for item in captured_catalog}
     assert runtime.get_main_contract_mappings()[0].contract_symbol == "CFFEX.IF2609"
     assert runtime.get_contract_realtime("SHFE.rb2610,SHFE.rb2610")[0].bid_price5 == 3400.0
-    assert calls[0] == ("catalog", ([("rb", "SHFE")], True))
+    assert calls[0][0] == "catalog"
+    assert len(calls[0][1][0]) == 84
+    assert calls[0][1][1] is False
+    assert len(published) == 1
     assert calls[1][0] == "mapping"
     assert len(calls[1][1]) == 84
     assert calls[2] == ("realtime", ["SHFE.rb2610"])
+
+
+def test_contract_catalog_public_read_is_local_only_and_exposes_normalized_contract(monkeypatch) -> None:
+    payload = FutureContractCatalogItem(
+        provider_symbol="SHFE.rb2610", contract_symbol="SHFE.rb2610", product_code="rb", exchange="SHFE",
+        ins_class="FUTURE", price_tick=1.0, price_decs=0, volume_multiple=10.0,
+    )
+    payload = futures._normalize_catalog_item(
+        payload, snapshot_id="snapshot-1", captured_at="2026-08-24 10:12:00",
+        source={"package_id": "shinny_tqsdk", "kind": "provider_capture"},
+    )
+    monkeypatch.setattr(futures, "get_default_source_package_registry", lambda: pytest.fail("GET 不得调用 provider"))
+    monkeypatch.setattr(futures, "ensure_future_schema", lambda: pytest.fail("GET 不得运行 DDL"))
+    monkeypatch.setattr(futures, "execute_sql", lambda: pytest.fail("GET 不得写库"))
+    monkeypatch.setattr(futures, "query_dataframe", lambda *_args, **_kwargs: pd.DataFrame([{"payload": payload.model_dump(mode="json")}]))
+
+    item = futures.QuoteMuxFutures().get_contract_catalog("rb")[0]
+
+    assert item.tick_size == item.price_tick == 1.0
+    assert item.price_precision == item.price_decs == 0
+    assert item.multiplier == item.volume_multiple == 10.0
+    assert item.currency == "CNY"
+    assert item.lot_size is None and item.asset_class is None
+    assert item.commission_open is None and item.initial_margin is None
+    assert item.provenance["currency"] == {"kind": "market_rule", "rule_id": "cn_futures_currency_v1"}
+    assert item.availability["execution_profile_required"] is True
+
+
+def test_contract_catalog_public_read_fails_closed_when_snapshot_or_product_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr(futures, "query_dataframe", lambda *_args, **_kwargs: pd.DataFrame())
+    with pytest.raises(futures.FutureContractCatalogIncompleteError) as absent:
+        futures.QuoteMuxFutures().get_contract_catalog("rb")
+    assert absent.value.details["dataset_id"] == "future_contract_reference"
+    assert absent.value.details["repair_endpoint"] == "/api/admin/data-repairs"
+
+    with pytest.raises(futures.FutureContractCatalogIncompleteError) as expired:
+        futures.QuoteMuxFutures().get_contract_catalog("rb", include_expired=True)
+    assert expired.value.details["reason"] == "complete_published_expired_scope_unavailable"
+
+
+def test_contract_catalog_capture_rejects_partial_universe_without_publishing(monkeypatch) -> None:
+    runtime = futures.QuoteMuxFutures()
+    monkeypatch.setattr(runtime, "_tqsdk_handler", lambda *_args: (object(), lambda *_args: []))
+    monkeypatch.setattr(runtime, "_publish_contract_catalog_snapshot", lambda *_args: pytest.fail("partial capture must not publish"))
+
+    with pytest.raises(ValueError, match="未返回任何数据"):
+        runtime.capture_contract_catalog()
 
 
 def test_tqsdk_p0_contract_realtime_requires_symbols() -> None:

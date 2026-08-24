@@ -842,6 +842,27 @@ class FutureContractCatalogItem(ApiModel):
     min_market_order_volume: int | None = Field(default=None, description="市价单最小下单量；未知为 null。", examples=[1])
     metadata_time: str = Field(default="", description="本条 TqSdk 元数据的提供或采集时间，Asia/Shanghai；未知为空。", examples=["2026-08-20 09:31:00"])
     raw_metadata: dict[str, object] = Field(default_factory=dict, description="未进入稳定字段的 TqSdk 原始 metadata，保持 provider 口径。", examples=[{"exchange_id": "SHFE"}])
+    # Normalized runtime fields deliberately do not turn exchange execution assumptions
+    # into facts.  TqSdk catalog metadata is authoritative only for the native contract
+    # specification fields above.
+    tick_size: float | None = Field(default=None, description="规范化最小变动价位；等同于 price_tick。", examples=[1.0])
+    price_precision: int | None = Field(default=None, description="规范化报价小数位；等同于 price_decs。", examples=[0])
+    multiplier: float | None = Field(default=None, description="规范化合约乘数；等同于 volume_multiple。", examples=[10.0])
+    currency: str | None = Field(default=None, description="合约计价币种；中国期货目录当前为 CNY。", examples=["CNY"])
+    lot_size: float | None = Field(default=None, description="交易运行时每手最小下单单位；catalog 未声明时为 null，不能由 min_order_volume 推断。", examples=[None])
+    asset_class: str | None = Field(default=None, description="执行资产类别；需要执行 profile 映射，当前 catalog 不编造。", examples=[None])
+    commission_open: dict[str, object] | None = Field(default=None, description="开仓手续费；执行 profile 未提供时为 null。", examples=[None])
+    commission_close: dict[str, object] | None = Field(default=None, description="平仓手续费；执行 profile 未提供时为 null。", examples=[None])
+    commission_close_today: dict[str, object] | None = Field(default=None, description="平今手续费；执行 profile 未提供时为 null。", examples=[None])
+    initial_margin: dict[str, object] | None = Field(default=None, description="初始保证金；执行 profile 未提供时为 null。", examples=[None])
+    maintenance_margin: dict[str, object] | None = Field(default=None, description="维持保证金；执行 profile 未提供时为 null。", examples=[None])
+    catalog_schema_version: str = Field(default="future_contract_catalog_v1", description="已发布合约目录快照 schema 版本。", examples=["future_contract_catalog_v1"])
+    catalog_dataset_version: str = Field(default="", description="由 MarketHub 注入的上层 dataset version；QuoteMux 不伪造。", examples=[""])
+    snapshot_id: str = Field(default="", description="本条所属的不可变已发布快照标识。", examples=["b9594cd7-6e5c-4c4d-90bb-3d4d96dd5f70"])
+    captured_at: str = Field(default="", description="本地 capture 完成时间；不是 provider metadata_time。", examples=["2026-08-24 10:12:00"])
+    source: dict[str, object] = Field(default_factory=dict, description="本快照原始数据 source 身份与实例证据。", examples=[{"package_id": "shinny_tqsdk"}])
+    availability: dict[str, object] = Field(default_factory=dict, description="字段可用性和运行时映射状态。", examples=[{"execution_profile_required": True}])
+    provenance: dict[str, object] = Field(default_factory=dict, description="规范化字段的来源规则；未提供的执行字段会明确标记。", examples=[{"currency": {"kind": "market_rule", "rule_id": "cn_futures_currency_v1"}}])
 
 
 class FutureMainContractMappingItem(ApiModel):

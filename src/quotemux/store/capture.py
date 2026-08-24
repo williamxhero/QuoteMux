@@ -1979,7 +1979,9 @@ def _policy_local_now(policy: CapturePolicy, now: datetime) -> datetime:
 
 
 RUNTIME_METHODS: dict[str, tuple[str, str]] = {
-    "futures.contracts.catalog": ("futures", "get_contract_catalog"),
+    # The public facade is a strict local read.  Capture alone is allowed to
+    # invoke the provider and publish a new immutable catalog snapshot.
+    "futures.contracts.catalog": ("futures", "capture_contract_catalog"),
     "futures.contracts.main_mapping": ("futures", "get_main_contract_mappings"),
     "concepts.catalog": ("concepts", "get_catalog"),
     "concepts.indicators.money_flow": ("concepts", "get_money_flow"),
@@ -2326,6 +2328,13 @@ class QuoteMuxCaptureJob:
         return CAPTURE_SUCCESS
 
     def _run_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        if request.capability_id == "futures.contracts.catalog":
+            # Catalog publication is an atomic snapshot transaction owned by the
+            # futures runtime; do not also feed it through mutable generic cache rows.
+            items = tuple(self._runtime.futures.capture_contract_catalog(**request.request_identity))
+            if items == ():
+                raise RuntimeError("期货合约目录 capture 未发布任何快照行")
+            return _CaptureBatchResult(items, len(items), row_count_override=len(items))
         if request.capability_id == "futures.quotes.main_continuous.1m":
             result = self._runtime.futures.update_main_continuous(**request.request_identity)
             errors = tuple(str(item.get("error", "")) for item in result.get("errors", []) if isinstance(item, dict))

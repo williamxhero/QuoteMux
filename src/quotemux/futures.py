@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
+import json
 from threading import Lock
 import time as time_module
 from typing import Iterable
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from platform_models import FutureBar1mItem, FutureContractCatalogItem, FutureContractRealtimeQuoteItem, FutureMainContractMappingItem, FutureRealtimeQuoteItem, FutureSeriesCoverageItem
@@ -45,6 +48,32 @@ FUTURE_EXCHANGE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "GFEX": ("lc", "pd", "ps", "pt", "si"),
 }
 PRODUCT_EXCHANGE = {product: exchange for exchange, products in FUTURE_EXCHANGE_PRODUCTS.items() for product in products}
+FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION = "future_contract_catalog_v1"
+
+
+class FutureContractCatalogIncompleteError(RuntimeError):
+    """A public catalog read cannot be answered from a complete local snapshot."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        requested_codes: tuple[str, ...] = (),
+        include_expired: bool = False,
+        missing_products: tuple[str, ...] = (),
+        missing_fields: tuple[str, ...] = (),
+    ) -> None:
+        self.details: dict[str, object] = {
+            "dataset_id": "future_contract_reference",
+            "reason": reason,
+            "requested_codes": list(requested_codes),
+            "include_expired": include_expired,
+            "missing_products": list(missing_products),
+            "missing_fields": list(missing_fields),
+            "repair_endpoint": "/api/admin/data-repairs",
+            "repair_template": {"capability_id": FUTURE_CONTRACT_CATALOG_CAPABILITY_ID, "codes": [], "include_expired": False},
+        }
+        super().__init__(f"期货合约目录本地数据不完整: {reason}")
 
 FUTURE_SCHEMA_SQL = (
     """
@@ -267,6 +296,40 @@ FUTURE_SCHEMA_SQL = (
     end
     $$
     """,
+    """
+    create table if not exists ref.future_contract_catalog_snapshot (
+        snapshot_id text primary key,
+        scope_include_expired boolean not null,
+        schema_version text not null,
+        captured_at timestamp without time zone not null,
+        source_package_id text not null,
+        source_instance_id text not null default '',
+        content_checksum text not null,
+        row_count integer not null check (row_count > 0),
+        product_count integer not null check (product_count > 0),
+        complete boolean not null,
+        created_at timestamp with time zone not null default now(),
+        check (complete)
+    )
+    """,
+    """
+    create table if not exists ref.future_contract_catalog_snapshot_item (
+        snapshot_id text not null references ref.future_contract_catalog_snapshot(snapshot_id),
+        provider_symbol text not null,
+        product_code text not null,
+        exchange text not null,
+        payload jsonb not null,
+        primary key (snapshot_id, provider_symbol)
+    )
+    """,
+    "create index if not exists future_contract_catalog_snapshot_item_product_idx on ref.future_contract_catalog_snapshot_item (snapshot_id, product_code, exchange)",
+    """
+    create table if not exists ref.future_contract_catalog_publication (
+        scope_include_expired boolean primary key,
+        snapshot_id text not null references ref.future_contract_catalog_snapshot(snapshot_id),
+        published_at timestamp with time zone not null default now()
+    )
+    """,
 )
 
 _FUTURE_SCHEMA_READY = False
@@ -348,6 +411,80 @@ def _call_provider_with_retry(handler, *args: object):
     raise last_error
 
 
+def _catalog_availability() -> dict[str, object]:
+    return {
+        "native_contract_spec": True,
+        "execution_profile_required": True,
+        "lot_size": False,
+        "commissions": False,
+        "margins": False,
+    }
+
+
+def _catalog_provenance() -> dict[str, object]:
+    return {
+        "tick_size": {"kind": "provider_field", "field": "price_tick"},
+        "price_precision": {"kind": "provider_field", "field": "price_decs"},
+        "multiplier": {"kind": "provider_field", "field": "volume_multiple"},
+        "currency": {"kind": "market_rule", "rule_id": "cn_futures_currency_v1"},
+        "execution": {"kind": "unavailable", "reason": "execution_profile_required"},
+    }
+
+
+def _normalize_catalog_item(
+    item: FutureContractCatalogItem,
+    *,
+    snapshot_id: str,
+    captured_at: str,
+    source: dict[str, object],
+) -> FutureContractCatalogItem:
+    return item.model_copy(
+        update={
+            "tick_size": item.price_tick,
+            "price_precision": item.price_decs,
+            "multiplier": item.volume_multiple,
+            "currency": "CNY",
+            "lot_size": None,
+            "asset_class": None,
+            "commission_open": None,
+            "commission_close": None,
+            "commission_close_today": None,
+            "initial_margin": None,
+            "maintenance_margin": None,
+            "catalog_schema_version": FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION,
+            "catalog_dataset_version": "",
+            "snapshot_id": snapshot_id,
+            "captured_at": captured_at,
+            "source": source,
+            "availability": _catalog_availability(),
+            "provenance": _catalog_provenance(),
+        }
+    )
+
+
+def _validate_catalog_capture(items: list[FutureContractCatalogItem], products: tuple[str, ...]) -> None:
+    if items == []:
+        raise ValueError("期货合约目录采集未返回任何数据")
+    seen_symbols: set[str] = set()
+    covered_products: set[str] = set()
+    for item in items:
+        if item.provider_symbol == "" or item.provider_symbol in seen_symbols:
+            raise ValueError(f"期货合约目录 provider_symbol 缺失或重复: {item.provider_symbol}")
+        seen_symbols.add(item.provider_symbol)
+        if item.ins_class != "FUTURE":
+            raise ValueError(f"期货合约目录包含非 FUTURE 项: {item.provider_symbol}")
+        if item.product_code not in PRODUCT_EXCHANGE or PRODUCT_EXCHANGE[item.product_code] != item.exchange:
+            raise ValueError(f"期货合约目录包含未知国内品种或交易所: {item.provider_symbol}")
+        if item.product_code not in products:
+            raise ValueError(f"期货合约目录超出请求 scope: {item.provider_symbol}")
+        if item.price_tick is None or item.price_decs is None or item.volume_multiple is None:
+            raise ValueError(f"期货合约目录缺少 native 规格: {item.provider_symbol}")
+        covered_products.add(item.product_code)
+    missing = tuple(product for product in products if product not in covered_products)
+    if missing:
+        raise ValueError(f"期货合约目录覆盖不完整: missing={','.join(missing)}")
+
+
 class QuoteMuxFutures:
     def __init__(self, settings: QuoteMuxSettings | None = None) -> None:
         self._settings = settings or QuoteMuxSettings()
@@ -375,9 +512,136 @@ class QuoteMuxFutures:
         include_expired: bool = False,
     ) -> list[FutureContractCatalogItem]:
         products = normalize_product_codes(codes)
+        # Public reads intentionally do not call ensure_future_schema: a missing table
+        # is data-incomplete, not permission to run DDL or contact the provider.
+        if include_expired:
+            raise FutureContractCatalogIncompleteError(
+                "complete_published_expired_scope_unavailable",
+                requested_codes=products,
+                include_expired=True,
+            )
+        requested_products = products or tuple(PRODUCT_EXCHANGE)
+        frame = query_dataframe(
+            """
+            select item.payload
+            from ref.future_contract_catalog_publication publication
+            join ref.future_contract_catalog_snapshot snapshot
+              on snapshot.snapshot_id = publication.snapshot_id
+            join ref.future_contract_catalog_snapshot_item item
+              on item.snapshot_id = snapshot.snapshot_id
+            where publication.scope_include_expired = false
+              and snapshot.complete = true
+              and item.product_code = any(%s)
+            order by item.product_code, item.provider_symbol
+            """,
+            (list(requested_products),),
+        )
+        if frame.empty:
+            raise FutureContractCatalogIncompleteError("no_complete_published_snapshot", requested_codes=products)
+        items: list[FutureContractCatalogItem] = []
+        for row in frame.to_dict("records"):
+            payload = row.get("payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise FutureContractCatalogIncompleteError("invalid_published_snapshot_payload", requested_codes=products)
+            items.append(FutureContractCatalogItem.model_validate(payload))
+        available = {item.product_code for item in items}
+        missing = tuple(product for product in requested_products if product not in available)
+        if missing:
+            raise FutureContractCatalogIncompleteError(
+                "requested_product_absent_from_published_snapshot",
+                requested_codes=products,
+                missing_products=missing,
+            )
+        return items
+
+    def capture_contract_catalog(
+        self,
+        codes: str | Iterable[str] = (),
+        include_expired: bool = False,
+    ) -> list[FutureContractCatalogItem]:
+        """Fetch and atomically publish the only catalog scope currently supported.
+
+        This method is capture/admin-only.  Its empty scope deliberately means the
+        configured domestic universe rather than the provider's unbounded universe.
+        """
+        products = normalize_product_codes(codes) or tuple(PRODUCT_EXCHANGE)
+        if products != tuple(PRODUCT_EXCHANGE):
+            raise ValueError("catalog capture 仅支持配置的完整国内 84 品种 scope")
+        if include_expired:
+            raise ValueError("当前 catalog capture 仅支持完整国内非到期 scope")
         source_instance, handler = self._tqsdk_handler(FUTURE_CONTRACT_CATALOG_CAPABILITY_ID, "get_future_contract_catalog")
         with use_source_instance(source_instance):
-            return list(handler([(product_code, PRODUCT_EXCHANGE[product_code]) for product_code in products], include_expired))
+            raw_items = list(handler([(product_code, PRODUCT_EXCHANGE[product_code]) for product_code in products], False))
+        _validate_catalog_capture(raw_items, products)
+        captured_at = _format_time(_china_market_now())
+        snapshot_id = str(uuid4())
+        source = {
+            "package_id": REALTIME_MAIN_CONTINUOUS_PROVIDER_ID,
+            "instance_id": str(getattr(source_instance, "instance_id", "")),
+            "kind": "provider_capture",
+        }
+        items = [_normalize_catalog_item(item, snapshot_id=snapshot_id, captured_at=captured_at, source=source) for item in raw_items]
+        encoded_payloads = [item.model_dump(mode="json") for item in items]
+        checksum = hashlib.sha256(
+            json.dumps(encoded_payloads, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        ensure_future_schema()
+        self._publish_contract_catalog_snapshot(
+            snapshot_id, captured_at, source, checksum, products, items, encoded_payloads
+        )
+        return items
+
+    def _publish_contract_catalog_snapshot(
+        self,
+        snapshot_id: str,
+        captured_at: str,
+        source: dict[str, object],
+        checksum: str,
+        products: tuple[str, ...],
+        items: list[FutureContractCatalogItem],
+        encoded_payloads: list[dict[str, object]],
+    ) -> None:
+        connection = _acquire_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    insert into ref.future_contract_catalog_snapshot (
+                        snapshot_id, scope_include_expired, schema_version, captured_at,
+                        source_package_id, source_instance_id, content_checksum,
+                        row_count, product_count, complete
+                    ) values (%s, false, %s, %s::timestamp, %s, %s, %s, %s, %s, true)
+                    """,
+                    (snapshot_id, FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION, captured_at,
+                     REALTIME_MAIN_CONTINUOUS_PROVIDER_ID, source["instance_id"], checksum,
+                     len(items), len(products)),
+                )
+                with cursor.copy(
+                    """
+                    copy ref.future_contract_catalog_snapshot_item
+                        (snapshot_id, provider_symbol, product_code, exchange, payload)
+                    from stdin
+                    """
+                ) as copy:
+                    for item, payload in zip(items, encoded_payloads, strict=True):
+                        copy.write_row((snapshot_id, item.provider_symbol, item.product_code, item.exchange, json.dumps(payload, ensure_ascii=False)))
+                cursor.execute(
+                    """
+                    insert into ref.future_contract_catalog_publication (scope_include_expired, snapshot_id)
+                    values (false, %s)
+                    on conflict (scope_include_expired) do update set
+                        snapshot_id = excluded.snapshot_id, published_at = now()
+                    """,
+                    (snapshot_id,),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            _release_connection(connection)
 
     def get_main_contract_mappings(
         self,
