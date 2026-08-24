@@ -783,6 +783,48 @@ class CaptureRunRepository:
             (status, row_count, coverage_count, error_message, Jsonb(detail_json), run_id),
         )
 
+    def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> CaptureRun:
+        """Atomically attach MarketHub's finalized dataset evidence to one repair run."""
+        if not _ensure_capture_schema():
+            raise RuntimeError("capture schema 初始化失败")
+        if not isinstance(publication, dict):
+            raise TypeError("publication 必须是对象")
+        snapshot_id = str(publication.get("snapshot_id", ""))
+        checksum = str(publication.get("content_checksum", ""))
+        if snapshot_id == "" or checksum == "":
+            raise ValueError("publication 必须包含 snapshot_id 和 content_checksum")
+        connection = psycopg.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER,
+            password=DB_PASSWORD, connect_timeout=DB_CONNECT_TIMEOUT, row_factory=dict_row,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    update capability_capture_runs
+                    set detail_json = jsonb_set(detail_json, '{publication}', %s::jsonb, true)
+                    where id = %s
+                      and capability_id = 'futures.contracts.catalog'
+                      and status = 'success'
+                      and detail_json ->> 'mode' = 'repair'
+                      and detail_json -> 'publication' ->> 'snapshot_id' = %s
+                      and detail_json -> 'publication' ->> 'content_checksum' = %s
+                    returning id, capability_id, status, planned_time, started_at, finished_at,
+                              row_count, coverage_count, error_message, detail_json
+                    """,
+                    (Jsonb(publication), run_id, snapshot_id, checksum),
+                )
+                row = cursor.fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if row is None:
+            raise ValueError("repair run 不存在、未成功、非 catalog 或 publication snapshot/checksum 不匹配")
+        return _run_from_row(row)
+
 
 class PostgresAdvisoryLock:
     def __init__(self, capability_id: str) -> None:
@@ -2191,7 +2233,13 @@ class QuoteMuxCaptureJob:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def run_repair(self, dataset: str, scope: dict[str, object], dataset_version: str = "") -> dict[str, object]:
+    def run_repair(
+        self,
+        dataset: str,
+        scope: dict[str, object],
+        dataset_version: str = "",
+        locked_precondition: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
         """Run one explicit, idempotent repair through the existing capture executor."""
         root_capability_id = get_capability_config_root(dataset)
         policy = self._get_policy(root_capability_id)
@@ -2218,6 +2266,11 @@ class QuoteMuxCaptureJob:
             )
             return self._run_to_dict(run)
         try:
+            # Callers with an external dataset-version gate re-check only after
+            # this capability's advisory lock is held.  This closes the stale
+            # repair window between an API precheck and capture execution.
+            if locked_precondition is not None:
+                locked_precondition()
             existing = self._runs.latest_success_for_repair_fingerprint(root_capability_id, fingerprint)
             if existing is not None:
                 lock.release()
@@ -2245,6 +2298,10 @@ class QuoteMuxCaptureJob:
         run = self._runs.get_by_id(run_id)
         if run is None or run.detail_json.get("mode") != "repair":
             raise KeyError(f"未知 repair run: {run_id}")
+        return self._run_to_dict(run)
+
+    def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> dict[str, object]:
+        run = self._runs.finalize_catalog_repair_publication(run_id, publication)
         return self._run_to_dict(run)
 
     def _run_capture_requests(
