@@ -73,7 +73,7 @@ class FutureContractCatalogIncompleteError(RuntimeError):
             "repair_endpoint": "/api/admin/data-repairs",
             "repair_template": {
                 "dataset_id": "future_contract_reference",
-                "scope": {"codes": [], "include_expired": False},
+                "scope": {"codes": [], "include_expired": include_expired},
             },
         }
         super().__init__(f"期货合约目录本地数据不完整: {reason}")

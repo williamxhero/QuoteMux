@@ -328,6 +328,7 @@ def test_contract_catalog_public_read_fails_closed_when_snapshot_or_product_is_m
     with pytest.raises(futures.FutureContractCatalogIncompleteError) as expired:
         futures.QuoteMuxFutures().get_contract_catalog("rb", include_expired=True)
     assert expired.value.details["reason"] == "complete_published_expired_scope_unavailable"
+    assert expired.value.details["repair_template"]["scope"] == {"codes": [], "include_expired": True}
 
 
 @pytest.mark.parametrize("mutation, reason", [
