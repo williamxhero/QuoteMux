@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from quotemux.store.capture import CAPTURE_SUCCESS, CapturePolicy, CaptureRun, QuoteMuxCaptureJob
+from quotemux.store.admin import QuoteMuxCaptureAdmin
 
 
 class _Policies:
@@ -137,6 +138,22 @@ def test_repair_runs_locked_precondition_before_reuse_or_capture_and_releases_on
             "bars-v2", lambda: (_ for _ in ()).throw(RuntimeError("stale dataset version")),
         )
     assert failing_locks.value.released is True
+
+
+def test_capture_admin_preserves_legacy_three_argument_repair_job_call() -> None:
+    class LegacyJob:
+        def __init__(self) -> None:
+            self.args: tuple[object, ...] = ()
+
+        def run_repair(self, dataset, scope, dataset_version):
+            self.args = (dataset, scope, dataset_version)
+            return {"status": CAPTURE_SUCCESS}
+
+    job = LegacyJob()
+    admin = QuoteMuxCaptureAdmin(job=job)
+
+    assert admin.run_repair("stocks.quotes.intraday", {"codes": ["600000"]}, "bars-v2")["status"] == CAPTURE_SUCCESS
+    assert job.args == ("stocks.quotes.intraday", {"codes": ["600000"]}, "bars-v2")
 
 
 def test_repair_different_dataset_version_does_not_reuse_previous_success(monkeypatch) -> None:

@@ -176,9 +176,12 @@ class QuoteMuxCaptureAdmin:
         dataset_version: str = "",
         locked_precondition: Callable[[], None] | None = None,
     ) -> dict[str, object]:
-        return self._job.run_repair(
-            get_capability_config_root(dataset), scope, dataset_version, locked_precondition
-        )
+        root_dataset = get_capability_config_root(dataset)
+        if locked_precondition is None:
+            # Keep third-party/legacy job implementations on the original public
+            # three-argument contract.
+            return self._job.run_repair(root_dataset, scope, dataset_version)
+        return self._job.run_repair(root_dataset, scope, dataset_version, locked_precondition)
 
     def get_repair_run(self, run_id: int) -> dict[str, object]:
         return self._job.get_repair_run(run_id)
