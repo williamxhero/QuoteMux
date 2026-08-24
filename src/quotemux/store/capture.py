@@ -155,6 +155,7 @@ class CaptureExecutionResult:
     coverage_count: int
     partial_batches: tuple[dict[str, object], ...]
     failed_batches: tuple[dict[str, object], ...]
+    publication: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ class _CaptureBatchResult:
     store_write_count: int
     partial_issues: tuple[str, ...] = ()
     row_count_override: int | None = None
+    publication: dict[str, object] | None = None
 
 
 def _default_profile_for_capability(capability_id: str) -> str:
@@ -2274,6 +2276,10 @@ class QuoteMuxCaptureJob:
                 "partial_batches": list(result.partial_batches),
                 "failed_batches": list(result.failed_batches),
             }
+            if status == CAPTURE_SUCCESS and result.publication is not None:
+                # Evidence is from the snapshot this invocation published, never
+                # re-read from the mutable current-publication pointer.
+                detail_json["publication"] = result.publication
             self._runs.finish(run.id, status, result.row_count, result.coverage_count, error_message, detail_json)
             return self._run_to_dict(self._merge_finished_run(run, status, result.row_count, result.coverage_count, error_message, detail_json))
         except BaseException as exc:
@@ -2295,11 +2301,16 @@ class QuoteMuxCaptureJob:
         coverage_count = 0
         partial_batches: list[dict[str, object]] = []
         failed_batches: list[dict[str, object]] = []
+        publication: dict[str, object] | None = None
         for request in requests:
             try:
                 batch_result = self._run_capture_batch(request)
                 row_count += batch_result.row_count_override if batch_result.row_count_override is not None else len(batch_result.items)
                 coverage_count += batch_result.store_write_count
+                if batch_result.publication is not None:
+                    if publication is not None:
+                        raise RuntimeError("单个 capture run 不能记录多个 catalog publication")
+                    publication = batch_result.publication
                 for issue in batch_result.partial_issues:
                     partial_batches.append({"request_identity": request.request_identity, "error": issue})
             except Exception as exc:
@@ -2318,7 +2329,7 @@ class QuoteMuxCaptureJob:
             failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未获取到任何数据"})
         if policy.capability_id in {"concepts.quotes.daily", "boards.quotes.daily"} and row_count > 0 and coverage_count == 0:
             failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未写入事实表"})
-        return CaptureExecutionResult(row_count, coverage_count, tuple(partial_batches), tuple(failed_batches))
+        return CaptureExecutionResult(row_count, coverage_count, tuple(partial_batches), tuple(failed_batches), publication)
 
     def _execution_status(self, result: CaptureExecutionResult) -> str:
         if result.failed_batches != ():
@@ -2334,7 +2345,19 @@ class QuoteMuxCaptureJob:
             items = tuple(self._runtime.futures.capture_contract_catalog(**request.request_identity))
             if items == ():
                 raise RuntimeError("期货合约目录 capture 未发布任何快照行")
-            return _CaptureBatchResult(items, len(items), row_count_override=len(items))
+            first = items[0]
+            publication = {
+                "snapshot_id": first.snapshot_id,
+                "catalog_dataset_version": first.catalog_dataset_version,
+                "content_checksum": first.content_checksum,
+                "captured_at": first.captured_at,
+                "source": first.source,
+                "schema_version": first.catalog_schema_version,
+                "row_count": len(items),
+                "product_count": len({item.product_code for item in items}),
+                "scope": {"codes": [], "include_expired": bool(request.request_identity.get("include_expired", False))},
+            }
+            return _CaptureBatchResult(items, len(items), row_count_override=len(items), publication=publication)
         if request.capability_id == "futures.quotes.main_continuous.1m":
             result = self._runtime.futures.update_main_continuous(**request.request_identity)
             errors = tuple(str(item.get("error", "")) for item in result.get("errors", []) if isinstance(item, dict))
