@@ -71,7 +71,11 @@ class FutureContractCatalogIncompleteError(RuntimeError):
             "missing_products": list(missing_products),
             "missing_fields": list(missing_fields),
             "repair_endpoint": "/api/admin/data-repairs",
-            "repair_template": {"capability_id": FUTURE_CONTRACT_CATALOG_CAPABILITY_ID, "codes": [], "include_expired": False},
+            "repair_template": {
+                "dataset_id": "future_contract_reference",
+                "dataset_version": "",
+                "scope": {"codes": [], "include_expired": False},
+            },
         }
         super().__init__(f"期货合约目录本地数据不完整: {reason}")
 
@@ -454,6 +458,7 @@ def _normalize_catalog_item(
             "catalog_schema_version": FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION,
             "catalog_dataset_version": "",
             "snapshot_id": snapshot_id,
+            "snapshot_complete": True,
             "captured_at": captured_at,
             "source": source,
             "availability": _catalog_availability(),
@@ -579,14 +584,17 @@ class QuoteMuxFutures:
         snapshot_id = str(uuid4())
         source = {
             "package_id": REALTIME_MAIN_CONTINUOUS_PROVIDER_ID,
-            "instance_id": str(getattr(source_instance, "instance_id", "")),
+            "source_instance_id": str(getattr(source_instance, "instance_id", "")),
+            "provider_version": "",
             "kind": "provider_capture",
         }
         items = [_normalize_catalog_item(item, snapshot_id=snapshot_id, captured_at=captured_at, source=source) for item in raw_items]
-        encoded_payloads = [item.model_dump(mode="json") for item in items]
+        checksum_payloads = [item.model_dump(mode="json") for item in items]
         checksum = hashlib.sha256(
-            json.dumps(encoded_payloads, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(checksum_payloads, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+        items = [item.model_copy(update={"content_checksum": checksum}) for item in items]
+        encoded_payloads = [item.model_dump(mode="json") for item in items]
         ensure_future_schema()
         self._publish_contract_catalog_snapshot(
             snapshot_id, captured_at, source, checksum, products, items, encoded_payloads
@@ -615,7 +623,7 @@ class QuoteMuxFutures:
                     ) values (%s, false, %s, %s::timestamp, %s, %s, %s, %s, %s, true)
                     """,
                     (snapshot_id, FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION, captured_at,
-                     REALTIME_MAIN_CONTINUOUS_PROVIDER_ID, source["instance_id"], checksum,
+                     REALTIME_MAIN_CONTINUOUS_PROVIDER_ID, source["source_instance_id"], checksum,
                      len(items), len(products)),
                 )
                 with cursor.copy(

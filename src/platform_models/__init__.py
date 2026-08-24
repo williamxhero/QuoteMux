@@ -859,6 +859,8 @@ class FutureContractCatalogItem(ApiModel):
     catalog_schema_version: str = Field(default="future_contract_catalog_v1", description="已发布合约目录快照 schema 版本。", examples=["future_contract_catalog_v1"])
     catalog_dataset_version: str = Field(default="", description="由 MarketHub 注入的上层 dataset version；QuoteMux 不伪造。", examples=[""])
     snapshot_id: str = Field(default="", description="本条所属的不可变已发布快照标识。", examples=["b9594cd7-6e5c-4c4d-90bb-3d4d96dd5f70"])
+    snapshot_complete: bool = Field(default=False, description="所属快照是否已通过完整性校验并原子发布。", examples=[True])
+    content_checksum: str = Field(default="", description="快照内容 SHA-256；校验内容不包含本字段自身。", examples=["d0a82d93f0b1470d8834d38817b5876e2dfa0a9b436ca9534ab1f8ad391c1a1e"])
     captured_at: str = Field(default="", description="本地 capture 完成时间；不是 provider metadata_time。", examples=["2026-08-24 10:12:00"])
     source: dict[str, object] = Field(default_factory=dict, description="本快照原始数据 source 身份与实例证据。", examples=[{"package_id": "shinny_tqsdk"}])
     availability: dict[str, object] = Field(default_factory=dict, description="字段可用性和运行时映射状态。", examples=[{"execution_profile_required": True}])

@@ -255,6 +255,9 @@ def test_tqsdk_p0_contract_capture_dispatches_in_enabled_instance_context(monkey
 
     captured_catalog = runtime.capture_contract_catalog()
     assert captured_catalog[0].catalog_schema_version == futures.FUTURE_CONTRACT_CATALOG_SCHEMA_VERSION
+    assert captured_catalog[0].snapshot_complete is True
+    assert len(captured_catalog[0].content_checksum) == 64
+    assert captured_catalog[0].source["source_instance_id"] == "shinny-tqsdk-default"
     assert {"ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"} <= {item.product_code for item in captured_catalog}
     assert runtime.get_main_contract_mappings()[0].contract_symbol == "CFFEX.IF2609"
     assert runtime.get_contract_realtime("SHFE.rb2610,SHFE.rb2610")[0].bid_price5 == 3400.0
@@ -289,6 +292,7 @@ def test_contract_catalog_public_read_is_local_only_and_exposes_normalized_contr
     assert item.currency == "CNY"
     assert item.lot_size is None and item.asset_class is None
     assert item.commission_open is None and item.initial_margin is None
+    assert item.snapshot_complete is True and item.content_checksum == ""
     assert item.provenance["currency"] == {"kind": "market_rule", "rule_id": "cn_futures_currency_v1"}
     assert item.availability["execution_profile_required"] is True
 
@@ -299,6 +303,10 @@ def test_contract_catalog_public_read_fails_closed_when_snapshot_or_product_is_m
         futures.QuoteMuxFutures().get_contract_catalog("rb")
     assert absent.value.details["dataset_id"] == "future_contract_reference"
     assert absent.value.details["repair_endpoint"] == "/api/admin/data-repairs"
+    assert absent.value.details["repair_template"] == {
+        "dataset_id": "future_contract_reference", "dataset_version": "",
+        "scope": {"codes": [], "include_expired": False},
+    }
 
     with pytest.raises(futures.FutureContractCatalogIncompleteError) as expired:
         futures.QuoteMuxFutures().get_contract_catalog("rb", include_expired=True)
