@@ -183,6 +183,18 @@ def test_futures_coverage_schema_has_one_time_backfill_and_write_maintenance() -
     assert "pg_advisory_xact_lock(hashtext('future_bar_1m_series_generation:' || target_series_type))" in schema
 
 
+def test_future_schema_keeps_catalog_ddl_in_its_own_executor_unit() -> None:
+    """The schema store executes every tuple item as one PostgreSQL statement."""
+    catalog_statement = next(
+        statement
+        for statement in futures.FUTURE_SCHEMA_SQL
+        if "create table if not exists ref.future_contract_catalog_snapshot" in statement
+    )
+
+    assert catalog_statement.lstrip().startswith("create table if not exists ref.future_contract_catalog_snapshot")
+    assert "future_bar_1m_series_generation_after_update" not in catalog_statement
+
+
 def test_future_schema_initializes_once_across_concurrent_callers(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(futures, "_FUTURE_SCHEMA_READY", False)

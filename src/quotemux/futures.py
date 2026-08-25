@@ -382,6 +382,8 @@ FUTURE_SCHEMA_SQL = (
             create trigger future_bar_1m_series_generation_after_update after update on fact.future_bar_1m referencing new table as updated_new_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_update();
         end if;
     end $$
+    """,
+    """
     create table if not exists ref.future_contract_catalog_snapshot (
         snapshot_id text primary key,
         scope_include_expired boolean not null,
