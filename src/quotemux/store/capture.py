@@ -2218,7 +2218,7 @@ class QuoteMuxCaptureJob:
             if existing is not None:
                 lock.release()
                 return {**self._run_to_dict(existing), "repair_reused": True}
-            skipped = self._precheck_skip(policy, planned_time)
+            skipped = self._precheck_repair_skip(policy, planned_time)
             if skipped is not None:
                 lock.release()
                 return {**self._run_to_dict(skipped), "repair_fingerprint": fingerprint}
@@ -2260,6 +2260,8 @@ class QuoteMuxCaptureJob:
         try:
             actual_requests = build_capture_requests(policy, _policy_local_now(policy, self._now_provider())) if requests is None else tuple(requests)
             result = self._execute_requests(policy, actual_requests)
+            if run_detail.get("mode") == "repair":
+                result = self._require_repair_write_result(result, actual_requests)
             status = self._execution_status(result)
             error_message = ""
             if status == CAPTURE_FAILED:
@@ -2324,6 +2326,25 @@ class QuoteMuxCaptureJob:
         if result.partial_batches != ():
             return CAPTURE_PARTIAL
         return CAPTURE_SUCCESS
+
+    @staticmethod
+    def _require_repair_write_result(
+        result: CaptureExecutionResult,
+        requests: Sequence[CaptureRequest],
+    ) -> CaptureExecutionResult:
+        """An explicit repair is not successful until it has changed published storage."""
+        failures = list(result.failed_batches)
+        request_identity = requests[0].request_identity if requests else {}
+        if result.row_count <= 0:
+            failures.append({"request_identity": request_identity, "error": "repair returned zero rows"})
+        if result.coverage_count <= 0:
+            failures.append({"request_identity": request_identity, "error": "repair wrote zero rows"})
+        return CaptureExecutionResult(
+            result.row_count,
+            result.coverage_count,
+            result.partial_batches,
+            tuple(failures),
+        )
 
     def _run_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
         if request.capability_id == "futures.quotes.main_continuous.1m":
@@ -2484,6 +2505,31 @@ class QuoteMuxCaptureJob:
         if policy.batch_size < 1:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "empty_batch_size"})
         return None
+
+    def _precheck_repair_skip(self, policy: CapturePolicy, planned_time: datetime) -> CaptureRun | None:
+        """Keep explicit repair independent of scheduler enablement, but never weaken write gates."""
+        cache_policy = self._cache_store.get_policy(policy.capability_id)
+        if cache_policy is None or not cache_policy.write_enabled:
+            return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "cache_policy_disabled"})
+        if not self._has_executable_repair_path(policy.capability_id):
+            return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "repair_path_unavailable"})
+        if policy.window_count < 1:
+            return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "empty_window"})
+        if policy.batch_size < 1:
+            return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "empty_batch_size"})
+        return None
+
+    @staticmethod
+    def _has_executable_repair_path(capability_id: str) -> bool:
+        return capability_id in {
+            "futures.quotes.main_continuous.1m",
+            "stocks.quotes.intraday",
+            "indexes.members",
+            "concepts.quotes.daily",
+            "boards.quotes.daily",
+            "concepts.members",
+            "markets.events.news",
+        } or capability_id in RUNTIME_METHODS
 
     def _create_finished_run(
         self,

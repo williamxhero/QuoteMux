@@ -4,7 +4,7 @@ from datetime import datetime, time
 
 import pandas as pd
 
-from quotemux.store.capture import CAPTURE_SUCCESS, CapturePolicy, CaptureRun, QuoteMuxCaptureJob
+from quotemux.store.capture import CAPTURE_FAILED, CAPTURE_SKIPPED, CAPTURE_SUCCESS, CaptureExecutionResult, CapturePolicy, CaptureRun, QuoteMuxCaptureJob
 
 
 class _Policies:
@@ -20,6 +20,7 @@ class _Runs:
         self.existing = existing
         self.existing_fingerprint = existing_fingerprint
         self.fingerprints: list[tuple[str, str]] = []
+        self.finished: list[CaptureRun] = []
 
     def latest_success_for_repair_fingerprint(self, capability_id: str, fingerprint: str) -> CaptureRun | None:
         self.fingerprints.append((capability_id, fingerprint))
@@ -27,6 +28,20 @@ class _Runs:
 
     def get_by_id(self, run_id: int) -> CaptureRun | None:
         return self.existing if self.existing is not None and self.existing.id == run_id else None
+
+    def create(self, capability_id: str, status: str, planned_time: datetime, detail_json: dict[str, object]) -> CaptureRun:
+        return CaptureRun(99, capability_id, status, planned_time, planned_time, None, 0, 0, "", detail_json)
+
+    def finish(
+        self,
+        run_id: int,
+        status: str,
+        row_count: int,
+        coverage_count: int,
+        error_message: str,
+        detail_json: dict[str, object],
+    ) -> None:
+        self.finished.append(CaptureRun(run_id, "stocks.quotes.intraday", status, datetime(2026, 8, 23, 12), datetime(2026, 8, 23, 12), datetime(2026, 8, 23, 12), row_count, coverage_count, error_message, detail_json))
 
 
 class _Lock:
@@ -49,16 +64,20 @@ class _Locks:
 
 
 class _CachePolicy:
-    write_enabled = True
+    def __init__(self, write_enabled: bool = True) -> None:
+        self.write_enabled = write_enabled
 
 
 class _Cache:
+    def __init__(self, write_enabled: bool = True) -> None:
+        self.write_enabled = write_enabled
+
     def get_policy(self, _capability_id: str) -> _CachePolicy:
-        return _CachePolicy()
+        return _CachePolicy(self.write_enabled)
 
 
-def _policy() -> CapturePolicy:
-    return CapturePolicy("stocks.quotes.intraday", True, "daily", time(20), "Asia/Shanghai", None, None, None, "active_stocks_recent_trading_days", 5, 100, "")
+def _policy(capability_id: str = "stocks.quotes.intraday", enabled: bool = True) -> CapturePolicy:
+    return CapturePolicy(capability_id, enabled, "daily", time(20), "Asia/Shanghai", None, None, None, "active_stocks_recent_trading_days", 5, 100, "")
 
 
 def test_admin_repair_reuses_successful_dataset_scope_fingerprint() -> None:
@@ -148,3 +167,45 @@ def test_repair_idempotency_lookup_uses_successful_persisted_run(monkeypatch) ->
     assert "status = 'success'" in query
     assert "detail_json ->> 'repair_fingerprint' = %s" in query
     assert captured["params"] == ("stocks.quotes.intraday", "abc")
+
+
+def test_explicit_repair_bypasses_disabled_scheduler_but_not_cache_write_gate(monkeypatch) -> None:
+    runs = _Runs()
+    locks = _Locks()
+    job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy(enabled=False)), runs=runs, locks=locks, cache_store=_Cache())
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(job, "_run_capture_requests", lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs) or {"status": CAPTURE_SUCCESS})
+
+    assert job.run_repair("stocks.quotes.intraday", {"codes": ["600000"]})["status"] == CAPTURE_SUCCESS
+    assert captured["args"][0].enabled is False
+
+    blocked = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy(enabled=False)), runs=_Runs(), locks=_Locks(), cache_store=_Cache(write_enabled=False))
+    result = blocked.run_repair("stocks.quotes.intraday", {"codes": ["600000"]})
+    assert result["status"] == CAPTURE_SKIPPED
+    assert result["detail_json"]["reason"] == "cache_policy_disabled"
+
+
+def test_repair_without_executable_path_skips_closed_even_if_scheduler_is_disabled() -> None:
+    job = QuoteMuxCaptureJob(
+        runtime=object(),
+        policies=_Policies(_policy("futures.quotes.back_adjusted_continuous.1m", enabled=False)),
+        runs=_Runs(),
+        locks=_Locks(),
+        cache_store=_Cache(),
+    )
+
+    result = job.run_repair("futures.quotes.back_adjusted_continuous.1m", {"codes": ["ag"]})
+
+    assert result["status"] == CAPTURE_SKIPPED
+    assert result["detail_json"]["reason"] == "repair_path_unavailable"
+
+
+def test_explicit_repair_with_zero_return_or_write_is_failed(monkeypatch) -> None:
+    job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=_Runs(), locks=_Locks(), cache_store=_Cache())
+    monkeypatch.setattr(job, "_execute_requests", lambda *_args: CaptureExecutionResult(0, 0, (), ()))
+
+    result = job.run_repair("stocks.quotes.intraday", {"codes": ["600000"]})
+
+    assert result["status"] == CAPTURE_FAILED
+    errors = [item["error"] for item in result["detail_json"]["failed_batches"]]
+    assert errors == ["repair returned zero rows", "repair wrote zero rows"]
