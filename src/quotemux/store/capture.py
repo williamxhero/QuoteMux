@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 import hashlib
 import json
-from typing import Callable, Sequence
+from typing import Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -169,6 +169,16 @@ class _CaptureBatchResult:
     store_write_count: int
     partial_issues: tuple[str, ...] = ()
     row_count_override: int | None = None
+
+
+class BackAdjustedRepairEvidenceRegistry(Protocol):
+    """MarketHub-owned resolver for a pre-registered immutable evidence bundle."""
+
+    def resolve(self, registry_id: str) -> tuple[bytes, dict[str, object]]: ...
+
+
+class DatasetVersionGuard(Protocol):
+    def require_current(self, capability_id: str, expected_version: str) -> str: ...
 
 
 def _default_profile_for_capability(capability_id: str) -> str:
@@ -2062,6 +2072,8 @@ class QuoteMuxCaptureJob:
         now_provider: Callable[[], datetime] | None = None,
         cache_store: object | None = None,
         gaps: CaptureGapRepository | None = None,
+        back_adjusted_repair_evidence: BackAdjustedRepairEvidenceRegistry | None = None,
+        dataset_version_guard: DatasetVersionGuard | None = None,
     ) -> None:
         if runtime is None:
             from quotemux.runtime import QuoteMux
@@ -2075,6 +2087,8 @@ class QuoteMuxCaptureJob:
         self._now_provider = now_provider or _current_datetime
         self._cache_store = cache_store or get_postgres_cache_store()
         self._gaps = gaps or CaptureGapRepository()
+        self._back_adjusted_repair_evidence = back_adjusted_repair_evidence
+        self._dataset_version_guard = dataset_version_guard
 
     def list_policies(self) -> tuple[dict[str, object], ...]:
         return tuple(self._policy_to_dict(policy) for policy in self._policies.list())
@@ -2179,6 +2193,8 @@ class QuoteMuxCaptureJob:
     def repair_fingerprint(dataset: str, scope: dict[str, object], dataset_version: str = "") -> str:
         root_capability_id = get_capability_config_root(dataset)
         canonical_scope, actual_dataset_version = _repair_scope_and_version(scope, dataset_version)
+        if root_capability_id == "futures.quotes.back_adjusted_continuous.1m":
+            canonical_scope = QuoteMuxCaptureJob._validate_back_adjusted_repair_scope(canonical_scope)
         payload = json.dumps(
             {"dataset": root_capability_id, "dataset_version": actual_dataset_version, "scope": canonical_scope},
             ensure_ascii=False,
@@ -2192,6 +2208,8 @@ class QuoteMuxCaptureJob:
         root_capability_id = get_capability_config_root(dataset)
         policy = self._get_policy(root_capability_id)
         canonical_scope, actual_dataset_version = _repair_scope_and_version(scope, dataset_version)
+        if root_capability_id == "futures.quotes.back_adjusted_continuous.1m":
+            canonical_scope = self._validate_back_adjusted_repair_scope(canonical_scope)
         fingerprint = self.repair_fingerprint(root_capability_id, canonical_scope, actual_dataset_version)
         planned_time = self._now_provider().replace(tzinfo=None)
         detail = {
@@ -2226,9 +2244,12 @@ class QuoteMuxCaptureJob:
             lock.release()
             raise
         try:
+            request_scope = canonical_scope
+            if root_capability_id == "futures.quotes.back_adjusted_continuous.1m":
+                request_scope = {**canonical_scope, "_repair_dataset_version": actual_dataset_version}
             return self._run_capture_requests(
                 policy,
-                (CaptureRequest(root_capability_id, canonical_scope),),
+                (CaptureRequest(root_capability_id, request_scope),),
                 detail,
                 planned_time,
                 lock,
@@ -2347,6 +2368,8 @@ class QuoteMuxCaptureJob:
         )
 
     def _run_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        if request.capability_id == "futures.quotes.back_adjusted_continuous.1m":
+            return self._run_back_adjusted_repair_batch(request)
         if request.capability_id == "futures.quotes.main_continuous.1m":
             result = self._runtime.futures.update_main_continuous(**request.request_identity)
             errors = tuple(str(item.get("error", "")) for item in result.get("errors", []) if isinstance(item, dict))
@@ -2361,6 +2384,20 @@ class QuoteMuxCaptureJob:
         items, report = self._run_runtime_request(request)
         normalized_items = tuple(self._normalize_runtime_items(items))
         return _CaptureBatchResult(normalized_items, int(getattr(report, "store_write_count", 0)))
+
+    def _run_back_adjusted_repair_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        if self._back_adjusted_repair_evidence is None or self._dataset_version_guard is None:
+            raise RuntimeError("back-adjusted repair evidence registry or dataset version guard is unavailable")
+        from quotemux.store.futures_back_adjusted_repair import FuturesBackAdjustedRepairPublisher
+
+        registry_id = str(request.request_identity["repair_registry_id"])
+        artifact_bytes, manifest = self._back_adjusted_repair_evidence.resolve(registry_id)
+        expected_version = str(request.request_identity.get("_repair_dataset_version", ""))
+        if expected_version == "" or str(manifest.get("frozen_dataset_version", "")) != expected_version:
+            raise RuntimeError("registered repair evidence does not match requested dataset_version")
+        result = FuturesBackAdjustedRepairPublisher(self._dataset_version_guard).publish(artifact_bytes, manifest)
+        row_count = int(result.get("row_count", 0))
+        return _CaptureBatchResult((), row_count, row_count_override=row_count)
 
     def _run_intraday_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
         result, report = self._runtime.stocks.get_quotes_query_result_with_report(
@@ -2519,8 +2556,9 @@ class QuoteMuxCaptureJob:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "empty_batch_size"})
         return None
 
-    @staticmethod
-    def _has_executable_repair_path(capability_id: str) -> bool:
+    def _has_executable_repair_path(self, capability_id: str) -> bool:
+        if capability_id == "futures.quotes.back_adjusted_continuous.1m":
+            return self._back_adjusted_repair_evidence is not None and self._dataset_version_guard is not None
         return capability_id in {
             "futures.quotes.main_continuous.1m",
             "stocks.quotes.intraday",
@@ -2530,6 +2568,15 @@ class QuoteMuxCaptureJob:
             "concepts.members",
             "markets.events.news",
         } or capability_id in RUNTIME_METHODS
+
+    @staticmethod
+    def _validate_back_adjusted_repair_scope(scope: dict[str, object]) -> dict[str, object]:
+        if set(scope) != {"repair_registry_id"}:
+            raise ValueError("back-adjusted repair scope must contain only repair_registry_id")
+        registry_id = str(scope["repair_registry_id"]).strip()
+        if registry_id == "":
+            raise ValueError("repair_registry_id must be non-empty")
+        return {"repair_registry_id": registry_id}
 
     def _create_finished_run(
         self,

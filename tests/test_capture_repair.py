@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, time
 
 import pandas as pd
+import pytest
 
 from quotemux.store.capture import CAPTURE_FAILED, CAPTURE_SKIPPED, CAPTURE_SUCCESS, CaptureExecutionResult, CapturePolicy, CaptureRun, QuoteMuxCaptureJob
 
@@ -194,10 +195,94 @@ def test_repair_without_executable_path_skips_closed_even_if_scheduler_is_disabl
         cache_store=_Cache(),
     )
 
-    result = job.run_repair("futures.quotes.back_adjusted_continuous.1m", {"codes": ["ag"]})
+    result = job.run_repair("futures.quotes.back_adjusted_continuous.1m", {"repair_registry_id": "repair-evidence-001"})
 
     assert result["status"] == CAPTURE_SKIPPED
     assert result["detail_json"]["reason"] == "repair_path_unavailable"
+
+
+def test_back_adjusted_repair_uses_only_registered_evidence_and_capture_workflow(monkeypatch) -> None:
+    from quotemux.store import futures_back_adjusted_repair
+
+    class Evidence:
+        def __init__(self) -> None:
+            self.ids: list[str] = []
+
+        def resolve(self, registry_id: str):
+            self.ids.append(registry_id)
+            return b"immutable-artifact", {"frozen_dataset_version": "mhd-v1"}
+
+    class Guard:
+        def require_current(self, capability_id: str, expected_version: str) -> str:
+            assert capability_id == "futures.quotes.back_adjusted_continuous.1m"
+            assert expected_version == "mhd-v1"
+            return expected_version
+
+    class Publisher:
+        def __init__(self, guard) -> None:
+            assert isinstance(guard, Guard)
+
+        def publish(self, artifact: bytes, manifest: dict[str, object]) -> dict[str, object]:
+            assert artifact == b"immutable-artifact"
+            assert manifest["frozen_dataset_version"] == "mhd-v1"
+            return {"status": "success", "row_count": 2}
+
+    evidence = Evidence()
+    monkeypatch.setattr(futures_back_adjusted_repair, "FuturesBackAdjustedRepairPublisher", Publisher)
+    job = QuoteMuxCaptureJob(
+        runtime=object(),
+        policies=_Policies(_policy("futures.quotes.back_adjusted_continuous.1m", enabled=False)),
+        runs=_Runs(),
+        locks=_Locks(),
+        cache_store=_Cache(),
+        back_adjusted_repair_evidence=evidence,
+        dataset_version_guard=Guard(),
+    )
+
+    result = job.run_repair("futures.quotes.back_adjusted_continuous.1m", {"repair_registry_id": "repair-evidence-001"}, "mhd-v1")
+
+    assert result["status"] == CAPTURE_SUCCESS
+    assert result["row_count"] == result["coverage_count"] == 2
+    assert result["detail_json"]["repair_scope"] == {"repair_registry_id": "repair-evidence-001"}
+    assert evidence.ids == ["repair-evidence-001"]
+
+
+def test_back_adjusted_repair_rejects_unmanaged_scope_before_any_evidence_lookup() -> None:
+    job = QuoteMuxCaptureJob(
+        runtime=object(),
+        policies=_Policies(_policy("futures.quotes.back_adjusted_continuous.1m")),
+        runs=_Runs(),
+        locks=_Locks(),
+        cache_store=_Cache(),
+    )
+
+    with pytest.raises(ValueError, match="repair_registry_id"):
+        job.run_repair("futures.quotes.back_adjusted_continuous.1m", {"artifact_path": "C:/untrusted.json"})
+
+
+def test_back_adjusted_repair_fails_before_publish_when_registry_version_is_stale(monkeypatch) -> None:
+    class Evidence:
+        def resolve(self, _registry_id: str):
+            return b"artifact", {"frozen_dataset_version": "mhd-v1"}
+
+    class Guard:
+        def require_current(self, *_args):
+            pytest.fail("stale evidence must not reach dataset version guard")
+
+    job = QuoteMuxCaptureJob(
+        runtime=object(),
+        policies=_Policies(_policy("futures.quotes.back_adjusted_continuous.1m")),
+        runs=_Runs(),
+        locks=_Locks(),
+        cache_store=_Cache(),
+        back_adjusted_repair_evidence=Evidence(),
+        dataset_version_guard=Guard(),
+    )
+
+    result = job.run_repair("futures.quotes.back_adjusted_continuous.1m", {"repair_registry_id": "repair-evidence-001"}, "mhd-v2")
+
+    assert result["status"] == CAPTURE_FAILED
+    assert "does not match requested dataset_version" in result["detail_json"]["failed_batches"][0]["error"]
 
 
 def test_explicit_repair_with_zero_return_or_write_is_failed(monkeypatch) -> None:
