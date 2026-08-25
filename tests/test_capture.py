@@ -4,9 +4,11 @@ from dataclasses import replace
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from quotemux.reports import ContractReport
 from quotemux.models import ConceptAliasGroupItem
-from platform_models import ConceptQuoteItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult
+from platform_models import ConceptQuoteItem, FutureContractCatalogItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult
 from quotemux.store import capture
 from quotemux.capabilities import is_independently_configurable_capability_id, list_capability_ids
 from quotemux.store.capture import (
@@ -18,6 +20,7 @@ from quotemux.store.capture import (
     CAPTURE_PARTIAL,
     CAPTURE_SKIPPED,
     CAPTURE_SUCCESS,
+    PROFILE_CATALOG_SNAPSHOT,
     PROFILE_ACTIVE_STOCKS_RECENT_TRADING_DAYS,
     PROFILE_CONCEPTS_RECENT_TRADING_DAYS,
     PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS,
@@ -86,6 +89,9 @@ class MemoryCaptureRuns:
         matches = [item for item in self.items if item.capability_id == capability_id and item.planned_time == planned_time]
         return matches[-1] if matches else None
 
+    def latest_success_for_repair_fingerprint(self, _capability_id: str, _fingerprint: str) -> CaptureRun | None:
+        return None
+
     def create(self, capability_id: str, status: str, planned_time: datetime, detail_json: dict[str, object]) -> CaptureRun:
         run = CaptureRun(self.next_id, capability_id, status, planned_time, planned_time, None, 0, 0, "", detail_json)
         self.next_id += 1
@@ -98,6 +104,23 @@ class MemoryCaptureRuns:
                 self.items[index] = replace(run, status=status, finished_at=run.started_at, row_count=row_count, coverage_count=coverage_count, error_message=error_message, detail_json=detail_json)
                 return True
         return False
+
+    def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> CaptureRun:
+        for index, run in enumerate(self.items):
+            native = run.detail_json.get("publication", {})
+            if run.id != run_id:
+                continue
+            if (
+                run.capability_id != "futures.contracts.catalog" or run.status != CAPTURE_SUCCESS
+                or run.detail_json.get("mode") != "repair"
+                or native.get("snapshot_id") != publication.get("snapshot_id")
+                or native.get("content_checksum") != publication.get("content_checksum")
+            ):
+                raise ValueError("publication mismatch")
+            updated = replace(run, detail_json={**run.detail_json, "publication": publication})
+            self.items[index] = updated
+            return updated
+        raise ValueError("unknown run")
 
 
 class FakeLock:
@@ -388,6 +411,68 @@ def test_run_capture_success_status(monkeypatch) -> None:
     assert result["row_count"] == 2
     assert result["coverage_count"] == 1
     assert len(runtime.stocks.calls) == 1
+
+
+def test_catalog_repair_run_persists_its_own_publication_without_rewriting_history(monkeypatch) -> None:
+    policy = _policy(capability_id="futures.contracts.catalog", scope_profile=PROFILE_CATALOG_SNAPSHOT)
+    snapshots = iter(("snapshot-a", "snapshot-b"))
+
+    class Futures:
+        def capture_contract_catalog(self, **_scope):
+            snapshot_id = next(snapshots)
+            return [FutureContractCatalogItem(
+                provider_symbol=f"SHFE.rb-{snapshot_id}", product_code="rb", exchange="SHFE", ins_class="FUTURE",
+                price_tick=1.0, price_decs=0, volume_multiple=10.0, snapshot_id=snapshot_id,
+                snapshot_complete=True, content_checksum=f"checksum-{snapshot_id}", captured_at="2026-08-24 10:12:00",
+                source={"package_id": "shinny_tqsdk", "source_instance_id": "test", "provider_version": {"availability": "unavailable"}},
+                catalog_schema_version="future_contract_catalog_v2",
+            )]
+
+    runtime = type("Runtime", (), {"futures": Futures()})()
+    runs = MemoryCaptureRuns()
+    monkeypatch.setattr(capture, "build_capture_requests", lambda *_args: (capture.CaptureRequest("futures.contracts.catalog", {"codes": [], "include_expired": False}),))
+    job = _job(policy, runtime=runtime, runs=runs)
+
+    first = job.run_capture("futures.contracts.catalog")
+    second = job.run_capture("futures.contracts.catalog")
+
+    assert first["detail_json"]["publication"]["snapshot_id"] == "snapshot-a"
+    assert second["detail_json"]["publication"]["snapshot_id"] == "snapshot-b"
+    assert runs.items[0].detail_json["publication"]["snapshot_id"] == "snapshot-a"
+    assert runs.items[1].detail_json["publication"]["snapshot_id"] == "snapshot-b"
+
+
+def test_catalog_publication_finalize_updates_exact_run_and_rejects_mismatch(monkeypatch) -> None:
+    policy = _policy(capability_id="futures.contracts.catalog", scope_profile=PROFILE_CATALOG_SNAPSHOT)
+    snapshots = iter(("snapshot-a", "snapshot-b"))
+
+    class Futures:
+        def capture_contract_catalog(self, **_scope):
+            snapshot_id = next(snapshots)
+            return [FutureContractCatalogItem(
+                provider_symbol=f"SHFE.rb-{snapshot_id}", product_code="rb", exchange="SHFE", ins_class="FUTURE",
+                price_tick=1.0, price_decs=0, volume_multiple=10.0, snapshot_id=snapshot_id,
+                snapshot_complete=True, content_checksum=f"checksum-{snapshot_id}", captured_at="2026-08-24 10:12:00",
+                source={"package_id": "shinny_tqsdk", "source_instance_id": "test", "provider_version": {"availability": "unavailable"}},
+                catalog_schema_version="future_contract_catalog_v2",
+            )]
+
+    runs = MemoryCaptureRuns()
+    runtime = type("Runtime", (), {"futures": Futures()})()
+    monkeypatch.setattr(capture, "build_capture_requests", lambda *_args: (capture.CaptureRequest("futures.contracts.catalog", {"codes": [], "include_expired": False}),))
+    job = _job(policy, runtime=runtime, runs=runs)
+    first = job.run_repair("futures.contracts.catalog", {"codes": [], "include_expired": False}, "mhd-v1-a")
+    second = job.run_repair("futures.contracts.catalog", {"codes": [], "include_expired": False}, "mhd-v1-b")
+    first_publication = dict(first["detail_json"]["publication"])
+    finalized = job.finalize_catalog_repair_publication(
+        first["id"], {**first_publication, "catalog_dataset_version": "mhd-v1-final"}
+    )
+
+    assert finalized["detail_json"]["publication"]["catalog_dataset_version"] == "mhd-v1-final"
+    assert runs.items[1].detail_json["publication"]["catalog_dataset_version"] == ""
+    with pytest.raises(ValueError, match="mismatch"):
+        job.finalize_catalog_repair_publication(second["id"], {**first_publication, "catalog_dataset_version": "wrong-run"})
+    assert runs.items[1].detail_json["publication"]["snapshot_id"] == "snapshot-b"
 
 
 def test_run_capture_failed_status(monkeypatch) -> None:

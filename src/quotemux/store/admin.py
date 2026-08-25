@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import time
+from typing import Callable
 
 from quotemux.capabilities import get_capability_config_root, is_known_capability_id
 from quotemux.store.capture import CapturePolicyUpdate, QuoteMuxCaptureJob
@@ -168,11 +169,26 @@ class QuoteMuxCaptureAdmin:
     def run_capture(self, capability_id: str) -> dict[str, object]:
         return self._job.run_capture(get_capability_config_root(capability_id))
 
-    def run_repair(self, dataset: str, scope: dict[str, object], dataset_version: str = "") -> dict[str, object]:
-        return self._job.run_repair(get_capability_config_root(dataset), scope, dataset_version)
+    def run_repair(
+        self,
+        dataset: str,
+        scope: dict[str, object],
+        dataset_version: str = "",
+        locked_precondition: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
+        root_dataset = get_capability_config_root(dataset)
+        if locked_precondition is None:
+            # Keep third-party/legacy job implementations on the original public
+            # three-argument contract.
+            return self._job.run_repair(root_dataset, scope, dataset_version)
+        return self._job.run_repair(root_dataset, scope, dataset_version, locked_precondition)
 
     def get_repair_run(self, run_id: int) -> dict[str, object]:
         return self._job.get_repair_run(run_id)
+
+    def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> dict[str, object]:
+        """Attach MarketHub's verified dataset version to this exact catalog repair."""
+        return self._job.finalize_catalog_repair_publication(run_id, publication)
 
     def run_due_captures(self) -> tuple[dict[str, object], ...]:
         return self._job.run_due_captures()

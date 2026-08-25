@@ -155,6 +155,7 @@ class CaptureExecutionResult:
     coverage_count: int
     partial_batches: tuple[dict[str, object], ...]
     failed_batches: tuple[dict[str, object], ...]
+    publication: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ class _CaptureBatchResult:
     store_write_count: int
     partial_issues: tuple[str, ...] = ()
     row_count_override: int | None = None
+    publication: dict[str, object] | None = None
 
 
 class BackAdjustedRepairEvidenceRegistry(Protocol):
@@ -790,6 +792,48 @@ class CaptureRunRepository:
             """,
             (status, row_count, coverage_count, error_message, Jsonb(detail_json), run_id),
         )
+
+    def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> CaptureRun:
+        """Atomically attach MarketHub's finalized dataset evidence to one repair run."""
+        if not _ensure_capture_schema():
+            raise RuntimeError("capture schema 初始化失败")
+        if not isinstance(publication, dict):
+            raise TypeError("publication 必须是对象")
+        snapshot_id = str(publication.get("snapshot_id", ""))
+        checksum = str(publication.get("content_checksum", ""))
+        if snapshot_id == "" or checksum == "":
+            raise ValueError("publication 必须包含 snapshot_id 和 content_checksum")
+        connection = psycopg.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER,
+            password=DB_PASSWORD, connect_timeout=DB_CONNECT_TIMEOUT, row_factory=dict_row,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    update capability_capture_runs
+                    set detail_json = jsonb_set(detail_json, '{publication}', %s::jsonb, true)
+                    where id = %s
+                      and capability_id = 'futures.contracts.catalog'
+                      and status = 'success'
+                      and detail_json ->> 'mode' = 'repair'
+                      and detail_json -> 'publication' ->> 'snapshot_id' = %s
+                      and detail_json -> 'publication' ->> 'content_checksum' = %s
+                    returning id, capability_id, status, planned_time, started_at, finished_at,
+                              row_count, coverage_count, error_message, detail_json
+                    """,
+                    (Jsonb(publication), run_id, snapshot_id, checksum),
+                )
+                row = cursor.fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if row is None:
+            raise ValueError("repair run 不存在、未成功、非 catalog 或 publication snapshot/checksum 不匹配")
+        return _run_from_row(row)
 
 
 class PostgresAdvisoryLock:
@@ -1989,7 +2033,9 @@ def _policy_local_now(policy: CapturePolicy, now: datetime) -> datetime:
 
 
 RUNTIME_METHODS: dict[str, tuple[str, str]] = {
-    "futures.contracts.catalog": ("futures", "get_contract_catalog"),
+    # The public facade is a strict local read.  Capture alone is allowed to
+    # invoke the provider and publish a new immutable catalog snapshot.
+    "futures.contracts.catalog": ("futures", "capture_contract_catalog"),
     "futures.contracts.main_mapping": ("futures", "get_main_contract_mappings"),
     "concepts.catalog": ("concepts", "get_catalog"),
     "concepts.indicators.money_flow": ("concepts", "get_money_flow"),
@@ -2203,7 +2249,13 @@ class QuoteMuxCaptureJob:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def run_repair(self, dataset: str, scope: dict[str, object], dataset_version: str = "") -> dict[str, object]:
+    def run_repair(
+        self,
+        dataset: str,
+        scope: dict[str, object],
+        dataset_version: str = "",
+        locked_precondition: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
         """Run one explicit, idempotent repair through the existing capture executor."""
         root_capability_id = get_capability_config_root(dataset)
         policy = self._get_policy(root_capability_id)
@@ -2232,6 +2284,11 @@ class QuoteMuxCaptureJob:
             )
             return self._run_to_dict(run)
         try:
+            # Callers with an external dataset-version gate re-check only after
+            # this capability's advisory lock is held.  This closes the stale
+            # repair window between an API precheck and capture execution.
+            if locked_precondition is not None:
+                locked_precondition()
             existing = self._runs.latest_success_for_repair_fingerprint(root_capability_id, fingerprint)
             if existing is not None:
                 lock.release()
@@ -2262,6 +2319,10 @@ class QuoteMuxCaptureJob:
         run = self._runs.get_by_id(run_id)
         if run is None or run.detail_json.get("mode") != "repair":
             raise KeyError(f"未知 repair run: {run_id}")
+        return self._run_to_dict(run)
+
+    def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> dict[str, object]:
+        run = self._runs.finalize_catalog_repair_publication(run_id, publication)
         return self._run_to_dict(run)
 
     def _run_capture_requests(
@@ -2295,6 +2356,10 @@ class QuoteMuxCaptureJob:
                 "partial_batches": list(result.partial_batches),
                 "failed_batches": list(result.failed_batches),
             }
+            if status == CAPTURE_SUCCESS and result.publication is not None:
+                # Evidence is from the snapshot this invocation published, never
+                # re-read from the mutable current-publication pointer.
+                detail_json["publication"] = result.publication
             self._runs.finish(run.id, status, result.row_count, result.coverage_count, error_message, detail_json)
             return self._run_to_dict(self._merge_finished_run(run, status, result.row_count, result.coverage_count, error_message, detail_json))
         except BaseException as exc:
@@ -2316,11 +2381,16 @@ class QuoteMuxCaptureJob:
         coverage_count = 0
         partial_batches: list[dict[str, object]] = []
         failed_batches: list[dict[str, object]] = []
+        publication: dict[str, object] | None = None
         for request in requests:
             try:
                 batch_result = self._run_capture_batch(request)
                 row_count += batch_result.row_count_override if batch_result.row_count_override is not None else len(batch_result.items)
                 coverage_count += batch_result.store_write_count
+                if batch_result.publication is not None:
+                    if publication is not None:
+                        raise RuntimeError("单个 capture run 不能记录多个 catalog publication")
+                    publication = batch_result.publication
                 for issue in batch_result.partial_issues:
                     partial_batches.append({"request_identity": request.request_identity, "error": issue})
             except Exception as exc:
@@ -2339,7 +2409,7 @@ class QuoteMuxCaptureJob:
             failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未获取到任何数据"})
         if policy.capability_id in {"concepts.quotes.daily", "boards.quotes.daily"} and row_count > 0 and coverage_count == 0:
             failed_batches.append({"request_identity": {}, "error": f"{policy.capability_id} 本轮未写入事实表"})
-        return CaptureExecutionResult(row_count, coverage_count, tuple(partial_batches), tuple(failed_batches))
+        return CaptureExecutionResult(row_count, coverage_count, tuple(partial_batches), tuple(failed_batches), publication)
 
     def _execution_status(self, result: CaptureExecutionResult) -> str:
         if result.failed_batches != ():
@@ -2365,11 +2435,31 @@ class QuoteMuxCaptureJob:
             result.coverage_count,
             result.partial_batches,
             tuple(failures),
+            result.publication,
         )
 
     def _run_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
         if request.capability_id == "futures.quotes.back_adjusted_continuous.1m":
             return self._run_back_adjusted_repair_batch(request)
+        if request.capability_id == "futures.contracts.catalog":
+            # Catalog publication is an atomic snapshot transaction owned by the
+            # futures runtime; do not also feed it through mutable generic cache rows.
+            items = tuple(self._runtime.futures.capture_contract_catalog(**request.request_identity))
+            if items == ():
+                raise RuntimeError("期货合约目录 capture 未发布任何快照行")
+            first = items[0]
+            publication = {
+                "snapshot_id": first.snapshot_id,
+                "catalog_dataset_version": first.catalog_dataset_version,
+                "content_checksum": first.content_checksum,
+                "captured_at": first.captured_at,
+                "source": first.source,
+                "schema_version": first.catalog_schema_version,
+                "row_count": len(items),
+                "product_count": len({item.product_code for item in items}),
+                "scope": {"codes": [], "include_expired": bool(request.request_identity.get("include_expired", False))},
+            }
+            return _CaptureBatchResult(items, len(items), row_count_override=len(items), publication=publication)
         if request.capability_id == "futures.quotes.main_continuous.1m":
             result = self._runtime.futures.update_main_continuous(**request.request_identity)
             errors = tuple(str(item.get("error", "")) for item in result.get("errors", []) if isinstance(item, dict))
@@ -2534,9 +2624,12 @@ class QuoteMuxCaptureJob:
     def _precheck_skip(self, policy: CapturePolicy, planned_time: datetime) -> CaptureRun | None:
         if not policy.enabled:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "capture_policy_disabled"})
-        cache_policy = self._cache_store.get_policy(policy.capability_id)
-        if cache_policy is None or not cache_policy.write_enabled:
-            return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "cache_policy_disabled"})
+        # Catalog has its own immutable snapshot store; generic cache policy does
+        # not govern its publication and must not turn a repair into a skip.
+        if policy.capability_id != "futures.contracts.catalog":
+            cache_policy = self._cache_store.get_policy(policy.capability_id)
+            if cache_policy is None or not cache_policy.write_enabled:
+                return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "cache_policy_disabled"})
         if policy.window_count < 1:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "empty_window"})
         if policy.batch_size < 1:

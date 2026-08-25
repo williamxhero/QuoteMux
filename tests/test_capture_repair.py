@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from quotemux.store.capture import CAPTURE_FAILED, CAPTURE_SKIPPED, CAPTURE_SUCCESS, CaptureExecutionResult, CapturePolicy, CaptureRun, QuoteMuxCaptureJob
+from quotemux.store.admin import QuoteMuxCaptureAdmin
 
 
 class _Policies:
@@ -124,6 +125,54 @@ def test_admin_repair_uses_canonical_scope_fingerprint_and_existing_capture_exec
     assert request.capability_id == "stocks.quotes.intraday"
     assert request.request_identity["codes"] == ["000001", "600000"]
     assert "dataset_version" not in request.request_identity
+
+
+def test_repair_runs_locked_precondition_before_reuse_or_capture_and_releases_on_failure(monkeypatch) -> None:
+    runs = _Runs()
+    locks = _Locks()
+    job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=runs, locks=locks, cache_store=_Cache())
+    events: list[str] = []
+
+    def precondition() -> None:
+        assert locks.value.released is False
+        events.append("precondition")
+
+    def fake_run(*_args, **_kwargs):
+        events.append("capture")
+        locks.value.release()
+        return {"status": CAPTURE_SUCCESS}
+
+    monkeypatch.setattr(job, "_run_capture_requests", fake_run)
+    assert job.run_repair(
+        "stocks.quotes.intraday", {"codes": ["600000"], "start_date": "2026-08-21", "end_date": "2026-08-21"},
+        "bars-v2", precondition,
+    )["status"] == CAPTURE_SUCCESS
+    assert events == ["precondition", "capture"]
+
+    failing_locks = _Locks()
+    failing_job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=_Runs(), locks=failing_locks, cache_store=_Cache())
+    with pytest.raises(RuntimeError, match="stale"):
+        failing_job.run_repair(
+            "stocks.quotes.intraday", {"codes": ["600000"], "start_date": "2026-08-21", "end_date": "2026-08-21"},
+            "bars-v2", lambda: (_ for _ in ()).throw(RuntimeError("stale dataset version")),
+        )
+    assert failing_locks.value.released is True
+
+
+def test_capture_admin_preserves_legacy_three_argument_repair_job_call() -> None:
+    class LegacyJob:
+        def __init__(self) -> None:
+            self.args: tuple[object, ...] = ()
+
+        def run_repair(self, dataset, scope, dataset_version):
+            self.args = (dataset, scope, dataset_version)
+            return {"status": CAPTURE_SUCCESS}
+
+    job = LegacyJob()
+    admin = QuoteMuxCaptureAdmin(job=job)
+
+    assert admin.run_repair("stocks.quotes.intraday", {"codes": ["600000"]}, "bars-v2")["status"] == CAPTURE_SUCCESS
+    assert job.args == ("stocks.quotes.intraday", {"codes": ["600000"]}, "bars-v2")
 
 
 def test_repair_different_dataset_version_does_not_reuse_previous_success(monkeypatch) -> None:

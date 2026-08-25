@@ -70,10 +70,36 @@ class ApiModel(BaseModel):
         return {field_name: format_api_dump_value(field_name, value) for field_name, value in payload.items()}
 
 
+class ApiErrorRepairScope(ApiModel):
+    codes: list[str] = Field(default_factory=list, description="Repair scope product or instrument codes.", examples=[[]])
+    include_expired: bool = Field(default=False, description="Whether the repair scope includes expired contracts.", examples=[False])
+
+
+class ApiErrorRepairTemplate(ApiModel):
+    dataset_id: str = Field(description="Dataset identifier accepted by the repair endpoint.", examples=["future_contract_reference"])
+    dataset_version: str | None = Field(default=None, description="Optional expected dataset version; supplied by the owning runtime when known.", examples=[None])
+    scope: ApiErrorRepairScope = Field(default_factory=ApiErrorRepairScope, description="Canonical repair scope.")
+
+
+class ApiErrorDetails(ApiModel):
+    """Bounded structured details for fail-closed data and repair responses."""
+
+    dataset_id: str | None = Field(default=None, description="Dataset whose local publication is incomplete.", examples=["future_contract_reference"])
+    dataset_version: str | None = Field(default=None, description="Dataset version observed by the owning runtime, if available.", examples=["mhd-v1-example"])
+    reason: str | None = Field(default=None, description="Stable machine-readable incompleteness reason.", examples=["published_snapshot_checksum_mismatch"])
+    requested_codes: list[str] = Field(default_factory=list, description="Normalized product codes requested by the caller.", examples=[["rb"]])
+    include_expired: bool | None = Field(default=None, description="Requested catalog expiry scope.", examples=[False])
+    missing_products: list[str] = Field(default_factory=list, description="Configured products missing from a required complete publication.", examples=[["rb"]])
+    missing_fields: list[str] = Field(default_factory=list, description="Required native fields missing from the publication.", examples=[["price_tick"]])
+    blocked_operation: str | None = Field(default=None, description="Operation intentionally refused by the strict public-read boundary.", examples=["source_package:shinny_tqsdk.get_future_contract_catalog"])
+    repair_endpoint: str | None = Field(default=None, description="Admin endpoint that can create the missing local publication.", examples=["/api/admin/data-repairs"])
+    repair_template: ApiErrorRepairTemplate | None = Field(default=None, description="Bounded repair request template; null when no repair is available.")
+
+
 class ApiError(ApiModel):
     code: str
     message: str
-    details: str = ""
+    details: str | ApiErrorDetails = Field(default="", description="Legacy diagnostic text or bounded structured repair/details object.")
 
 
 class StockQuoteItem(ApiModel):
@@ -842,6 +868,29 @@ class FutureContractCatalogItem(ApiModel):
     min_market_order_volume: int | None = Field(default=None, description="市价单最小下单量；未知为 null。", examples=[1])
     metadata_time: str = Field(default="", description="本条 TqSdk 元数据的提供或采集时间，Asia/Shanghai；未知为空。", examples=["2026-08-20 09:31:00"])
     raw_metadata: dict[str, object] = Field(default_factory=dict, description="未进入稳定字段的 TqSdk 原始 metadata，保持 provider 口径。", examples=[{"exchange_id": "SHFE"}])
+    # Normalized runtime fields deliberately do not turn exchange execution assumptions
+    # into facts.  TqSdk catalog metadata is authoritative only for the native contract
+    # specification fields above.
+    tick_size: float | None = Field(default=None, description="规范化最小变动价位；等同于 price_tick。", examples=[1.0])
+    price_precision: int | None = Field(default=None, description="规范化报价小数位；等同于 price_decs。", examples=[0])
+    multiplier: float | None = Field(default=None, description="规范化合约乘数；等同于 volume_multiple。", examples=[10.0])
+    currency: str | None = Field(default=None, description="合约计价币种；中国期货目录当前为 CNY。", examples=["CNY"])
+    lot_size: float | None = Field(default=None, description="交易运行时每手最小下单单位；catalog 未声明时为 null，不能由 min_order_volume 推断。", examples=[None])
+    asset_class: str | None = Field(default=None, description="执行资产类别；需要执行 profile 映射，当前 catalog 不编造。", examples=[None])
+    commission_open: dict[str, object] | None = Field(default=None, description="开仓手续费；执行 profile 未提供时为 null。", examples=[None])
+    commission_close: dict[str, object] | None = Field(default=None, description="平仓手续费；执行 profile 未提供时为 null。", examples=[None])
+    commission_close_today: dict[str, object] | None = Field(default=None, description="平今手续费；执行 profile 未提供时为 null。", examples=[None])
+    initial_margin: dict[str, object] | None = Field(default=None, description="初始保证金；执行 profile 未提供时为 null。", examples=[None])
+    maintenance_margin: dict[str, object] | None = Field(default=None, description="维持保证金；执行 profile 未提供时为 null。", examples=[None])
+    catalog_schema_version: str = Field(default="future_contract_catalog_v1", description="已发布合约目录快照 schema 版本。", examples=["future_contract_catalog_v1"])
+    catalog_dataset_version: str = Field(default="", description="由 MarketHub 注入的上层 dataset version；QuoteMux 不伪造。", examples=[""])
+    snapshot_id: str = Field(default="", description="本条所属的不可变已发布快照标识。", examples=["b9594cd7-6e5c-4c4d-90bb-3d4d96dd5f70"])
+    snapshot_complete: bool = Field(default=False, description="所属快照是否已通过完整性校验并原子发布。", examples=[True])
+    content_checksum: str = Field(default="", description="快照内容 SHA-256；校验内容不包含本字段自身。", examples=["d0a82d93f0b1470d8834d38817b5876e2dfa0a9b436ca9534ab1f8ad391c1a1e"])
+    captured_at: str = Field(default="", description="本地 capture 完成时间；不是 provider metadata_time。", examples=["2026-08-24 10:12:00"])
+    source: dict[str, object] = Field(default_factory=dict, description="本快照原始数据 source 身份与实例证据。", examples=[{"package_id": "shinny_tqsdk"}])
+    availability: dict[str, object] = Field(default_factory=dict, description="字段可用性和运行时映射状态。", examples=[{"execution_profile_required": True}])
+    provenance: dict[str, object] = Field(default_factory=dict, description="规范化字段的来源规则；未提供的执行字段会明确标记。", examples=[{"currency": {"kind": "market_rule", "rule_id": "cn_futures_currency_v1"}}])
 
 
 class FutureMainContractMappingItem(ApiModel):
