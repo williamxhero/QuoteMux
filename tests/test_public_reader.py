@@ -408,3 +408,19 @@ def test_futures_coverage_reader_all_series_and_rejects_unknown_filter() -> None
     with pytest.raises(ValueError, match="series_type"):
         reader.list_futures_coverage_batch("contract")
     assert len(client.calls) == 1
+
+
+def test_futures_series_state_reader_pins_one_immutable_generation_per_series() -> None:
+    from quotemux.public_reader import QuoteMuxPublicReader
+
+    client = _ReaderClient()
+    QuoteMuxPublicReader(client=client).list_futures_series_state_batch("back_adjusted_continuous")
+
+    stage, query, params = client.calls[0]
+    normalized = " ".join(query.lower().split())
+    assert stage == "futures_series_state"
+    assert "from audit.future_bar_1m_series_generation state" in normalized
+    assert "distinct on (state.series_type)" in normalized
+    assert "order by state.series_type, state.generation desc" in normalized
+    assert "case when state.series_type = 'apex_l0_adjusted' then 'back_adjusted_continuous'" in normalized
+    assert params == ("apex_l0_adjusted", "apex_l0_adjusted")

@@ -267,6 +267,90 @@ FUTURE_SCHEMA_SQL = (
     end
     $$
     """,
+    """
+    create table if not exists audit.future_bar_1m_series_generation (
+        series_type text not null,
+        generation bigint not null,
+        row_count bigint not null,
+        first_bar_time timestamp without time zone,
+        last_bar_time timestamp without time zone,
+        transaction_id bigint not null,
+        operation text not null,
+        delta_fingerprint text not null,
+        recorded_at timestamp with time zone not null default now(),
+        primary key (series_type, generation),
+        check (series_type in ('apex_l0_adjusted', 'main_continuous')),
+        check (row_count >= 0)
+    )
+    """,
+    """
+    insert into audit.future_bar_1m_series_generation (
+        series_type, generation, row_count, first_bar_time, last_bar_time,
+        transaction_id, operation, delta_fingerprint
+    )
+    select bars.series_type, 1, count(*), min(bars.bar_time), max(bars.bar_time),
+           txid_current(), 'bootstrap', md5(bars.series_type || '|' || count(*)::text || '|' || min(bars.bar_time)::text || '|' || max(bars.bar_time)::text)
+    from fact.future_bar_1m bars
+    where not exists (select 1 from audit.future_bar_1m_series_generation)
+    group by bars.series_type
+    """,
+    """
+    create or replace function audit.record_future_bar_1m_series_generation(
+        target_series_type text, target_operation text, target_delta_fingerprint text
+    ) returns void language plpgsql as $$
+    declare next_generation bigint;
+    begin
+        perform pg_advisory_xact_lock(hashtext('future_bar_1m_series_generation:' || target_series_type));
+        select coalesce(max(generation), 0) + 1 into next_generation
+        from audit.future_bar_1m_series_generation where series_type = target_series_type;
+        insert into audit.future_bar_1m_series_generation (
+            series_type, generation, row_count, first_bar_time, last_bar_time,
+            transaction_id, operation, delta_fingerprint
+        )
+        select target_series_type, next_generation, count(*), min(bar_time), max(bar_time),
+               txid_current(), target_operation, target_delta_fingerprint
+        from fact.future_bar_1m where series_type = target_series_type;
+    end
+    $$
+    """,
+    """
+    create or replace function audit.maintain_future_bar_1m_series_generation_after_insert()
+    returns trigger language plpgsql as $$
+    declare changed record;
+    begin
+        for changed in select series_type, md5(string_agg(product_code || '|' || bar_time::text || '|' || source_key, ',' order by product_code, bar_time)) as delta_fingerprint from inserted_rows group by series_type loop
+            perform audit.record_future_bar_1m_series_generation(changed.series_type, 'insert', changed.delta_fingerprint);
+        end loop;
+        return null;
+    end
+    $$
+    """,
+    """
+    do $$ begin
+        if not exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_insert' and not tgisinternal) then
+            create trigger future_bar_1m_series_generation_after_insert after insert on fact.future_bar_1m referencing new table as inserted_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_insert();
+        end if;
+    end $$
+    """,
+    """
+    create or replace function audit.maintain_future_bar_1m_series_generation_after_update()
+    returns trigger language plpgsql as $$
+    declare changed record;
+    begin
+        for changed in select series_type, md5(string_agg(product_code || '|' || bar_time::text || '|' || source_key, ',' order by product_code, bar_time)) as delta_fingerprint from updated_new_rows group by series_type loop
+            perform audit.record_future_bar_1m_series_generation(changed.series_type, 'update', changed.delta_fingerprint);
+        end loop;
+        return null;
+    end
+    $$
+    """,
+    """
+    do $$ begin
+        if not exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_update' and not tgisinternal) then
+            create trigger future_bar_1m_series_generation_after_update after update on fact.future_bar_1m referencing new table as updated_new_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_update();
+        end if;
+    end $$
+    """,
 )
 
 _FUTURE_SCHEMA_READY = False

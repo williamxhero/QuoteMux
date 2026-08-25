@@ -175,6 +175,12 @@ def test_futures_coverage_schema_has_one_time_backfill_and_write_maintenance() -
     assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_update" in schema
     assert "for each row execute function fact.maintain_future_bar_1m_coverage" not in schema
     assert "except" in schema
+    assert "create table if not exists audit.future_bar_1m_series_generation" in schema
+    assert "where not exists (select 1 from audit.future_bar_1m_series_generation)" in schema
+    assert "primary key (series_type, generation)" in schema
+    assert "future_bar_1m_series_generation_after_insert" in schema
+    assert "future_bar_1m_series_generation_after_update" in schema
+    assert "pg_advisory_xact_lock(hashtext('future_bar_1m_series_generation:' || target_series_type))" in schema
 
 
 def test_future_schema_initializes_once_across_concurrent_callers(monkeypatch) -> None:
