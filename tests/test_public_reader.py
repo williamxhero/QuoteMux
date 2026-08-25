@@ -313,6 +313,59 @@ def test_stock_1m_direct_arrow_stream_is_one_sql_without_dataframe() -> None:
     assert "order by bars.code, bars.bar_time" in client.calls[0][1].lower()
 
 
+def test_futures_1m_reader_is_strict_read_only_and_normalizes_public_contract() -> None:
+    from quotemux.infra.db.read_client import QueryBatch
+    from quotemux.public_reader import QuoteMuxPublicReader
+    from quotemux.strict_read import strict_public_read_boundary
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, tuple[object, ...]]] = []
+
+        def query_batch(self, query: str, params: tuple[object, ...] = (), *, stage: str = "sql") -> QueryBatch:
+            self.calls.append((stage, query, params))
+            return QueryBatch(
+                (
+                    "product_code", "exchange", "series_type", "bar_time", "open", "high", "low", "close",
+                    "volume", "open_interest", "adjustment_offset",
+                ),
+                (("ag", "SHFE", "back_adjusted_continuous", "2018-11-29 13:31:00", 1.0, 2.0, 0.5, 1.5, 10.0, 20.0, 0.0),),
+            )
+
+    client = Client()
+    with strict_public_read_boundary():
+        batch = QuoteMuxPublicReader(client=client).get_futures_quotes_1m_batch(
+            " AG,ag,IF ", "back_adjusted_continuous", "2018-11-29 13:31:00", "2018-11-29 13:52:00", limit=999_999
+        )
+
+    stage, query, params = client.calls[0]
+    normalized = " ".join(query.lower().split())
+    assert stage == "futures_1m"
+    assert "from fact.future_bar_1m bars" in normalized
+    assert "create " not in normalized
+    assert "insert " not in normalized
+    assert "case when bars.series_type = 'apex_l0_adjusted' then 'back_adjusted_continuous'" in normalized
+    assert "order by bars.bar_time, bars.product_code" in normalized
+    assert params == (["IF", "ag"], "apex_l0_adjusted", "2018-11-29 13:31:00", "2018-11-29 13:52:00", 500_000)
+    assert batch.as_dicts()[0]["series_type"] == "back_adjusted_continuous"
+
+
+def test_futures_1m_reader_rejects_invalid_public_inputs() -> None:
+    from quotemux.public_reader import QuoteMuxPublicReader
+
+    reader = QuoteMuxPublicReader(client=_ReaderClient())
+    with pytest.raises(ValueError, match="codes"):
+        reader.get_futures_quotes_1m_batch(" , ", "main_continuous", "2026-08-11 09:31:00", "2026-08-11 15:00:00")
+    with pytest.raises(ValueError, match="unknown futures product code"):
+        reader.get_futures_quotes_1m_batch("UNKNOWN", "main_continuous", "2026-08-11 09:31:00", "2026-08-11 15:00:00")
+    with pytest.raises(ValueError, match="series_type"):
+        reader.get_futures_quotes_1m_batch("ag", "contract", "2026-08-11 09:31:00", "2026-08-11 15:00:00")
+    with pytest.raises(ValueError, match="start_time"):
+        reader.get_futures_quotes_1m_batch("ag", "main_continuous", "2026-08-11 15:00:00", "2026-08-11 09:31:00")
+    with pytest.raises(ValueError, match="limit"):
+        reader.get_futures_quotes_1m_batch("ag", "main_continuous", "2026-08-11 09:31:00", "2026-08-11 15:00:00", limit=True)
+
+
 def test_futures_coverage_reader_is_strict_local_sorted_and_filtered() -> None:
     from quotemux.infra.db.read_client import QueryBatch
     from quotemux.public_reader import QuoteMuxPublicReader

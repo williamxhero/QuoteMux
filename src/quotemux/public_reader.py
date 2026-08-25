@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from datetime import date, datetime
 import sys
 from typing import Any
@@ -112,6 +112,35 @@ _FUTURES_SERIES_STORAGE = {
     "main_continuous": "main_continuous",
 }
 
+_FUTURES_PRODUCT_CODES = (
+    "IF", "IH", "IC", "IM", "T", "TF", "TS", "TL",
+    "ad", "ag", "al", "ao", "au", "br", "bu", "cu", "fu", "hc", "ni", "op", "pb", "rb", "ru", "sn", "sp", "ss", "wr", "zn",
+    "a", "b", "bz", "c", "cs", "eb", "eg", "fb", "i", "j", "jd", "jm", "l", "lg", "lh", "m", "p", "pg", "PL", "pp", "rr", "v", "y",
+    "AP", "CF", "CJ", "CY", "FG", "JR", "MA", "OI", "PF", "PK", "PR", "PX", "RM", "RS", "SA", "SF", "SH", "SM", "SR", "TA", "UR", "WH", "ZC",
+    "bc", "ec", "lu", "nr", "sc", "lc", "pd", "ps", "pt", "si",
+)
+_FUTURES_CANONICAL_CODES = {code.lower(): code for code in _FUTURES_PRODUCT_CODES}
+_MAX_FUTURES_1M_LIMIT = 500_000
+
+_FUTURES_1M_QUERY = """
+    select bars.product_code,
+           bars.exchange,
+           case when bars.series_type = 'apex_l0_adjusted'
+                then 'back_adjusted_continuous'
+                else bars.series_type
+           end as series_type,
+           bars.bar_time::text as bar_time,
+           bars.open, bars.high, bars.low, bars.close,
+           bars.volume, bars.open_interest, bars.adjustment_offset
+    from fact.future_bar_1m bars
+    where bars.product_code = any(%s::text[])
+      and bars.series_type = %s
+      and bars.bar_time >= %s::timestamp
+      and bars.bar_time <= %s::timestamp
+    order by bars.bar_time, bars.product_code
+    limit %s
+"""
+
 _FUTURES_COVERAGE_QUERY = """
     select coverage.product_code,
            coverage.exchange,
@@ -159,6 +188,20 @@ def _stock_code(value: object) -> str:
 
 def _stock_codes(values: list[str]) -> list[str]:
     return sorted({_stock_code(value) for value in values})
+
+
+def _future_codes(values: str | Iterable[str]) -> list[str]:
+    raw_values = values.split(",") if isinstance(values, str) else values
+    codes: set[str] = set()
+    for value in raw_values:
+        text = str(value).strip()
+        if text == "":
+            continue
+        code = _FUTURES_CANONICAL_CODES.get(text.lower())
+        if code is None:
+            raise ValueError(f"unknown futures product code: {text}")
+        codes.add(code)
+    return sorted(codes)
 
 
 class Stock1mBatchStream:
@@ -294,6 +337,37 @@ class QuoteMuxPublicReader:
             _STOCK_1M_COVERAGE_QUERY,
             (normalized_codes, actual_start, actual_end),
             stage="stock_1m_coverage",
+        )
+
+    def get_futures_quotes_1m_batch(
+        self,
+        codes: str | Iterable[str],
+        series_type: str,
+        start_time: str | datetime,
+        end_time: str | datetime,
+        *,
+        limit: int = 10_000,
+    ) -> QueryBatch:
+        """Read published futures 1m bars without invoking the writer runtime."""
+        normalized_codes = _future_codes(codes)
+        if not normalized_codes:
+            raise ValueError("codes must not be empty")
+        storage_series_type = _FUTURES_SERIES_STORAGE.get(series_type)
+        if storage_series_type is None:
+            supported = ", ".join(_FUTURES_SERIES_STORAGE)
+            raise ValueError(f"series_type must be one of: {supported}")
+        actual_start = _timestamp_value(start_time, "start_time")
+        actual_end = _timestamp_value(end_time, "end_time")
+        start_key = actual_start if isinstance(actual_start, datetime) else datetime.fromisoformat(actual_start)
+        end_key = actual_end if isinstance(actual_end, datetime) else datetime.fromisoformat(actual_end)
+        if start_key > end_key:
+            raise ValueError("start_time must not be after end_time")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        return self._client.query_batch(
+            _FUTURES_1M_QUERY,
+            (normalized_codes, storage_series_type, actual_start, actual_end, min(limit, _MAX_FUTURES_1M_LIMIT)),
+            stage="futures_1m",
         )
 
     def list_futures_coverage_batch(self, series_type: str = "") -> QueryBatch:
