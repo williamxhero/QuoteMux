@@ -223,6 +223,37 @@ def test_classify_streams_every_exact_product_with_real_classifier_path(tmp_path
     assert [cursor.executions[0][1][1:] for cursor in connection.named] == [(product, exchange) for product, exchange in sorted(PRODUCT_EXCHANGE.items())]
 
 
+def test_collect_admitted_uses_one_global_stream_and_preserves_islands_gaps_and_warmup() -> None:
+    from quotemux.futures_partial_contract import APEX_SOURCE_KEY, PYRAMID_SOURCE_KEY, SHINNY_SOURCE_KEY
+    from quotemux.store.futures_partial_publication import _collect_admitted
+
+    def row(product, exchange, bar_time, source, candidate=None):
+        return (product, exchange, "apex_l0_adjusted", bar_time, 1.0, 2.0, 0.5, 1.5, 3.0, None, 0.0, source, candidate)
+    rows = (
+        row("AP", "CZCE", "2020-01-01 09:01:00", APEX_SOURCE_KEY),
+        row("AP", "CZCE", "2020-01-01 09:02:00", APEX_SOURCE_KEY),
+        row("AP", "CZCE", "2020-01-01 09:03:00", SHINNY_SOURCE_KEY),
+        row("ag", "SHFE", "2020-01-01 09:01:00", PYRAMID_SOURCE_KEY, "a" * 64),
+        row("ag", "SHFE", "2020-01-01 09:03:00", PYRAMID_SOURCE_KEY, "b" * 64),
+    )
+    class Cursor:
+        def __init__(self): self.executions = []; self.pending = [rows, ()]
+        def execute(self, query, params=()): self.executions.append((str(query), tuple(params)))
+        def fetchmany(self, _size): return self.pending.pop(0)
+        def close(self): pass
+    class Connection:
+        def __init__(self): self.cursors = []
+        def cursor(self, **kwargs):
+            assert kwargs["name"] == "future_partial_admitted_rows"; cursor = Cursor(); self.cursors.append(cursor); return cursor
+
+    connection = Connection()
+    boundaries, intervals, coverage = _collect_admitted(connection, "qmi-v1-" + "1" * 64)
+    assert len(connection.cursors) == 1 and connection.cursors[0].executions[0][1] == ("qmi-v1-" + "1" * 64,) * 2
+    assert [(item["product_code"], item["source_key"], item["eligible_row_count"]) for item in boundaries] == [("AP", APEX_SOURCE_KEY, 2), ("AP", SHINNY_SOURCE_KEY, 1), ("ag", PYRAMID_SOURCE_KEY, 2)]
+    assert [(item["product_code"], item["start_time"], item["end_time"], item["observed_count"]) for item in intervals] == [("AP", "2020-01-01 09:01:00", "2020-01-01 09:03:00", 3), ("ag", "2020-01-01 09:01:00", "2020-01-01 09:01:00", 1), ("ag", "2020-01-01 09:03:00", "2020-01-01 09:03:00", 1)]
+    assert coverage["warmup_first_observed"] == {"AP": "2020-01-01 09:01:00", "ag": "2020-01-01 09:01:00"}
+
+
 
 
 def test_partial_coverage_binds_all_sql_placeholders() -> None:

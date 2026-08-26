@@ -61,10 +61,11 @@ def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, obje
         if current_interval is not None:
             current_interval["observed_rowset_sha256"] = interval_digest.hexdigest(); current_interval["interval_id"] = _interval_id({key:value for key,value in current_interval.items() if key != "interval_id"}); intervals.append(current_interval)
         current_interval = None; interval_digest = None
-    for index, (product_code, exchange) in enumerate(sorted(PRODUCT_EXCHANGES)):
-      cursor = connection.cursor(name=f"future_partial_admitted_{index}", row_factory=tuple_row)
-      try:
-        cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows where product_code=%s and exchange=%s order by bar_time", (qmi_id,qmi_id,product_code,exchange))
+    # The admitted relation must run once.  Filtering it once per product can
+    # make PostgreSQL re-evaluate tens of millions of facts/admissions 23x.
+    cursor = connection.cursor(name="future_partial_admitted_rows", row_factory=tuple_row)
+    try:
+        cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows order by product_code collate \"C\",exchange collate \"C\",bar_time", (qmi_id,qmi_id))
         while rows := cursor.fetchmany(100_000):
           for raw in rows:
             row = _row_payload(raw); product = str(row["product_code"]); timestamp = datetime.fromisoformat(str(row["bar_time"]))
@@ -78,7 +79,7 @@ def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, obje
             if start_new:
                 close_interval(); current_interval = {"product_code":product,"exchange":row["exchange"],"start_time":str(row["bar_time"]),"end_time":str(row["bar_time"]),"status":"accepted","observed_count":0,"residual_json":{"missing_bar_semantics":"skip","meaning":"observed consecutive one-minute facts only; session completeness is not asserted","open_interest":"unavailable_or_null"}}; interval_digest = hashlib.sha256()
             current_interval["end_time"] = str(row["bar_time"]); current_interval["observed_count"] = int(current_interval["observed_count"]) + 1; interval_digest.update(canonical_json_bytes(row) + b"\n")
-      finally:
+    finally:
         cursor.close()
     close_boundary(); close_interval()
     # The three known legacy exclusions are product-specific evidence; all
