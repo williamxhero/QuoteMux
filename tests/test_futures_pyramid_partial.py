@@ -193,6 +193,36 @@ def test_prior_qmi_child_manifest_mismatch_fails_closed(monkeypatch) -> None:
         importer._verify_prior_qmi(object(), qmi_id="qmi-v1-" + "1" * 64, receipt=receipt, plan_payload=plan, inserted=1, equivalent=0, conflict=1)
 
 
+def test_classify_streams_every_exact_product_with_real_classifier_path(tmp_path, monkeypatch) -> None:
+    from quotemux.futures_partial_contract import PRODUCT_EXCHANGE, PYRAMID_SOURCE_KEY
+    from quotemux.store import futures_pyramid_import as importer
+
+    candidate = {"product_code": "T", "exchange": "CFFEX", "bar_time": "2020-01-01 09:01:00", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 1.0, "open_interest": None, "adjustment_offset": 0.0, "source_key": PYRAMID_SOURCE_KEY}
+    bundle = importer.PyramidBundle(tmp_path, {"authorization": {}}, "a" * 64, "b" * 64, 1)
+    monkeypatch.setattr(importer, "load_pyramid_filesystem_bundle", lambda _path: bundle)
+    monkeypatch.setattr(importer, "_rows", lambda _path, **_kwargs: iter((candidate,)))
+
+    class Cursor:
+        def __init__(self, named): self.named = named; self.executions = []
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, query, params=()): self.executions.append((str(query), tuple(params)))
+        def fetchone(self): return (1, 1, "2020-01-01 09:01:00", "2020-01-01 09:01:00")
+        def fetchmany(self, _size): return []
+        def close(self): pass
+
+    class Connection:
+        def __init__(self): self.named = []
+        def cursor(self, *, name=None, **_kwargs):
+            cursor = Cursor(name); (self.named if name else []).append(cursor); return cursor
+        def rollback(self): pass
+
+    connection = Connection()
+    result = importer.FuturesPyramidImporter(lambda: connection).classify_filesystem_bundle(tmp_path, tmp_path / "disposition.jsonl.gz")
+    assert result["candidate_count"] == 1
+    assert [cursor.executions[0][1][1:] for cursor in connection.named] == [(product, exchange) for product, exchange in sorted(PRODUCT_EXCHANGE.items())]
+
+
 
 
 def test_partial_coverage_binds_all_sql_placeholders() -> None:

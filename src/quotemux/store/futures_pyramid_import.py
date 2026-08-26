@@ -324,7 +324,7 @@ class FuturesPyramidImporter:
                     # its default-collation primary key on the live database.
                     # Freeze the same Python/C product order in 23 indexed,
                     # per-product time streams instead.
-                    for index, (product, exchange) in enumerate(sorted(PRODUCT_EXCHANGES)):
+                    for index, (product, exchange) in enumerate(sorted(PRODUCT_EXCHANGE.items())):
                         stream = connection.cursor(name=f"future_pyramid_classify_{index}", row_factory=tuple_row)
                         try:
                             stream.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset,open_interest,source_key from fact.future_bar_1m where series_type=%s and product_code=%s and exchange=%s order by bar_time", (SERIES_TYPE, product, exchange))
