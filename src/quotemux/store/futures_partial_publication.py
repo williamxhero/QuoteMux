@@ -46,9 +46,13 @@ class FuturesPartialPublisher:
                 if expected_generation is not None and int(generation[0]) != expected_generation: raise ValueError("future generation is stale")
                 qmg_payload = {"dataset_id": DATASET_ID, "generation": int(generation[0]), "row_count": int(generation[1]), "first": str(generation[2]), "last": str(generation[3])}
                 qmg_id = canonical_identity("qmg", qmg_payload)
-                qmp_payload = {"dataset_id": DATASET_ID, "qmi_id": qmi_id, "qmi_fact_rowset": imported[0], "catalog_identity": catalog_identity, "qmg_id": qmg_id, "missing_bar_semantics": "skip", "open_interest": "unavailable_or_null"}
+                qmp_payload = {"dataset_id": DATASET_ID, "qmi_id": qmi_id, "qmi_fact_rowset": imported[0], "catalog_identity": catalog_identity, "qmg_id": qmg_id, "missing_bar_semantics": "skip", "open_interest": "unavailable_or_null", "sources": [
+                    {"source_key":"apex_l0_import","lineage":"legacy_reconstructed","raw_artifact":"unavailable","entitlement":"unverified","admission":"row_quality_gate"},
+                    {"source_key":"pyramid_back_adjusted_20260714","lineage":"user_provided/pyramid_post_adjusted_20260714","admission":"qmi_exact_key_candidate_hash"},
+                    {"source_key":"shinny_edb_derived_back_adjusted_20260811","lineage":"derived_back_adjusted","admission":"row_quality_gate","actual_contract_mapping":"recorded_in_source_key"},
+                ]}
                 qmp_id = canonical_identity("qmp", qmp_payload)
-                qmc_payload = {"dataset_id": DATASET_ID, "qmp_id": qmp_id, "qmg_id": qmg_id, "contract": "observed_admitted_only_skip_gaps"}
+                qmc_payload = {"dataset_id": DATASET_ID, "qmp_id": qmp_id, "qmg_id": qmg_id, "contract": "observed_admitted_only_skip_gaps", "timezone":"Asia/Shanghai", "interval_bounds":"inclusive_local_naive", "missing_bar_semantics":"skip", "oi":"null_or_unavailable", "session_grid":"not asserted_complete", "partial_contract_satisfied":"identity_and_skip_semantics_only"}
                 qmc_id = canonical_identity("qmc", qmc_payload)
                 cursor.execute("insert into audit.future_bar_1m_partial_publication (qmp_id,dataset_id,payload_json,payload_sha256) values (%s,%s,%s::jsonb,%s) on conflict (qmp_id) do update set payload_json=excluded.payload_json where audit.future_bar_1m_partial_publication.payload_sha256=excluded.payload_sha256", (qmp_id,DATASET_ID,json.dumps(qmp_payload,sort_keys=True),_payload_hash(qmp_payload)))
                 cursor.execute("insert into audit.future_bar_1m_partial_revision (qmc_id,qmp_id,payload_json,payload_sha256) values (%s,%s,%s::jsonb,%s) on conflict (qmc_id) do update set payload_json=excluded.payload_json where audit.future_bar_1m_partial_revision.payload_sha256=excluded.payload_sha256", (qmc_id,qmp_id,json.dumps(qmc_payload,sort_keys=True),_payload_hash(qmc_payload)))
