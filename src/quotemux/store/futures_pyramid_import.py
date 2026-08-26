@@ -23,6 +23,7 @@ SOURCE_KEY = "pyramid_back_adjusted_20260714"
 FACT_TRANSFORM_VERSION = "quotemux_fact_source_key_v1"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _PRODUCTS = frozenset(("ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"))
+_EXCHANGE = {"ag":"SHFE","al":"SHFE","AP":"CZCE","CF":"CZCE","cu":"SHFE","hc":"SHFE","i":"DCE","j":"DCE","m":"DCE","MA":"CZCE","ni":"SHFE","p":"DCE","ru":"SHFE","sc":"INE","T":"CFFEX","TA":"CZCE","TF":"CFFEX","v":"DCE","y":"DCE","lh":"DCE","SA":"CZCE","ao":"SHFE","si":"GFEX"}
 
 
 class FuturesPyramidImportError(ValueError):
@@ -53,6 +54,8 @@ def _fact_row(raw: Mapping[str, object]) -> dict[str, object]:
     product = str(raw.get("product_code", ""))
     if product not in _PRODUCTS or product == "TL":
         raise FuturesPyramidImportError(f"unsupported Pyramid product_code: {product}")
+    if raw.get("exchange") != _EXCHANGE[product]:
+        raise FuturesPyramidImportError(f"Pyramid exchange mismatch for {product}")
     required = ("exchange", "bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")
     if any(raw.get(name) is None for name in required):
         raise FuturesPyramidImportError("Pyramid canonical row has a missing required field")
@@ -134,10 +137,6 @@ def _publisher_connection() -> Any:
     except ValueError as exc:
         raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_PORT must be an integer") from exc
     return psycopg.connect(host=required["HOST"], port=port, dbname=required["NAME"], user=required["USER"], password=required["PASSWORD"])
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())
 
 
 class FuturesPyramidImporter:
@@ -227,3 +226,7 @@ class FuturesPyramidImporter:
           when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end
           from fact.future_bar_1m bars where bars.product_code=stage.product_code and bars.bar_time=stage.bar_time and bars.series_type='apex_l0_adjusted'""")
         cursor.execute("update future_pyramid_stage set disposition='missing_valid' where disposition is null")
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

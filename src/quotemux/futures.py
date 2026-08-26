@@ -248,6 +248,9 @@ FUTURE_SCHEMA_SQL = (
               and tgname = 'future_bar_1m_coverage_after_insert'
               and not tgisinternal
         ) then
+            drop trigger future_bar_1m_coverage_after_insert on fact.future_bar_1m;
+        end if;
+        if true then
             create trigger future_bar_1m_coverage_after_insert
             after insert on fact.future_bar_1m
             referencing new table as inserted_rows
@@ -259,12 +262,15 @@ FUTURE_SCHEMA_SQL = (
     """
     do $$
     begin
-        if not exists (
+        if exists (
             select 1 from pg_trigger
             where tgrelid = 'fact.future_bar_1m'::regclass
               and tgname = 'future_bar_1m_coverage_after_delete'
               and not tgisinternal
         ) then
+            drop trigger future_bar_1m_coverage_after_delete on fact.future_bar_1m;
+        end if;
+        if true then
             create trigger future_bar_1m_coverage_after_delete
             after delete on fact.future_bar_1m
             referencing old table as deleted_rows
@@ -285,7 +291,7 @@ FUTURE_SCHEMA_SQL = (
             drop trigger future_bar_1m_coverage_after_key_update on fact.future_bar_1m;
         end if;
 
-        if not exists (
+        if exists (
             select 1 from pg_trigger
             where tgrelid = 'fact.future_bar_1m'::regclass
               and tgname = 'future_bar_1m_coverage_after_update'
@@ -364,9 +370,10 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     do $$ begin
-        if not exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_insert' and not tgisinternal) then
-            create trigger future_bar_1m_series_generation_after_insert after insert on fact.future_bar_1m referencing new table as inserted_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_insert();
+        if exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_insert' and not tgisinternal) then
+            drop trigger future_bar_1m_series_generation_after_insert on fact.future_bar_1m;
         end if;
+        create trigger future_bar_1m_series_generation_after_insert after insert on fact.future_bar_1m referencing new table as inserted_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_insert();
     end $$
     """,
     """
@@ -381,9 +388,10 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     do $$ begin
-        if not exists (select 1 from pg_trigger where tgrelid='fact.future_bar_1m'::regclass and tgname='future_bar_1m_after_truncate' and not tgisinternal) then
-            create trigger future_bar_1m_after_truncate after truncate on fact.future_bar_1m for each statement execute function fact.maintain_future_bar_1m_after_truncate();
+        if exists (select 1 from pg_trigger where tgrelid='fact.future_bar_1m'::regclass and tgname='future_bar_1m_after_truncate' and not tgisinternal) then
+            drop trigger future_bar_1m_after_truncate on fact.future_bar_1m;
         end if;
+        create trigger future_bar_1m_after_truncate after truncate on fact.future_bar_1m for each statement execute function fact.maintain_future_bar_1m_after_truncate();
     end $$
     """,
     """

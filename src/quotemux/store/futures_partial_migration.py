@@ -2,6 +2,7 @@
 from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
+from psycopg import sql
 from quotemux.infra.db.client import _acquire_connection, _release_connection
 
 DDL = (
@@ -47,8 +48,8 @@ def provision_futures_partial_roles(
     try:
         with connection.cursor() as cursor:
             cursor.execute("do $$ begin if not exists (select 1 from pg_roles where rolname='quotemux_futures_owner') then create role quotemux_futures_owner nologin; end if; if not exists (select 1 from pg_roles where rolname='quotemux_futures_partial_publisher') then create role quotemux_futures_partial_publisher login; end if; if not exists (select 1 from pg_roles where rolname='quotemux_public_reader') then create role quotemux_public_reader login; end if; end $$")
-            cursor.execute("alter role quotemux_futures_partial_publisher password %s", (publisher_password,))
-            cursor.execute("alter role quotemux_public_reader password %s", (reader_password,))
+            cursor.execute(sql.SQL("alter role quotemux_futures_partial_publisher password {}").format(sql.Literal(publisher_password)))
+            cursor.execute(sql.SQL("alter role quotemux_public_reader password {}").format(sql.Literal(reader_password)))
             cursor.execute("revoke all on fact.future_bar_1m from public, quotemux_futures_partial_publisher, quotemux_public_reader")
             cursor.execute("grant usage on schema fact, audit, ref to quotemux_futures_partial_publisher, quotemux_public_reader")
             cursor.execute("grant select, insert on fact.future_bar_1m to quotemux_futures_partial_publisher")

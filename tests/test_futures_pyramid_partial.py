@@ -27,6 +27,12 @@ def test_pyramid_bundle_requires_canonical_t_and_rejects_tl() -> None:
         load_pyramid_bundle(bad_artifact, bad_manifest)
 
 
+def test_pyramid_bundle_rejects_ao_gfex_exchange() -> None:
+    artifact, manifest = _artifact("ao")
+    with pytest.raises(FuturesPyramidImportError, match="exchange mismatch"):
+        load_pyramid_bundle(artifact, manifest)
+
+
 def test_partial_identity_has_prefixed_64_hex_digest() -> None:
     value = canonical_identity("qmc", {"dataset": "future_1m_partial_s000012_quotemux"})
     assert value.startswith("qmc-v1-") and len(value) == 71

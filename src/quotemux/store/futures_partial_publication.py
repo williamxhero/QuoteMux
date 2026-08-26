@@ -132,6 +132,8 @@ def _main() -> int:
     parser.add_argument("--expected-generation", type=int)
     parser.add_argument("--out")
     args = parser.parse_args()
+    if args.command == "verify" and not args.manifest:
+        raise ValueError("verify requires --manifest")
     publisher = FuturesPartialPublisher(_publisher_connection)
     if args.manifest:
         from pathlib import Path
