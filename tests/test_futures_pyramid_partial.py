@@ -39,6 +39,22 @@ def test_partial_identity_has_prefixed_64_hex_digest() -> None:
     assert validate_identity(value, "qmc") == value
 
 
+def test_partial_catalog_identity_is_derived_from_exact_quotemux_reference_rows() -> None:
+    from quotemux.futures_partial_contract import PRODUCT_EXCHANGES, SERIES_TYPE
+    from quotemux.store.futures_partial_publication import _verified_catalog_identity
+
+    class Cursor:
+        def execute(self, _query, _params=()): pass
+        def fetchall(self): return [(product, exchange, SERIES_TYPE, "") for product, exchange in PRODUCT_EXCHANGES]
+
+    identity = _verified_catalog_identity(Cursor())
+    assert identity.startswith("qmf-catalog-v1-") and len(identity) == 79
+    class Missing(Cursor):
+        def fetchall(self): return super().fetchall()[:-1]
+    with pytest.raises(ValueError, match="exact S000012"):
+        _verified_catalog_identity(Missing())
+
+
 def test_partial_reader_binds_generation_and_rejects_tl() -> None:
     class Client:
         def query_batch(self, _query, _params=(), *, stage="sql"):
@@ -90,6 +106,9 @@ def test_futures_partial_migration_grants_trigger_and_receipt_path() -> None:
     assert "audit.future_bar_1m_series_generation" in text
     assert "quotemux_futures_partial_publisher" in text
     assert "quotemux_futures_owner" in text
+    assert "OWNER_RUNTIME_GRANTS" in text
+    assert "revoke insert,update,delete,truncate on fact.future_bar_1m" in text
+    assert "for statement in OWNER_RUNTIME_GRANTS: cursor.execute(statement)\n            for statement in HARDENED_FUNCTION_DDL" in text
 
 
 def test_partial_role_provisioning_forces_tuple_rows_on_dict_default_connection() -> None:
@@ -143,6 +162,36 @@ def test_disposition_plan_persists_actual_stream_hash_and_count(tmp_path) -> Non
     assert list(rows)[1]["disposition"] == "existing_conflict"
 
 
+def test_disposition_plan_failure_never_publishes_a_partial_final_artifact(tmp_path) -> None:
+    from quotemux.store.futures_pyramid_import import _write_plan
+    path = tmp_path / "plan.jsonl.gz"
+    def broken_rows():
+        yield {"product_code": "T", "disposition": "missing_valid"}
+        raise RuntimeError("fixture failure")
+    with pytest.raises(RuntimeError, match="fixture failure"):
+        _write_plan(path, {}, broken_rows())
+    assert not path.exists()
+    assert not path.with_suffix(path.suffix + ".records.partial").exists()
+    assert not path.with_suffix(path.suffix + ".gzip.partial").exists()
+
+
+def test_prior_qmi_child_manifest_mismatch_fails_closed(monkeypatch) -> None:
+    from quotemux.store import futures_pyramid_import as importer
+    plan = {"disposition_count": 2, "disposition_sha256": "f" * 64}
+    expected = {
+        "dispositions": {"count": 2, "sha256": "d" * 64},
+        "admissions": {"count": 1, "sha256": "a" * 64},
+    }
+    receipt = {"plan": plan, "child_manifests": expected}
+    monkeypatch.setattr(importer, "_persisted_child_manifests", lambda *_args: expected)
+    importer._verify_prior_qmi(object(), qmi_id="qmi-v1-" + "1" * 64, receipt=receipt, plan_payload=plan, inserted=1, equivalent=0, conflict=1)
+    monkeypatch.setattr(importer, "_persisted_child_manifests", lambda *_args: {**expected, "admissions": {"count": 0, "sha256": "0" * 64}})
+    with pytest.raises(FuturesPyramidImportError, match="child sets"):
+        importer._verify_prior_qmi(object(), qmi_id="qmi-v1-" + "1" * 64, receipt=receipt, plan_payload=plan, inserted=1, equivalent=0, conflict=1)
+
+
+
+
 def test_partial_coverage_binds_all_sql_placeholders() -> None:
     qmg_payload={"dataset_id":"future_1m_partial_s000012_quotemux","series_type":"apex_l0_adjusted","generation":1,"row_count":1,"first_bar_time":"2020-01-01 09:01:00","last_bar_time":"2020-01-01 09:01:00"}; qmg=canonical_identity("qmg",qmg_payload)
     publication={"dataset_id":"future_1m_partial_s000012_quotemux","qmg_id":qmg}; qmp=canonical_identity("qmp",publication); revision={"dataset_id":"future_1m_partial_s000012_quotemux","qmp_id":qmp,"qmg_id":qmg}; qmc=canonical_identity("qmc",revision)
@@ -167,6 +216,8 @@ def test_partial_manifest_order_uses_c_collation_for_mixed_case_products() -> No
     assert sorted(("ag", "AP", "CF", "ao")) == ["AP", "CF", "ag", "ao"]
     assert source.count(r'product_code collate \"C\"') >= 3
     assert r'boundary_id collate \"C\"' in source and r'interval_id collate \"C\"' in source
+    assert 'name="future_partial_persisted_boundaries"' in source
+    assert 'name="future_partial_persisted_intervals"' in source
 
 
 def test_partial_verify_requires_persisted_parents() -> None:
@@ -186,6 +237,7 @@ def test_partial_verify_requires_persisted_parents() -> None:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
         def execute(self, query, _params=()): self.last_sql = str(query)
+        def close(self): pass
         def fetchone(self):
             if "partial_publication where" in self.last_sql: return (encoded(publication),) if self.parents else None
             if "partial_revision where" in self.last_sql: return (encoded(revision),) if self.parents else None

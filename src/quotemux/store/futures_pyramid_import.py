@@ -210,18 +210,24 @@ def _write_plan(path: Path, header: dict[str, object], rows: Iterator[dict[str, 
     if path.exists(): raise FuturesPyramidImportError("refusing to overwrite a disposition artifact")
     digest, count, counts = hashlib.sha256(), 0, {"missing_valid": 0, "already_present_equivalent": 0, "existing_conflict": 0}
     partial = path.with_suffix(path.suffix + ".records.partial")
-    if partial.exists(): raise FuturesPyramidImportError("refusing to overwrite a partial disposition artifact")
+    compressed_partial = path.with_suffix(path.suffix + ".gzip.partial")
+    if partial.exists() or compressed_partial.exists(): raise FuturesPyramidImportError("refusing to overwrite a partial disposition artifact")
     try:
         with partial.open("x", encoding="utf-8", newline="\n") as stream:
             for row in rows:
                 text = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False); stream.write(text + "\n"); digest.update(text.encode() + b"\n")
                 count += 1; counts[str(row["disposition"])] += 1
         complete = {**header, "disposition_count": count, "disposition_sha256": digest.hexdigest(), "counts": counts}
-        with gzip.open(path, "xt", encoding="utf-8", newline="\n") as stream, partial.open("r", encoding="utf-8") as records:
+        with gzip.open(compressed_partial, "xt", encoding="utf-8", newline="\n") as stream, partial.open("r", encoding="utf-8") as records:
             stream.write(json.dumps({"kind": "header", **complete}, sort_keys=True, separators=(",", ":")) + "\n")
             for line in records: stream.write(line)
+        # Link-to-final is an atomic no-clobber publication on the same volume:
+        # a failed classifier cannot leave a truncated plan at the final path.
+        try: os.link(compressed_partial, path)
+        except FileExistsError as exc: raise FuturesPyramidImportError("refusing to overwrite a disposition artifact") from exc
     finally:
         if partial.exists(): partial.unlink()
+        if compressed_partial.exists(): compressed_partial.unlink()
     return {**complete, "artifact": str(path)}
 
 
@@ -240,6 +246,60 @@ def _read_plan(path: Path) -> tuple[dict[str, object], Iterator[dict[str, object
     return head, records()
 
 
+_DISPOSITION_FIELDS = ("product_code", "exchange", "series_type", "bar_time", "candidate_sha256", "disposition", "existing_source_key", "existing_fact_sha256")
+_ADMISSION_FIELDS = ("product_code", "exchange", "series_type", "bar_time", "candidate_sha256", "disposition")
+
+
+def _stream_manifest(connection: Any, *, cursor_name: str, statement: str, params: tuple[object, ...], fields: tuple[str, ...]) -> dict[str, object]:
+    """Hash an ordered child set without buffering the multi-million-row set."""
+    cursor = connection.cursor(name=cursor_name, row_factory=tuple_row)
+    digest, count = hashlib.sha256(), 0
+    try:
+        cursor.execute(statement, params)
+        while rows := cursor.fetchmany(100_000):
+            for row in rows:
+                digest.update(canonical_json_bytes(dict(zip(fields, row, strict=True))) + b"\n")
+                count += 1
+    finally:
+        cursor.close()
+    return {"count": count, "sha256": digest.hexdigest()}
+
+
+def _stage_child_manifests(connection: Any) -> dict[str, dict[str, object]]:
+    order = 'product_code collate "C",exchange collate "C",bar_time,candidate_sha256 collate "C"'
+    return {
+        "dispositions": _stream_manifest(connection, cursor_name="future_pyramid_stage_dispositions", fields=_DISPOSITION_FIELDS, params=(SERIES_TYPE,), statement=f"""
+            select product_code,exchange,%s::text as series_type,bar_time::text,candidate_sha256,
+                   case when actual_disposition='inserted' then 'missing_valid' else actual_disposition end,
+                   existing_source_key,existing_fact_sha256
+            from future_pyramid_stage order by {order}"""),
+        "admissions": _stream_manifest(connection, cursor_name="future_pyramid_stage_admissions", fields=_ADMISSION_FIELDS, params=(SERIES_TYPE,), statement=f"""
+            select product_code,exchange,%s::text as series_type,bar_time::text,candidate_sha256,actual_disposition
+            from future_pyramid_stage where actual_disposition in ('inserted','already_present_equivalent') order by {order}"""),
+    }
+
+
+def _persisted_child_manifests(connection: Any, qmi_id: str) -> dict[str, dict[str, object]]:
+    order = 'product_code collate "C",exchange collate "C",series_type collate "C",bar_time,candidate_sha256 collate "C"'
+    return {
+        "dispositions": _stream_manifest(connection, cursor_name="future_pyramid_persisted_dispositions", fields=_DISPOSITION_FIELDS, params=(qmi_id,), statement=f"""
+            select product_code,exchange,series_type,bar_time::text,candidate_sha256,disposition,existing_source_key,existing_fact_sha256
+            from audit.future_bar_1m_import_disposition where qmi_id=%s order by {order}"""),
+        "admissions": _stream_manifest(connection, cursor_name="future_pyramid_persisted_admissions", fields=_ADMISSION_FIELDS, params=(qmi_id,), statement=f"""
+            select product_code,exchange,series_type,bar_time::text,candidate_sha256,disposition
+            from audit.future_bar_1m_import_admission where qmi_id=%s order by {order}"""),
+    }
+
+
+def _verify_prior_qmi(connection: Any, *, qmi_id: str, receipt: Mapping[str, object], plan_payload: Mapping[str, object], inserted: int, equivalent: int, conflict: int) -> None:
+    expected = receipt.get("child_manifests")
+    if receipt.get("plan") != dict(plan_payload) or not isinstance(expected, Mapping):
+        raise FuturesPyramidImportError("existing qmi receipt is incomplete")
+    actual = _persisted_child_manifests(connection, qmi_id)
+    if actual != dict(expected) or actual["dispositions"]["count"] != inserted + equivalent + conflict or actual["admissions"]["count"] != inserted + equivalent:
+        raise FuturesPyramidImportError("existing qmi child sets differ from its sealed receipt")
+
+
 class FuturesPyramidImporter:
     def __init__(self, connection_factory: Callable[[], Any] = _acquire_connection) -> None: self._connection_factory = connection_factory
 
@@ -251,14 +311,19 @@ class FuturesPyramidImporter:
                 cursor.execute("begin isolation level repeatable read read only")
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1", (SERIES_TYPE,)); generation = cursor.fetchone()
                 if not generation: raise FuturesPyramidImportError("future series generation is absent")
-                stream = connection.cursor(name="future_pyramid_classify_existing", row_factory=tuple_row)
-                stream.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset,open_interest,source_key from fact.future_bar_1m where series_type=%s and product_code=any(%s::text[]) order by product_code collate \"C\",exchange collate \"C\",bar_time", (SERIES_TYPE, list(PRODUCTS)))
                 def existing_rows() -> Iterator[tuple[object, ...]]:
-                    try:
-                        while rows := stream.fetchmany(100_000):
-                            yield from rows
-                    finally:
-                        stream.close()
+                    # A global COLLATE "C" sort on the fact table cannot use
+                    # its default-collation primary key on the live database.
+                    # Freeze the same Python/C product order in 23 indexed,
+                    # per-product time streams instead.
+                    for index, (product, exchange) in enumerate(sorted(PRODUCT_EXCHANGES)):
+                        stream = connection.cursor(name=f"future_pyramid_classify_{index}", row_factory=tuple_row)
+                        try:
+                            stream.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset,open_interest,source_key from fact.future_bar_1m where series_type=%s and product_code=%s and exchange=%s order by bar_time", (SERIES_TYPE, product, exchange))
+                            while rows := stream.fetchmany(100_000):
+                                yield from rows
+                        finally:
+                            stream.close()
                 existing = existing_rows(); current = next(existing, None)
                 def dispositions() -> Iterator[dict[str, object]]:
                     nonlocal current
@@ -290,6 +355,7 @@ class FuturesPyramidImporter:
                 if prior:
                     prior_receipt=prior[1] if isinstance(prior[1],dict) else json.loads(str(prior[1]))
                     if prior[0] != payload_sha or prior_receipt.get("bundle_manifest") != bundle.manifest: raise FuturesPyramidImportError("existing qmi receipt differs")
+                    _verify_prior_qmi(connection, qmi_id=qmi_id, receipt=prior_receipt, plan_payload=plan_payload, inserted=int(prior[2]), equivalent=int(prior[3]), conflict=int(prior[4]))
                     connection.rollback(); return {"status":"idempotent","qmi_id":qmi_id,"inserted_count":prior[2],"equivalent_count":prior[3],"conflict_count":prior[4]}
                 cursor.execute("create temporary table future_pyramid_stage (product_code text not null,exchange text not null,bar_time timestamp not null,open double precision not null,high double precision not null,low double precision not null,close double precision not null,volume double precision not null,adjustment_offset double precision not null,candidate_sha256 text not null,planned_disposition text not null,existing_source_key text,existing_fact_sha256 text,actual_disposition text) on commit drop")
                 digest, count = hashlib.sha256(), 0
@@ -321,10 +387,15 @@ class FuturesPyramidImporter:
                 cursor.execute("select count(*) from future_pyramid_stage where not ((planned_disposition='missing_valid' and actual_disposition in ('inserted','already_present_equivalent')) or (planned_disposition='already_present_equivalent' and actual_disposition='already_present_equivalent') or (planned_disposition='existing_conflict' and actual_disposition='existing_conflict'))")
                 if int(cursor.fetchone()[0]): raise FuturesPyramidImportError("post-insert fact equality/race verification failed")
                 cursor.execute("select count(*) filter(where actual_disposition='inserted'),count(*) filter(where actual_disposition='already_present_equivalent'),count(*) filter(where actual_disposition='existing_conflict') from future_pyramid_stage"); inserted,equivalent,conflict = map(int,cursor.fetchone())
-                receipt = {"qmi_id":qmi_id,"bundle_manifest":bundle.manifest,"bundle_source_normalized_rowset_sha256":bundle.source_normalized_rowset_sha256,"bundle_archive_fact_normalized_rowset_sha256":bundle.manifest["fact_normalization"]["fact_normalized_rowset_sha256"],"bundle_canonical_fact_rowset_sha256":bundle.canonical_fact_rowset_sha256,"fact_transform_version":FACT_TRANSFORM_VERSION,"plan":plan_payload}
+                child_manifests = _stage_child_manifests(connection)
+                if child_manifests["dispositions"]["count"] != inserted + equivalent + conflict or child_manifests["admissions"]["count"] != inserted + equivalent:
+                    raise FuturesPyramidImportError("staged qmi child counts do not match publication counts")
+                receipt = {"qmi_id":qmi_id,"bundle_manifest":bundle.manifest,"bundle_source_normalized_rowset_sha256":bundle.source_normalized_rowset_sha256,"bundle_archive_fact_normalized_rowset_sha256":bundle.manifest["fact_normalization"]["fact_normalized_rowset_sha256"],"bundle_canonical_fact_rowset_sha256":bundle.canonical_fact_rowset_sha256,"fact_transform_version":FACT_TRANSFORM_VERSION,"plan":plan_payload,"child_manifests":child_manifests}
                 cursor.execute("insert into audit.future_bar_1m_import_publication(qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count) values(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",(qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_sha,json.dumps(receipt,sort_keys=True),inserted,equivalent,conflict))
                 cursor.execute("insert into audit.future_bar_1m_import_disposition(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition,existing_source_key,existing_fact_sha256) select %s,product_code,exchange,%s,bar_time,candidate_sha256,case when actual_disposition='inserted' then 'missing_valid' else actual_disposition end,existing_source_key,existing_fact_sha256 from future_pyramid_stage",(qmi_id,SERIES_TYPE))
                 cursor.execute("insert into audit.future_bar_1m_import_admission(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,actual_disposition from future_pyramid_stage where actual_disposition in ('inserted','already_present_equivalent')",(qmi_id,SERIES_TYPE))
+                if _persisted_child_manifests(connection, qmi_id) != child_manifests:
+                    raise FuturesPyramidImportError("persisted qmi child sets differ from the staged receipt")
             connection.commit(); return {"status":"success","qmi_id":qmi_id,"inserted_count":inserted,"equivalent_count":equivalent,"conflict_count":conflict,"plan_sha256":payload_sha}
         except Exception: connection.rollback(); raise
         finally:

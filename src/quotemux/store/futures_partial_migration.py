@@ -74,6 +74,19 @@ TRIGGER_DDL = (
 )
 
 
+# These grants are applied before the SECURITY DEFINER functions are handed to
+# their NOLOGIN owner and before their triggers become live.  The owner can
+# maintain derived coverage/generation state, but can never mutate raw facts.
+OWNER_RUNTIME_GRANTS = (
+    "grant usage on schema fact,audit to quotemux_futures_owner",
+    "revoke insert,update,delete,truncate on fact.future_bar_1m from quotemux_futures_owner",
+    "grant select on fact.future_bar_1m to quotemux_futures_owner",
+    "grant select,insert,update,delete on fact.future_bar_1m_coverage to quotemux_futures_owner",
+    "grant select,insert on audit.future_bar_1m_series_generation to quotemux_futures_owner",
+    "grant select on audit.future_bar_1m_import_publication,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_revision to quotemux_futures_owner",
+)
+
+
 def apply_futures_partial_migration(connection_factory: Callable[[], Any] = _acquire_connection) -> None:
     """Apply the locked privileged migration; it is safe to repeat."""
     connection = connection_factory(); owns = connection_factory is _acquire_connection
@@ -82,6 +95,7 @@ def apply_futures_partial_migration(connection_factory: Callable[[], Any] = _acq
             cursor.execute("set local lock_timeout='3s'"); cursor.execute("select pg_advisory_xact_lock(hashtext('quotemux_futures_partial_migration_v2'))")
             cursor.execute("do $$ begin if not exists(select 1 from pg_roles where rolname='quotemux_futures_owner') then create role quotemux_futures_owner nologin; end if; end $$")
             for statement in METADATA_DDL: cursor.execute(statement)
+            for statement in OWNER_RUNTIME_GRANTS: cursor.execute(statement)
             for statement in HARDENED_FUNCTION_DDL: cursor.execute(statement)
             for function in _FUNCTIONS:
                 cursor.execute(f"alter function {function} owner to quotemux_futures_owner"); cursor.execute(f"revoke all on function {function} from public")
@@ -111,7 +125,7 @@ def provision_futures_partial_roles(publisher_password: str, reader_password: st
             cursor.execute("revoke all privileges on fact.stock_daily_1d,fact.stock_bar_1m,fact.future_bar_1m,fact.future_bar_1m_coverage,readmodel.stock_bar_1m_daily_coverage,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval,ref.future_series from quotemux_public_reader")
             cursor.execute("grant usage on schema fact,readmodel,audit,ref to quotemux_public_reader; grant select on fact.stock_daily_1d,fact.stock_bar_1m,fact.future_bar_1m,fact.future_bar_1m_coverage,readmodel.stock_bar_1m_daily_coverage,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval,ref.future_series to quotemux_public_reader")
             cursor.execute("""do $$ declare relation text; begin foreach relation in array array['ref.trade_calendar','readmodel.dataset_build_state','readmodel.future_1m_completeness_active_revision','readmodel.future_1m_completeness_revision','readmodel.future_1m_completeness_revision_interval','readmodel.future_1m_completeness_interval'] loop if to_regclass(relation) is not null then execute format('grant select on %s to quotemux_public_reader',relation); end if; end loop; end $$""")
-            cursor.execute("grant usage on schema fact,audit to quotemux_futures_owner; grant select,insert,update,delete on fact.future_bar_1m,fact.future_bar_1m_coverage,audit.future_bar_1m_series_generation to quotemux_futures_owner; grant select on audit.future_bar_1m_import_publication,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_revision to quotemux_futures_owner")
+            for statement in OWNER_RUNTIME_GRANTS: cursor.execute(statement)
         connection.commit()
     except Exception: connection.rollback(); raise
     finally:

@@ -9,7 +9,7 @@ from typing import Any
 
 from psycopg.rows import tuple_row
 from quotemux.futures_partial_contract import (
-    APEX_SOURCE_KEY, DATASET_ID, INVALID_APEX_KEYS, PYRAMID_SOURCE_KEY,
+    APEX_SOURCE_KEY, DATASET_ID, INVALID_APEX_KEYS, PRODUCT_EXCHANGES, PRODUCTS, PYRAMID_SOURCE_KEY,
     SERIES_TYPE, SHINNY_SOURCE_KEY, admitted_rows_cte, canonical_json_bytes,
 )
 from quotemux.infra.db.client import _acquire_connection, _release_connection
@@ -46,8 +46,6 @@ def _interval_id(row: Mapping[str, object]) -> str:
 
 def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     """Derive actual source islands and observed one-minute runs from one CTE."""
-    cursor = connection.cursor(name="future_partial_admitted_rows", row_factory=tuple_row)
-    cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows order by product_code collate \"C\",exchange collate \"C\",series_type collate \"C\",bar_time", (qmi_id,qmi_id))
     boundaries: list[dict[str, object]] = []; intervals: list[dict[str, object]] = []
     current_boundary: dict[str, object] | None = None; current_interval: dict[str, object] | None = None
     boundary_digest: Any | None = None; interval_digest: Any | None = None
@@ -62,11 +60,12 @@ def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, obje
         if current_interval is not None:
             current_interval["observed_rowset_sha256"] = interval_digest.hexdigest(); current_interval["interval_id"] = _interval_id({key:value for key,value in current_interval.items() if key != "interval_id"}); intervals.append(current_interval)
         current_interval = None; interval_digest = None
-    try:
-      while True:
-        rows = cursor.fetchmany(100_000)
-        if not rows: break
-        for raw in rows:
+    for index, (product_code, exchange) in enumerate(sorted(PRODUCT_EXCHANGES)):
+      cursor = connection.cursor(name=f"future_partial_admitted_{index}", row_factory=tuple_row)
+      try:
+        cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows where product_code=%s and exchange=%s order by bar_time", (qmi_id,qmi_id,product_code,exchange))
+        while rows := cursor.fetchmany(100_000):
+          for raw in rows:
             row = _row_payload(raw); product = str(row["product_code"]); timestamp = datetime.fromisoformat(str(row["bar_time"]))
             warmup.setdefault(product, str(row["bar_time"]))
             bkey = (product, row["exchange"], row["series_type"], row["source_key"])
@@ -78,8 +77,8 @@ def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, obje
             if start_new:
                 close_interval(); current_interval = {"product_code":product,"exchange":row["exchange"],"start_time":str(row["bar_time"]),"end_time":str(row["bar_time"]),"status":"accepted","observed_count":0,"residual_json":{"missing_bar_semantics":"skip","meaning":"observed consecutive one-minute facts only; session completeness is not asserted","open_interest":"unavailable_or_null"}}; interval_digest = hashlib.sha256()
             current_interval["end_time"] = str(row["bar_time"]); current_interval["observed_count"] = int(current_interval["observed_count"]) + 1; interval_digest.update(canonical_json_bytes(row) + b"\n")
-    finally:
-      cursor.close()
+      finally:
+        cursor.close()
     close_boundary(); close_interval()
     # The three known legacy exclusions are product-specific evidence; all
     # other gaps are represented by absent observed runs, never fabricated.
@@ -97,25 +96,46 @@ def _manifest(rows: list[dict[str, object]]) -> dict[str, object]:
     return {"count":len(rows),"sha256":digest.hexdigest()}
 
 
-def _verify_persisted_manifest(cursor: Any, *, qmp_id: str, qmc_id: str, boundaries: list[dict[str, object]], intervals: list[dict[str, object]]) -> None:
+def _verified_catalog_identity(cursor: Any) -> str:
+    """Freeze the exact QuoteMux 23-product reference mapping into qmp."""
+    cursor.execute("select product_code,exchange,series_type,display_name from ref.future_series where series_type=%s and product_code=any(%s::text[]) order by product_code collate \"C\",exchange collate \"C\",series_type collate \"C\"", (SERIES_TYPE, list(PRODUCTS)))
+    rows = [
+        {"product_code": str(product), "exchange": str(exchange), "series_type": str(series), "display_name": str(display)}
+        for product, exchange, series, display in cursor.fetchall()
+    ]
+    expected = set(PRODUCT_EXCHANGES)
+    if len(rows) != len(expected) or {(row["product_code"], row["exchange"]) for row in rows} != expected or any(row["series_type"] != SERIES_TYPE for row in rows):
+        raise ValueError("QuoteMux futures catalog does not contain the exact S000012 product mapping")
+    return "qmf-catalog-v1-" + hashlib.sha256(canonical_json_bytes({"products": rows, "series_type": SERIES_TYPE})).hexdigest()
+
+
+def _verify_persisted_manifest(connection: Any, *, qmp_id: str, qmc_id: str, boundaries: list[dict[str, object]], intervals: list[dict[str, object]]) -> None:
     """Stream persisted immutable rows and reject stale extras or hash drift."""
     expected_boundaries = sorted(boundaries, key=lambda row: (str(row["product_code"]),str(row["start_time"]),str(row["end_time"]),str(row["boundary_id"])))
     expected_intervals = sorted(intervals, key=lambda row: (str(row["product_code"]),str(row["start_time"]),str(row["end_time"]),str(row["interval_id"])))
     expected_interval_exchange = {str(row["interval_id"]): row["exchange"] for row in intervals}
-    cursor.execute("select boundary_id,product_code,exchange,series_type,source_key,start_time::text,end_time::text,evidence_json from audit.future_bar_1m_partial_source_boundary where qmp_id=%s order by product_code collate \"C\",start_time,end_time,boundary_id collate \"C\"",(qmp_id,))
+    cursor = connection.cursor(name="future_partial_persisted_boundaries", row_factory=tuple_row)
     boundary_digest, boundary_count = hashlib.sha256(), 0
-    while rows := cursor.fetchmany(100_000):
-        for boundary_id,product,exchange,series,source,start,end,evidence in rows:
-            detail=evidence if isinstance(evidence,dict) else json.loads(str(evidence))
-            actual={"product_code":product,"exchange":exchange,"series_type":series,"source_key":source,"start_time":start,"end_time":end,"eligible_row_count":detail["eligible_row_count"],"quality_predicate_version":detail["quality_predicate_version"],"pyramid_admission":detail["pyramid_admission"],"eligible_rowset_sha256":detail["eligible_rowset_sha256"],"boundary_id":boundary_id}
-            boundary_digest.update(canonical_json_bytes(actual)+b"\n"); boundary_count += 1
-    cursor.execute("select interval_id,product_code,start_time::text,end_time::text,status,observed_count,residual_json from audit.future_bar_1m_partial_revision_interval where qmc_id=%s order by product_code collate \"C\",start_time,end_time,interval_id collate \"C\"",(qmc_id,))
+    try:
+        cursor.execute("select boundary_id,product_code,exchange,series_type,source_key,start_time::text,end_time::text,evidence_json from audit.future_bar_1m_partial_source_boundary where qmp_id=%s order by product_code collate \"C\",start_time,end_time,boundary_id collate \"C\"",(qmp_id,))
+        while rows := cursor.fetchmany(100_000):
+            for boundary_id,product,exchange,series,source,start,end,evidence in rows:
+                detail=evidence if isinstance(evidence,dict) else json.loads(str(evidence))
+                actual={"product_code":product,"exchange":exchange,"series_type":series,"source_key":source,"start_time":start,"end_time":end,"eligible_row_count":detail["eligible_row_count"],"quality_predicate_version":detail["quality_predicate_version"],"pyramid_admission":detail["pyramid_admission"],"eligible_rowset_sha256":detail["eligible_rowset_sha256"],"boundary_id":boundary_id}
+                boundary_digest.update(canonical_json_bytes(actual)+b"\n"); boundary_count += 1
+    finally:
+        cursor.close()
+    cursor = connection.cursor(name="future_partial_persisted_intervals", row_factory=tuple_row)
     interval_digest, interval_count = hashlib.sha256(), 0
-    while rows := cursor.fetchmany(100_000):
-        for interval_id,product,start,end,status,count,residual in rows:
-            full=residual if isinstance(residual,dict) else json.loads(str(residual)); detail={key:value for key,value in full.items() if key!="observed_rowset_sha256"}
-            actual={"product_code":product,"exchange":expected_interval_exchange[str(interval_id)],"start_time":start,"end_time":end,"status":status,"observed_count":count,"residual_json":detail,"observed_rowset_sha256":full["observed_rowset_sha256"],"interval_id":interval_id}
-            interval_digest.update(canonical_json_bytes(actual)+b"\n"); interval_count += 1
+    try:
+        cursor.execute("select interval_id,product_code,start_time::text,end_time::text,status,observed_count,residual_json from audit.future_bar_1m_partial_revision_interval where qmc_id=%s order by product_code collate \"C\",start_time,end_time,interval_id collate \"C\"",(qmc_id,))
+        while rows := cursor.fetchmany(100_000):
+            for interval_id,product,start,end,status,count,residual in rows:
+                full=residual if isinstance(residual,dict) else json.loads(str(residual)); detail={key:value for key,value in full.items() if key!="observed_rowset_sha256"}
+                actual={"product_code":product,"exchange":expected_interval_exchange[str(interval_id)],"start_time":start,"end_time":end,"status":status,"observed_count":count,"residual_json":detail,"observed_rowset_sha256":full["observed_rowset_sha256"],"interval_id":interval_id}
+                interval_digest.update(canonical_json_bytes(actual)+b"\n"); interval_count += 1
+    finally:
+        cursor.close()
     if boundary_count != len(expected_boundaries) or interval_count != len(expected_intervals) or boundary_digest.hexdigest() != _manifest(expected_boundaries)["sha256"] or interval_digest.hexdigest() != _manifest(expected_intervals)["sha256"]:
         raise ValueError("persisted immutable boundary/interval manifest differs from plan")
 
@@ -124,7 +144,7 @@ class FuturesPartialPublisher:
     """Plans read-only; publication writes immutable metadata, never duplicate bars."""
     def __init__(self, connection_factory: Callable[[], Any] = _acquire_connection) -> None: self._connection_factory = connection_factory
 
-    def plan(self, *, qmi_id: str, catalog_identity: str, expected_generation: int | None = None) -> dict[str, object]:
+    def plan(self, *, qmi_id: str, catalog_identity: str | None = None, expected_generation: int | None = None) -> dict[str, object]:
         connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
             with connection.cursor(row_factory=tuple_row) as cursor:
@@ -133,13 +153,16 @@ class FuturesPartialPublisher:
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1",(SERIES_TYPE,)); generation = cursor.fetchone()
                 if not receipt or not generation: raise ValueError("required qmi receipt or future generation is absent")
                 if expected_generation is not None and int(generation[0]) != expected_generation: raise ValueError("future generation is stale")
+                verified_catalog_identity = _verified_catalog_identity(cursor)
+                if catalog_identity is not None and catalog_identity != verified_catalog_identity:
+                    raise ValueError("catalog_identity does not match the current QuoteMux S000012 catalog")
                 boundaries, intervals, coverage = _collect_admitted(connection,qmi_id)
                 qmg_payload = {"dataset_id":DATASET_ID,"series_type":SERIES_TYPE,"generation":int(generation[0]),"row_count":int(generation[1]),"first_bar_time":str(generation[2]),"last_bar_time":str(generation[3])}; qmg_id = canonical_identity("qmg",qmg_payload)
                 boundary_manifest, interval_manifest = _manifest(boundaries), _manifest(intervals)
                 import_receipt = receipt[1] if isinstance(receipt[1],dict) else json.loads(str(receipt[1])); pyramid_manifest=import_receipt.get("bundle_manifest",{})
-                qmp_payload = {"dataset_id":DATASET_ID,"qmi_id":qmi_id,"qmi_fact_rowset_sha256":receipt[0],"catalog_identity":catalog_identity,"qmg_id":qmg_id,"sources":[{"source_key":APEX_SOURCE_KEY,"lineage":"legacy_reconstructed","entitlement":"unverified","admission":"generic_quality_with_three_exact_exclusions"},{"source_key":PYRAMID_SOURCE_KEY,"lineage":"user_provided/pyramid_post_adjusted_20260714","entitlement":"unknown_not_asserted","admission":"exact_qmi_key_candidate_hash","bundle_manifest_sha256":hashlib.sha256(canonical_json_bytes(pyramid_manifest)).hexdigest(),"raw_aggregate_sha256":pyramid_manifest.get("raw_aggregate_sha256"),"authorization":pyramid_manifest.get("authorization")},{"source_key":SHINNY_SOURCE_KEY,"lineage":"derived_back_adjusted","admission":"generic_quality","actual_contract_mapping":"recorded_in_source_key"}],"qmi_counts":{"inserted":int(receipt[2]),"equivalent":int(receipt[3]),"conflict":int(receipt[4])},"source_boundary_manifest":boundary_manifest,"lineage_limitations":"Pyramid vendor entitlement is unknown/not asserted; legacy Apex raw artifact is unavailable; no source is claimed complete"}; qmp_id = canonical_identity("qmp",qmp_payload)
+                qmp_payload = {"dataset_id":DATASET_ID,"qmi_id":qmi_id,"qmi_fact_rowset_sha256":receipt[0],"catalog_identity":verified_catalog_identity,"qmg_id":qmg_id,"sources":[{"source_key":APEX_SOURCE_KEY,"lineage":"legacy_reconstructed","entitlement":"unverified","admission":"generic_quality_with_three_exact_exclusions"},{"source_key":PYRAMID_SOURCE_KEY,"lineage":"user_provided/pyramid_post_adjusted_20260714","entitlement":"unknown_not_asserted","admission":"exact_qmi_key_candidate_hash","bundle_manifest_sha256":hashlib.sha256(canonical_json_bytes(pyramid_manifest)).hexdigest(),"raw_aggregate_sha256":pyramid_manifest.get("raw_aggregate_sha256"),"authorization":pyramid_manifest.get("authorization")},{"source_key":SHINNY_SOURCE_KEY,"lineage":"derived_back_adjusted","admission":"generic_quality","actual_contract_mapping":"recorded_in_source_key"}],"qmi_counts":{"inserted":int(receipt[2]),"equivalent":int(receipt[3]),"conflict":int(receipt[4])},"source_boundary_manifest":boundary_manifest,"lineage_limitations":"Pyramid vendor entitlement is unknown/not asserted; legacy Apex raw artifact is unavailable; no source is claimed complete"}; qmp_id = canonical_identity("qmp",qmp_payload)
                 qmc_payload = {"dataset_id":DATASET_ID,"qmp_id":qmp_id,"qmg_id":qmg_id,"timezone":"Asia/Shanghai","interval_bounds":"inclusive_local_naive","coverage_semantics":"observed_admitted_runs_only","missing_bar_semantics":"skip","open_interest":"null_or_unavailable","session_grid":"not_asserted_complete","accepted_interval_manifest":interval_manifest,"warmup":coverage,"partial_contract_satisfied":"verified_immutable_identity_and_observed_skip_contract"}; qmc_id = canonical_identity("qmc",qmc_payload)
-                return {"dataset_id":DATASET_ID,"qmi_id":qmi_id,"catalog_identity":catalog_identity,"expected_generation":int(generation[0]),"qmg_id":qmg_id,"qmp_id":qmp_id,"qmc_id":qmc_id,"generation_payload":qmg_payload,"publication_payload":qmp_payload,"revision_payload":qmc_payload,"boundaries":boundaries,"intervals":intervals}
+                return {"dataset_id":DATASET_ID,"qmi_id":qmi_id,"catalog_identity":verified_catalog_identity,"expected_generation":int(generation[0]),"qmg_id":qmg_id,"qmp_id":qmp_id,"qmc_id":qmc_id,"generation_payload":qmg_payload,"publication_payload":qmp_payload,"revision_payload":qmc_payload,"boundaries":boundaries,"intervals":intervals}
         finally:
             try: connection.rollback()
             finally:
@@ -161,7 +184,7 @@ class FuturesPartialPublisher:
                 cursor.execute("select payload_sha256 from audit.future_bar_1m_partial_revision where qmc_id=%s",(current["qmc_id"],)); existing_qmc=cursor.fetchone()
                 if existing_qmp or existing_qmc:
                     if not existing_qmp or not existing_qmc or existing_qmp[0] != _payload_sha(qmp) or existing_qmc[0] != _payload_sha(qmc): raise ValueError("partial publication identity collision or orphan")
-                    _verify_persisted_manifest(cursor,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
+                    _verify_persisted_manifest(connection,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
                     connection.commit(); return {"qmp_id":str(current["qmp_id"]),"qmc_id":str(current["qmc_id"]),"qmg_id":str(current["qmg_id"])}
                 for table, key, payload, extra in (("audit.future_bar_1m_partial_publication","qmp_id",qmp,(DATASET_ID,)),("audit.future_bar_1m_partial_revision","qmc_id",qmc,(current["qmp_id"],))):
                     identity = str(current[key]); digest = _payload_sha(payload)
@@ -176,7 +199,7 @@ class FuturesPartialPublisher:
                     cursor.execute("insert into audit.future_bar_1m_partial_source_boundary(qmp_id,boundary_id,product_code,exchange,series_type,source_key,start_time,end_time,evidence_json) values(%s,%s,%s,%s,%s,%s,%s::timestamp,%s::timestamp,%s::jsonb) on conflict do nothing",(current["qmp_id"],boundary["boundary_id"],boundary["product_code"],boundary["exchange"],boundary["series_type"],boundary["source_key"],boundary["start_time"],boundary["end_time"],json.dumps(evidence,sort_keys=True)))
                 for interval in current["intervals"]:
                     cursor.execute("insert into audit.future_bar_1m_partial_revision_interval(qmc_id,interval_id,product_code,start_time,end_time,status,observed_count,residual_json) values(%s,%s,%s,%s::timestamp,%s::timestamp,%s,%s,%s::jsonb) on conflict do nothing",(current["qmc_id"],interval["interval_id"],interval["product_code"],interval["start_time"],interval["end_time"],interval["status"],interval["observed_count"],json.dumps({**interval["residual_json"],"observed_rowset_sha256":interval["observed_rowset_sha256"]},sort_keys=True)))
-                _verify_persisted_manifest(cursor,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
+                _verify_persisted_manifest(connection,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
             connection.commit(); return {"qmp_id":str(current["qmp_id"]),"qmc_id":str(current["qmc_id"]),"qmg_id":str(current["qmg_id"])}
         except Exception: connection.rollback(); raise
         finally:
@@ -193,7 +216,7 @@ class FuturesPartialPublisher:
                 cursor.execute("select payload_sha256 from audit.future_bar_1m_partial_publication where qmp_id=%s",(current["qmp_id"],)); qmp=cursor.fetchone()
                 cursor.execute("select payload_sha256 from audit.future_bar_1m_partial_revision where qmc_id=%s",(current["qmc_id"],)); qmc=cursor.fetchone()
                 if not qmp or not qmc or qmp[0] != _payload_sha(dict(current["publication_payload"])) or qmc[0] != _payload_sha(dict(current["revision_payload"])): raise ValueError("partial parents are absent or mismatched")
-                _verify_persisted_manifest(cursor,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
+                _verify_persisted_manifest(connection,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
             connection.rollback(); return {"status":"verified","qmp_id":str(current["qmp_id"]),"qmc_id":str(current["qmc_id"]),"qmg_id":str(current["qmg_id"])}
         except Exception: connection.rollback(); raise
         finally:
@@ -211,7 +234,7 @@ def _main() -> int:
     parser.add_argument("--plan", type=Path, required=True)
     args = parser.parse_args(); publisher = FuturesPartialPublisher(_publisher_connection)
     if args.command == "plan":
-        if not args.qmi_id or not args.catalog_identity: raise ValueError("plan requires --qmi-id and --catalog-identity")
+        if not args.qmi_id: raise ValueError("plan requires --qmi-id")
         result = publisher.plan(qmi_id=args.qmi_id,catalog_identity=args.catalog_identity,expected_generation=args.expected_generation)
         with args.plan.open("x", encoding="utf-8") as stream: stream.write(canonical_json_bytes(result).decode("utf-8"))
     else:
