@@ -70,3 +70,22 @@ class FuturesPartialPublisher:
             connection.rollback(); raise
         finally:
             if owns: _release_connection(connection)
+
+
+def _main() -> int:
+    import argparse
+    from quotemux.store.futures_pyramid_import import _publisher_connection
+    parser = argparse.ArgumentParser(description="Plan or publish QuoteMux futures partial metadata")
+    parser.add_argument("command", choices=("plan", "publish"))
+    parser.add_argument("--qmi-id", required=True)
+    parser.add_argument("--catalog-identity", required=True)
+    parser.add_argument("--expected-generation", type=int)
+    args = parser.parse_args()
+    # Plan is intentionally DB-read/identity driven; publish persists only the
+    # four metadata tables from the same exact inputs.
+    result = FuturesPartialPublisher(_publisher_connection).publish(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation)
+    print(json.dumps({"mode": args.command, **result}, sort_keys=True)); return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
