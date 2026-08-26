@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import gzip
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -109,7 +110,11 @@ def _fact_from_parquet(row: Mapping[str, object]) -> dict[str, object]:
         raise FuturesPyramidImportError("fact parquet source/OI contract mismatch")
     if any(row.get(name) is None for name in ("bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")):
         raise FuturesPyramidImportError("fact parquet has missing required fields")
-    return candidate_row(dict(row))
+    fact = candidate_row(dict(row))
+    numbers = [float(fact[name]) for name in ("open","high","low","close","volume","adjustment_offset")]
+    if not all(math.isfinite(value) for value in numbers) or float(fact["volume"]) < 0 or float(fact["high"]) < max(float(fact["open"]),float(fact["close"]),float(fact["low"])) or float(fact["low"]) > min(float(fact["open"]),float(fact["close"]),float(fact["high"])):
+        raise FuturesPyramidImportError("fact parquet OHLCV/offset contract mismatch")
+    return fact
 
 
 def load_pyramid_filesystem_bundle(bundle_path: Path) -> PyramidBundle:
