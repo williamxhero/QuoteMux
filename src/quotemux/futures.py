@@ -367,6 +367,23 @@ FUTURE_SCHEMA_SQL = (
     end $$
     """,
     """
+    create or replace function fact.maintain_future_bar_1m_after_truncate()
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
+    begin
+        delete from fact.future_bar_1m_coverage;
+        perform audit.record_future_bar_1m_series_generation('apex_l0_adjusted', 'truncate', md5('apex_l0_adjusted|truncate|' || txid_current()::text));
+        perform audit.record_future_bar_1m_series_generation('main_continuous', 'truncate', md5('main_continuous|truncate|' || txid_current()::text));
+        return null;
+    end $$
+    """,
+    """
+    do $$ begin
+        if not exists (select 1 from pg_trigger where tgrelid='fact.future_bar_1m'::regclass and tgname='future_bar_1m_after_truncate' and not tgisinternal) then
+            create trigger future_bar_1m_after_truncate after truncate on fact.future_bar_1m for each statement execute function fact.maintain_future_bar_1m_after_truncate();
+        end if;
+    end $$
+    """,
+    """
     create or replace function audit.maintain_future_bar_1m_series_generation_after_update()
     returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     declare changed record;
