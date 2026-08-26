@@ -149,11 +149,6 @@ _FUTURES_1M_QUERY = """
            bars.open, bars.high, bars.low, bars.close,
            bars.volume, bars.open_interest, bars.adjustment_offset
     from fact.future_bar_1m bars
-    join audit.future_bar_1m_partial_publication publication on publication.qmp_id = %s
-    join audit.future_bar_1m_import_admission admission
-      on admission.qmi_id = publication.payload_json->>'qmi_id'
-     and admission.product_code=bars.product_code and admission.exchange=bars.exchange
-     and admission.series_type=bars.series_type and admission.bar_time=bars.bar_time
     where bars.product_code = any(%s::text[])
       and bars.series_type = %s
       and bars.bar_time >= %s::timestamp

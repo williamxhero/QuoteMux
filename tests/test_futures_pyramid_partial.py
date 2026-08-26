@@ -53,3 +53,11 @@ def test_partial_sql_keeps_exact_exclusions_and_boundary_evidence() -> None:
     assert "qmg_id" in source
     assert "after truncate on fact.future_bar_1m" in schema.lower()
     assert "security definer" in schema.lower()
+
+
+def test_futures_partial_migration_grants_trigger_and_receipt_path() -> None:
+    from quotemux.store import futures_partial_migration as migration
+    text = open(migration.__file__, encoding="utf-8").read()
+    assert "audit.future_bar_1m_import_admission" in text
+    assert "audit.future_bar_1m_series_generation to quotemux_futures_partial_publisher" in text
+    assert "quotemux_futures_owner" in text

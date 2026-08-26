@@ -144,7 +144,7 @@ FUTURE_SCHEMA_SQL = (
         target_product_code text,
         target_exchange text,
         target_series_type text
-    ) returns void language plpgsql as $$
+    ) returns void language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     begin
         delete from fact.future_bar_1m_coverage
         where product_code = target_product_code
@@ -166,7 +166,7 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     create or replace function fact.maintain_future_bar_1m_coverage_after_insert()
-    returns trigger language plpgsql as $$
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     begin
         insert into fact.future_bar_1m_coverage (
             product_code, exchange, series_type, row_count, first_bar_time, last_bar_time, updated_at
@@ -186,7 +186,7 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     create or replace function fact.maintain_future_bar_1m_coverage_after_delete()
-    returns trigger language plpgsql as $$
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     declare
         affected record;
     begin
@@ -204,7 +204,7 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     create or replace function fact.maintain_future_bar_1m_coverage_after_update()
-    returns trigger language plpgsql as $$
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     declare
         affected record;
     begin
@@ -242,7 +242,7 @@ FUTURE_SCHEMA_SQL = (
     """
     do $$
     begin
-        if not exists (
+        if exists (
             select 1 from pg_trigger
             where tgrelid = 'fact.future_bar_1m'::regclass
               and tgname = 'future_bar_1m_coverage_after_insert'
@@ -291,6 +291,9 @@ FUTURE_SCHEMA_SQL = (
               and tgname = 'future_bar_1m_coverage_after_update'
               and not tgisinternal
         ) then
+            drop trigger future_bar_1m_coverage_after_update on fact.future_bar_1m;
+        end if;
+        if true then
             create trigger future_bar_1m_coverage_after_update
             after update on fact.future_bar_1m
             referencing old table as updated_old_rows new table as updated_new_rows
@@ -398,9 +401,10 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     do $$ begin
-        if not exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_update' and not tgisinternal) then
-            create trigger future_bar_1m_series_generation_after_update after update on fact.future_bar_1m referencing new table as updated_new_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_update();
+        if exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_update' and not tgisinternal) then
+            drop trigger future_bar_1m_series_generation_after_update on fact.future_bar_1m;
         end if;
+        create trigger future_bar_1m_series_generation_after_update after update on fact.future_bar_1m referencing old table as updated_old_rows new table as updated_new_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_update();
     end $$
     """,
     """
