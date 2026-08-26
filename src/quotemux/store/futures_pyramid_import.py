@@ -12,6 +12,9 @@ import json
 import re
 from typing import Any
 from pathlib import Path
+import os
+
+import psycopg
 
 from quotemux.infra.db.client import _acquire_connection, _release_connection
 
@@ -118,7 +121,19 @@ def _main() -> int:
     bundle = load_pyramid_filesystem_bundle(args.bundle)
     if args.command == "classify":
         print(json.dumps({"source_normalized_rowset_sha256": bundle.source_normalized_rowset_sha256, "canonical_fact_rowset_sha256": bundle.canonical_fact_rowset_sha256, "rows": bundle.manifest.get("normalized_row_count")}, sort_keys=True)); return 0
-    print(json.dumps(FuturesPyramidImporter().publish_filesystem_bundle(args.bundle), sort_keys=True)); return 0
+    print(json.dumps(FuturesPyramidImporter(_publisher_connection).publish_filesystem_bundle(args.bundle), sort_keys=True)); return 0
+
+
+def _publisher_connection() -> Any:
+    """Fail-closed admin connection; never reuse the legacy application DSN."""
+    required = {name: os.getenv(f"QUOTEMUX_PUBLISH_DB_{name}", "").strip() for name in ("HOST", "PORT", "NAME", "USER", "PASSWORD")}
+    if not all(required.values()):
+        raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_HOST/PORT/NAME/USER/PASSWORD are required")
+    try:
+        port = int(required["PORT"])
+    except ValueError as exc:
+        raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_PORT must be an integer") from exc
+    return psycopg.connect(host=required["HOST"], port=port, dbname=required["NAME"], user=required["USER"], password=required["PASSWORD"])
 
 
 if __name__ == "__main__":
