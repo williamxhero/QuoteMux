@@ -41,3 +41,15 @@ def test_partial_reader_binds_generation_and_rejects_tl() -> None:
     reader = QuoteMuxPublicReader(client=Client())
     with pytest.raises(FuturesPartialPublicationQueryError, match="TL"):
         reader.read_futures_1m_partial_page("TL", "2026-07-14 09:01:00", "2026-07-14 15:00:00", qmp_id=qmp, qmc_id=qmc, qmg_id=qmg)
+
+
+def test_partial_sql_keeps_exact_exclusions_and_boundary_evidence() -> None:
+    from quotemux.store import futures_partial_publication as publication
+    from quotemux import futures
+    source = open(publication.__file__, encoding="utf-8").read()
+    schema = "\n".join(futures.FUTURE_SCHEMA_SQL)
+    assert "TA','2010-11-17 09:05:00" in source
+    assert "eligible_rowset_sha256" in source
+    assert "qmg_id" in source
+    assert "after truncate on fact.future_bar_1m" in schema.lower()
+    assert "security definer" in schema.lower()
