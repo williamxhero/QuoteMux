@@ -291,13 +291,21 @@ def _persisted_child_manifests(connection: Any, qmi_id: str) -> dict[str, dict[s
     }
 
 
-def _verify_prior_qmi(connection: Any, *, qmi_id: str, receipt: Mapping[str, object], plan_payload: Mapping[str, object], inserted: int, equivalent: int, conflict: int) -> None:
+def verify_persisted_qmi_children(connection: Any, *, qmi_id: str, receipt: Mapping[str, object], inserted: int, equivalent: int, conflict: int) -> dict[str, dict[str, object]]:
+    """Re-read the sealed admission/disposition sets before any consumer trusts qmi."""
     expected = receipt.get("child_manifests")
-    if receipt.get("plan") != dict(plan_payload) or not isinstance(expected, Mapping):
+    if not isinstance(expected, Mapping):
         raise FuturesPyramidImportError("existing qmi receipt is incomplete")
     actual = _persisted_child_manifests(connection, qmi_id)
     if actual != dict(expected) or actual["dispositions"]["count"] != inserted + equivalent + conflict or actual["admissions"]["count"] != inserted + equivalent:
         raise FuturesPyramidImportError("existing qmi child sets differ from its sealed receipt")
+    return actual
+
+
+def _verify_prior_qmi(connection: Any, *, qmi_id: str, receipt: Mapping[str, object], plan_payload: Mapping[str, object], inserted: int, equivalent: int, conflict: int) -> None:
+    if receipt.get("plan") != dict(plan_payload):
+        raise FuturesPyramidImportError("existing qmi receipt is incomplete")
+    verify_persisted_qmi_children(connection, qmi_id=qmi_id, receipt=receipt, inserted=inserted, equivalent=equivalent, conflict=conflict)
 
 
 class FuturesPyramidImporter:

@@ -95,6 +95,8 @@ def test_partial_sql_keeps_exact_exclusions_and_boundary_evidence() -> None:
     assert "TA" in repr(contract.INVALID_APEX_KEYS)
     assert "eligible_rowset_sha256" in source
     assert "qmg_id" in source
+    assert "verify_persisted_qmi_children" in source
+    assert "qmi_child_manifests" in source
     assert "after truncate on fact.future_bar_1m" not in schema.lower()
     assert "security definer" in "\n".join(migration.HARDENED_FUNCTION_DDL).lower()
 
