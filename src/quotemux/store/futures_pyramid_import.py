@@ -200,6 +200,7 @@ class FuturesPyramidImporter:
                     cursor.execute("insert into fact.future_bar_1m (product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key) select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where disposition='missing_valid'", (STORAGE_SERIES_TYPE,SOURCE_KEY))
                 qmi_id="qmi-v1-"+hashlib.sha256(_canonical_bytes({"source":bundle.source_normalized_rowset_sha256,"fact":bundle.canonical_fact_rowset_sha256,"transform":FACT_TRANSFORM_VERSION})).hexdigest()
                 cursor.execute("insert into audit.future_bar_1m_import_publication(qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count) values(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)", (qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_hash,json.dumps(bundle.manifest,sort_keys=True),missing,equivalent,conflict))
+                cursor.execute("insert into audit.future_bar_1m_import_admission(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,case when disposition='missing_valid' then 'inserted' else 'already_present_equivalent' end from future_pyramid_stage where disposition in ('missing_valid','already_present_equivalent')", (qmi_id,STORAGE_SERIES_TYPE))
             connection.commit(); return {"status":"success","qmi_id":qmi_id,"inserted_count":missing,"equivalent_count":equivalent,"conflict_count":conflict}
         except Exception:
             connection.rollback(); raise
@@ -209,10 +210,12 @@ class FuturesPyramidImporter:
     @staticmethod
     def _stage_parquet(cursor: Any, path: Path) -> None:
         import pyarrow.parquet as pq
-        cursor.execute("create temporary table future_pyramid_stage (product_code text,exchange text,bar_time timestamp,open double precision,high double precision,low double precision,close double precision,volume double precision,adjustment_offset double precision,disposition text) on commit drop")
-        with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset) from stdin") as copy:
+        cursor.execute("create temporary table future_pyramid_stage (product_code text,exchange text,bar_time timestamp,open double precision,high double precision,low double precision,close double precision,volume double precision,adjustment_offset double precision,candidate_sha256 text,disposition text) on commit drop")
+        with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset,candidate_sha256) from stdin") as copy:
             for batch in pq.ParquetFile(path).iter_batches(batch_size=100_000, columns=["product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset"]):
-                for row in batch.to_pylist(): copy.write_row(tuple(row[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset")))
+                for row in batch.to_pylist():
+                    canonical = {**row,"series_type":STORAGE_SERIES_TYPE,"source_key":SOURCE_KEY,"open_interest":None}
+                    copy.write_row((*tuple(row[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset")),hashlib.sha256(_canonical_bytes(canonical)).hexdigest()))
 
     @staticmethod
     def _stage(cursor: Any, bundle: PyramidBundle) -> None:

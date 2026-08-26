@@ -147,6 +147,11 @@ _FUTURES_1M_QUERY = """
            bars.open, bars.high, bars.low, bars.close,
            bars.volume, bars.open_interest, bars.adjustment_offset
     from fact.future_bar_1m bars
+    join audit.future_bar_1m_partial_publication publication on publication.qmp_id = %s
+    join audit.future_bar_1m_import_admission admission
+      on admission.qmi_id = publication.payload_json->>'qmi_id'
+     and admission.product_code=bars.product_code and admission.exchange=bars.exchange
+     and admission.series_type=bars.series_type and admission.bar_time=bars.bar_time
     where bars.product_code = any(%s::text[])
       and bars.series_type = %s
       and bars.bar_time >= %s::timestamp
@@ -508,7 +513,7 @@ class QuoteMuxPublicReader:
         prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
         prior_time = prior.get("bar_time") if prior else None
         prior_code = prior.get("product_code") if prior else None
-        batch = self._client.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
+        batch = self._client.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
         rows = batch.rows[:limit]
         output = QueryBatch(batch.columns, rows)
         next_cursor = None
