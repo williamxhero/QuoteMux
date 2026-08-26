@@ -54,6 +54,12 @@ def provision_futures_partial_roles(
             cursor.execute("grant select, insert on fact.future_bar_1m to quotemux_futures_partial_publisher")
             cursor.execute("grant select, insert on audit.future_bar_1m_import_publication, audit.future_bar_1m_partial_publication, audit.future_bar_1m_partial_source_boundary, audit.future_bar_1m_partial_revision, audit.future_bar_1m_partial_revision_interval to quotemux_futures_partial_publisher")
             cursor.execute("grant select on fact.future_bar_1m, fact.future_bar_1m_coverage, audit.future_bar_1m_series_generation, audit.future_bar_1m_partial_publication, audit.future_bar_1m_partial_source_boundary, audit.future_bar_1m_partial_revision, audit.future_bar_1m_partial_revision_interval, ref.future_series to quotemux_public_reader")
+            # Trigger functions execute as the dedicated non-login owner; no
+            # caller gets direct EXECUTE or destructive fact privileges.
+            for function in ("fact.refresh_future_bar_1m_coverage_group(text,text,text)", "fact.maintain_future_bar_1m_coverage_after_insert()", "fact.maintain_future_bar_1m_coverage_after_delete()", "fact.maintain_future_bar_1m_coverage_after_update()", "audit.record_future_bar_1m_series_generation(text,text,text)", "audit.maintain_future_bar_1m_series_generation_after_insert()", "audit.maintain_future_bar_1m_series_generation_after_update()", "audit.maintain_future_bar_1m_series_generation_after_delete()"):
+                cursor.execute(f"alter function {function} owner to quotemux_futures_owner")
+                cursor.execute(f"revoke all on function {function} from public")
+            cursor.execute("revoke truncate, update, delete on fact.future_bar_1m from quotemux_futures_partial_publisher, quotemux_public_reader")
         connection.commit()
     except Exception:
         connection.rollback(); raise
