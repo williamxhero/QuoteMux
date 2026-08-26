@@ -113,7 +113,6 @@ def _verify_persisted_manifest(connection: Any, *, qmp_id: str, qmc_id: str, bou
     """Stream persisted immutable rows and reject stale extras or hash drift."""
     expected_boundaries = sorted(boundaries, key=lambda row: (str(row["product_code"]),str(row["start_time"]),str(row["end_time"]),str(row["boundary_id"])))
     expected_intervals = sorted(intervals, key=lambda row: (str(row["product_code"]),str(row["start_time"]),str(row["end_time"]),str(row["interval_id"])))
-    expected_interval_exchange = {str(row["interval_id"]): row["exchange"] for row in intervals}
     cursor = connection.cursor(name="future_partial_persisted_boundaries", row_factory=tuple_row)
     boundary_digest, boundary_count = hashlib.sha256(), 0
     try:
@@ -128,11 +127,11 @@ def _verify_persisted_manifest(connection: Any, *, qmp_id: str, qmc_id: str, bou
     cursor = connection.cursor(name="future_partial_persisted_intervals", row_factory=tuple_row)
     interval_digest, interval_count = hashlib.sha256(), 0
     try:
-        cursor.execute("select interval_id,product_code,start_time::text,end_time::text,status,observed_count,residual_json from audit.future_bar_1m_partial_revision_interval where qmc_id=%s order by product_code collate \"C\",start_time,end_time,interval_id collate \"C\"",(qmc_id,))
+        cursor.execute("select interval_id,product_code,exchange,start_time::text,end_time::text,status,observed_count,residual_json from audit.future_bar_1m_partial_revision_interval where qmc_id=%s order by product_code collate \"C\",start_time,end_time,interval_id collate \"C\"",(qmc_id,))
         while rows := cursor.fetchmany(100_000):
-            for interval_id,product,start,end,status,count,residual in rows:
+            for interval_id,product,exchange,start,end,status,count,residual in rows:
                 full=residual if isinstance(residual,dict) else json.loads(str(residual)); detail={key:value for key,value in full.items() if key!="observed_rowset_sha256"}
-                actual={"product_code":product,"exchange":expected_interval_exchange[str(interval_id)],"start_time":start,"end_time":end,"status":status,"observed_count":count,"residual_json":detail,"observed_rowset_sha256":full["observed_rowset_sha256"],"interval_id":interval_id}
+                actual={"product_code":product,"exchange":exchange,"start_time":start,"end_time":end,"status":status,"observed_count":count,"residual_json":detail,"observed_rowset_sha256":full["observed_rowset_sha256"],"interval_id":interval_id}
                 interval_digest.update(canonical_json_bytes(actual)+b"\n"); interval_count += 1
     finally:
         cursor.close()
@@ -198,7 +197,7 @@ class FuturesPartialPublisher:
                     evidence = {key:value for key,value in boundary.items() if key not in {"boundary_id","product_code","exchange","series_type","source_key","start_time","end_time"}}
                     cursor.execute("insert into audit.future_bar_1m_partial_source_boundary(qmp_id,boundary_id,product_code,exchange,series_type,source_key,start_time,end_time,evidence_json) values(%s,%s,%s,%s,%s,%s,%s::timestamp,%s::timestamp,%s::jsonb) on conflict do nothing",(current["qmp_id"],boundary["boundary_id"],boundary["product_code"],boundary["exchange"],boundary["series_type"],boundary["source_key"],boundary["start_time"],boundary["end_time"],json.dumps(evidence,sort_keys=True)))
                 for interval in current["intervals"]:
-                    cursor.execute("insert into audit.future_bar_1m_partial_revision_interval(qmc_id,interval_id,product_code,start_time,end_time,status,observed_count,residual_json) values(%s,%s,%s,%s::timestamp,%s::timestamp,%s,%s,%s::jsonb) on conflict do nothing",(current["qmc_id"],interval["interval_id"],interval["product_code"],interval["start_time"],interval["end_time"],interval["status"],interval["observed_count"],json.dumps({**interval["residual_json"],"observed_rowset_sha256":interval["observed_rowset_sha256"]},sort_keys=True)))
+                    cursor.execute("insert into audit.future_bar_1m_partial_revision_interval(qmc_id,interval_id,product_code,exchange,start_time,end_time,status,observed_count,residual_json) values(%s,%s,%s,%s,%s::timestamp,%s::timestamp,%s,%s,%s::jsonb) on conflict do nothing",(current["qmc_id"],interval["interval_id"],interval["product_code"],interval["exchange"],interval["start_time"],interval["end_time"],interval["status"],interval["observed_count"],json.dumps({**interval["residual_json"],"observed_rowset_sha256":interval["observed_rowset_sha256"]},sort_keys=True)))
                 _verify_persisted_manifest(connection,qmp_id=str(current["qmp_id"]),qmc_id=str(current["qmc_id"]),boundaries=list(current["boundaries"]),intervals=list(current["intervals"]))
             connection.commit(); return {"qmp_id":str(current["qmp_id"]),"qmc_id":str(current["qmc_id"]),"qmg_id":str(current["qmg_id"])}
         except Exception: connection.rollback(); raise

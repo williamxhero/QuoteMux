@@ -216,20 +216,23 @@ _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
 """
 
 _FUTURES_PARTIAL_COVERAGE_QUERY = """
-    select interval_row.product_code, series.exchange,
-           greatest(interval_row.start_time, %s::timestamp)::text as start_time,
-           least(interval_row.end_time, %s::timestamp)::text as end_time,
-           interval_row.status,
-           ((extract(epoch from least(interval_row.end_time,%s::timestamp) - greatest(interval_row.start_time,%s::timestamp))/60)::bigint + 1) as observed_count,
-           interval_row.interval_id, interval_row.residual_json
-    from audit.future_bar_1m_partial_revision_interval interval_row
-    join audit.future_bar_1m_partial_revision revision on revision.qmc_id = interval_row.qmc_id
-    join ref.future_series series on series.product_code = interval_row.product_code and series.series_type = 'apex_l0_adjusted'
-    where revision.qmp_id = %s and interval_row.qmc_id = %s
-      and interval_row.product_code = any(%s::text[])
-      and interval_row.end_time >= %s::timestamp and interval_row.start_time <= %s::timestamp
-      and (%s::text is null or (interval_row.product_code, interval_row.start_time, interval_row.end_time, interval_row.status, interval_row.interval_id) > (%s::text, %s::timestamp, %s::timestamp, %s::text, %s::text))
-    order by interval_row.product_code, interval_row.start_time, interval_row.end_time, interval_row.status, interval_row.interval_id
+    with clipped_intervals as (
+        select interval_row.product_code, interval_row.exchange,
+               greatest(interval_row.start_time, %s::timestamp) as start_time,
+               least(interval_row.end_time, %s::timestamp) as end_time,
+               interval_row.status, interval_row.interval_id, interval_row.residual_json
+        from audit.future_bar_1m_partial_revision_interval interval_row
+        join audit.future_bar_1m_partial_revision revision on revision.qmc_id = interval_row.qmc_id
+        where revision.qmp_id = %s and interval_row.qmc_id = %s
+          and interval_row.product_code = any(%s::text[])
+          and interval_row.end_time >= %s::timestamp and interval_row.start_time <= %s::timestamp
+    )
+    select product_code, exchange, start_time::text, end_time::text, status,
+           ((extract(epoch from end_time - start_time)/60)::bigint + 1) as observed_count,
+           interval_id, residual_json
+    from clipped_intervals
+    where (%s::text is null or (product_code, start_time, end_time, status, interval_id) > (%s::text, %s::timestamp, %s::timestamp, %s::text, %s::text))
+    order by product_code, start_time, end_time, status, interval_id
     limit %s
 """
 
@@ -583,7 +586,7 @@ class QuoteMuxPublicReader:
         with snapshot_context as snapshot:
             self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
             prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
-            params = (start, end, end, start, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
+            params = (start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
             batch = snapshot.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
         rows = batch.rows[:limit]; output = QueryBatch(batch.columns, rows)
         next_cursor = None

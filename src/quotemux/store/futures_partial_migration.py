@@ -21,7 +21,7 @@ METADATA_DDL = (
     """create table if not exists audit.future_bar_1m_partial_publication (qmp_id text primary key check(qmp_id ~ '^qmp-v1-[0-9a-f]{64}$'),dataset_id text not null,payload_json jsonb not null,payload_sha256 text not null,published_at timestamptz not null default now(),created_txid bigint not null default txid_current())""",
     """create table if not exists audit.future_bar_1m_partial_source_boundary (qmp_id text not null references audit.future_bar_1m_partial_publication(qmp_id),boundary_id text not null,product_code text not null,exchange text not null,series_type text not null,source_key text not null,start_time timestamp not null,end_time timestamp not null,evidence_json jsonb not null,primary key(qmp_id,boundary_id),check(start_time<=end_time))""",
     """create table if not exists audit.future_bar_1m_partial_revision (qmc_id text primary key check(qmc_id ~ '^qmc-v1-[0-9a-f]{64}$'),qmp_id text not null references audit.future_bar_1m_partial_publication(qmp_id),payload_json jsonb not null,payload_sha256 text not null,published_at timestamptz not null default now(),created_txid bigint not null default txid_current())""",
-    """create table if not exists audit.future_bar_1m_partial_revision_interval (qmc_id text not null references audit.future_bar_1m_partial_revision(qmc_id),interval_id text not null,product_code text not null,start_time timestamp not null,end_time timestamp not null,status text not null check(status='accepted'),observed_count bigint not null check(observed_count>0),residual_json jsonb not null,primary key(qmc_id,interval_id),check(start_time<=end_time))""",
+    """create table if not exists audit.future_bar_1m_partial_revision_interval (qmc_id text not null references audit.future_bar_1m_partial_revision(qmc_id),interval_id text not null,product_code text not null,exchange text not null,start_time timestamp not null,end_time timestamp not null,status text not null check(status='accepted'),observed_count bigint not null check(observed_count>0),residual_json jsonb not null,primary key(qmc_id,interval_id),check(start_time<=end_time))""",
     "create index if not exists future_partial_boundary_lookup_idx on audit.future_bar_1m_partial_source_boundary(qmp_id,product_code,exchange,series_type,source_key,start_time,end_time)",
     "create index if not exists future_partial_interval_lookup_idx on audit.future_bar_1m_partial_revision_interval(qmc_id,product_code,start_time,end_time,status)",
     "alter table audit.future_bar_1m_import_publication add column if not exists created_txid bigint not null default txid_current()",
@@ -29,6 +29,8 @@ METADATA_DDL = (
     "alter table audit.future_bar_1m_partial_revision add column if not exists created_txid bigint not null default txid_current()",
     "alter table audit.future_bar_1m_import_disposition add column if not exists existing_source_key text",
     "alter table audit.future_bar_1m_import_disposition add column if not exists existing_fact_sha256 text",
+    "alter table audit.future_bar_1m_partial_revision_interval add column if not exists exchange text",
+    "alter table audit.future_bar_1m_partial_revision_interval alter column exchange set not null",
 )
 
 

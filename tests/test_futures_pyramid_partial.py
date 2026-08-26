@@ -109,6 +109,7 @@ def test_futures_partial_migration_grants_trigger_and_receipt_path() -> None:
     assert "OWNER_RUNTIME_GRANTS" in text
     assert "revoke insert,update,delete,truncate on fact.future_bar_1m" in text
     assert "for statement in OWNER_RUNTIME_GRANTS: cursor.execute(statement)\n            for statement in HARDENED_FUNCTION_DDL" in text
+    assert "partial_revision_interval (qmc_id text not null" in text and "exchange text not null" in text
 
 
 def test_partial_role_provisioning_forces_tuple_rows_on_dict_default_connection() -> None:
@@ -205,7 +206,36 @@ def test_partial_coverage_binds_all_sql_placeholders() -> None:
             return QueryBatch(("x",),())
     client=Client(); QuoteMuxPublicReader(client=client).read_futures_1m_partial_coverage_page("T","2020-01-01 09:01:00","2020-01-01 09:02:00",qmp_id=qmp,qmc_id=qmc,qmg_id=qmg)
     query,params,stage=client.calls[-1]
-    assert stage == "futures_partial_coverage" and query.count("%s") == len(params) == 16
+    assert stage == "futures_partial_coverage" and query.count("%s") == len(params) == 14
+
+
+def test_partial_coverage_keyset_uses_the_same_clipped_bounds_as_cursor_output() -> None:
+    from quotemux import public_reader
+    query = public_reader._FUTURES_PARTIAL_COVERAGE_QUERY
+    assert "with clipped_intervals" in query
+    assert "(product_code, start_time, end_time, status, interval_id)" in query
+    assert "interval_row.start_time, interval_row.end_time, interval_row.status" not in query
+    assert "interval_row.exchange" in query
+    assert "join ref.future_series series" not in query
+
+
+def test_partial_coverage_cursor_binds_clipped_interval_bounds_for_next_page() -> None:
+    qmg_payload={"dataset_id":"future_1m_partial_s000012_quotemux","series_type":"apex_l0_adjusted","generation":1,"row_count":1,"first_bar_time":"2020-01-01 09:01:00","last_bar_time":"2020-01-01 09:01:00"}; qmg=canonical_identity("qmg",qmg_payload)
+    publication={"dataset_id":"future_1m_partial_s000012_quotemux","qmg_id":qmg}; qmp=canonical_identity("qmp",publication); revision={"dataset_id":"future_1m_partial_s000012_quotemux","qmp_id":qmp,"qmg_id":qmg}; qmc=canonical_identity("qmc",revision)
+    encoded=lambda value: hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+    first=("T","CFFEX","2020-01-01 09:01:00","2020-01-01 09:02:00","accepted",2,"qci-v1-" + "1" * 64,{})
+    second=("ag","SHFE","2020-01-01 09:01:00","2020-01-01 09:02:00","accepted",2,"qci-v1-" + "2" * 64,{})
+    class Client:
+        def __init__(self): self.coverage_params=[]
+        def query_batch(self, _query, params=(), *, stage="sql"):
+            if stage == "futures_partial_identity": return QueryBatch(("x",),((publication,encoded(publication),revision,encoded(revision),1,1,"2020-01-01 09:01:00","2020-01-01 09:01:00"),))
+            self.coverage_params.append(params)
+            return QueryBatch(("product_code",), (first, second) if len(self.coverage_params) == 1 else (second,))
+    client=Client(); reader=QuoteMuxPublicReader(client=client)
+    _page, cursor = reader.read_futures_1m_partial_coverage_page(("T","ag"),"2020-01-01 09:01:00","2020-01-01 09:02:00",qmp_id=qmp,qmc_id=qmc,qmg_id=qmg,limit=1)
+    page, next_cursor = reader.read_futures_1m_partial_coverage_page(("T","ag"),"2020-01-01 09:01:00","2020-01-01 09:02:00",qmp_id=qmp,qmc_id=qmc,qmg_id=qmg,cursor=cursor,limit=1)
+    assert page.rows == (second,) and next_cursor is None
+    assert client.coverage_params[1][7:13] == ("T", "T", "2020-01-01 09:01:00", "2020-01-01 09:02:00", "accepted", first[6])
 
 
 def test_partial_manifest_order_uses_c_collation_for_mixed_case_products() -> None:
