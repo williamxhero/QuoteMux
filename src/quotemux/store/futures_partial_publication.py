@@ -71,6 +71,25 @@ class FuturesPartialPublisher:
         finally:
             if owns: _release_connection(connection)
 
+    def plan(self, *, qmi_id: str, catalog_identity: str, expected_generation: int | None = None) -> dict[str, object]:
+        """Read-only deterministic preflight; deliberately rolls back its snapshot."""
+        connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("begin isolation level repeatable read read only")
+                cursor.execute("select canonical_fact_rowset_sha256 from audit.future_bar_1m_import_publication where qmi_id=%s", (qmi_id,)); imported=cursor.fetchone()
+                cursor.execute("select generation,row_count,first_bar_time,last_bar_time from audit.future_bar_1m_series_generation where series_type='apex_l0_adjusted' order by generation desc limit 1"); generation=cursor.fetchone()
+                if not imported or not generation: raise ValueError("required import receipt or generation is absent")
+                if expected_generation is not None and int(generation[0]) != expected_generation: raise ValueError("future generation is stale")
+                qmg=canonical_identity("qmg",{"dataset_id":DATASET_ID,"generation":int(generation[0]),"row_count":int(generation[1]),"first":str(generation[2]),"last":str(generation[3])})
+                qmp=canonical_identity("qmp",{"dataset_id":DATASET_ID,"qmi_id":qmi_id,"qmi_fact_rowset":imported[0],"catalog_identity":catalog_identity,"qmg_id":qmg,"missing_bar_semantics":"skip","open_interest":"unavailable_or_null","sources":[{"source_key":"apex_l0_import","lineage":"legacy_reconstructed","raw_artifact":"unavailable","entitlement":"unverified","admission":"row_quality_gate"},{"source_key":"pyramid_back_adjusted_20260714","lineage":"user_provided/pyramid_post_adjusted_20260714","admission":"qmi_exact_key_candidate_hash"},{"source_key":"shinny_edb_derived_back_adjusted_20260811","lineage":"derived_back_adjusted","admission":"row_quality_gate","actual_contract_mapping":"recorded_in_source_key"}]})
+                qmc=canonical_identity("qmc",{"dataset_id":DATASET_ID,"qmp_id":qmp,"qmg_id":qmg,"contract":"observed_admitted_only_skip_gaps","timezone":"Asia/Shanghai","interval_bounds":"inclusive_local_naive","missing_bar_semantics":"skip","oi":"null_or_unavailable","session_grid":"not_asserted_complete","partial_contract_satisfied":"identity_and_skip_semantics_only"})
+                return {"dataset_id":DATASET_ID,"qmi_id":qmi_id,"catalog_identity":catalog_identity,"expected_generation":int(generation[0]),"qmp_id":qmp,"qmc_id":qmc,"qmg_id":qmg}
+        finally:
+            try: connection.rollback()
+            finally:
+                if owns: _release_connection(connection)
+
 
 def _main() -> int:
     import argparse
@@ -80,10 +99,13 @@ def _main() -> int:
     parser.add_argument("--qmi-id", required=True)
     parser.add_argument("--catalog-identity", required=True)
     parser.add_argument("--expected-generation", type=int)
+    parser.add_argument("--out")
     args = parser.parse_args()
-    # Plan is intentionally DB-read/identity driven; publish persists only the
-    # four metadata tables from the same exact inputs.
-    result = FuturesPartialPublisher(_publisher_connection).publish(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation)
+    publisher = FuturesPartialPublisher(_publisher_connection)
+    result = publisher.plan(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation) if args.command == "plan" else publisher.publish(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation)
+    if args.out:
+        from pathlib import Path
+        Path(args.out).write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
     print(json.dumps({"mode": args.command, **result}, sort_keys=True)); return 0
 
 
