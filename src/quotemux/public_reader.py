@@ -208,6 +208,9 @@ _FUTURES_PARTIAL_BARS_QUERY = """
       on interval_row.qmc_id = revision.qmc_id and interval_row.product_code = bars.product_code
      and interval_row.status = 'accepted' and bars.bar_time between interval_row.start_time and interval_row.end_time
     where bars.product_code = any(%s::text[]) and bars.series_type = 'apex_l0_adjusted'
+      and bars.open is not null and bars.high is not null and bars.low is not null and bars.close is not null and bars.volume is not null
+      and bars.volume >= 0 and bars.high >= greatest(bars.open,bars.close,bars.low) and bars.low <= least(bars.open,bars.close,bars.high)
+      and (bars.product_code,bars.bar_time) not in (('TA','2010-11-17 09:05:00'::timestamp),('y','2010-11-11 14:01:00'::timestamp),('y','2011-02-23 11:22:00'::timestamp))
       and bars.bar_time >= %s::timestamp and bars.bar_time <= %s::timestamp
       and (%s::timestamp is null or (bars.bar_time, bars.product_code) > (%s::timestamp, %s::text))
     group by bars.product_code, bars.exchange, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
