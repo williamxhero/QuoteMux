@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable
 from datetime import date, datetime
+import base64
+import hashlib
+import json
 import sys
 from typing import Any
 
@@ -122,6 +125,17 @@ _FUTURES_PRODUCT_CODES = (
 _FUTURES_CANONICAL_CODES = {code.lower(): code for code in _FUTURES_PRODUCT_CODES}
 _MAX_FUTURES_1M_LIMIT = 500_000
 
+_PARTIAL_DATASET_ID = "future_1m_partial_s000012_quotemux"
+_PARTIAL_PRODUCTS = frozenset(("ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"))
+
+
+class FuturesPartialPublicationQueryError(ValueError):
+    """The caller supplied malformed partial-query parameters or cursor."""
+
+
+class FuturesPartialPublicationStaleError(ValueError):
+    """A qmp/qmc/qmg identity is absent, malformed, or no longer coherent."""
+
 _FUTURES_1M_QUERY = """
     select bars.product_code,
            bars.exchange,
@@ -172,6 +186,52 @@ _FUTURES_SERIES_STATE_QUERY = """
     order by state.series_type, state.generation desc
 """
 
+_FUTURES_PARTIAL_BARS_QUERY = """
+    select bars.product_code, bars.exchange, 'back_adjusted_continuous' as series_type,
+           bars.bar_time::text as bar_time, bars.open, bars.high, bars.low, bars.close,
+           bars.volume, bars.open_interest, bars.adjustment_offset,
+           array_agg(distinct boundary.boundary_id order by boundary.boundary_id) as boundary_ids,
+           array_agg(distinct bars.source_key order by bars.source_key) as source_keys
+    from fact.future_bar_1m bars
+    join audit.future_bar_1m_partial_source_boundary boundary
+      on boundary.qmp_id = %s and boundary.product_code = bars.product_code
+     and boundary.exchange = bars.exchange and boundary.series_type = bars.series_type
+     and boundary.source_key = bars.source_key and bars.bar_time between boundary.start_time and boundary.end_time
+    join audit.future_bar_1m_partial_revision revision on revision.qmc_id = %s and revision.qmp_id = boundary.qmp_id
+    join audit.future_bar_1m_partial_revision_interval interval_row
+      on interval_row.qmc_id = revision.qmc_id and interval_row.product_code = bars.product_code
+     and interval_row.status = 'accepted' and bars.bar_time between interval_row.start_time and interval_row.end_time
+    where bars.product_code = any(%s::text[]) and bars.series_type = 'apex_l0_adjusted'
+      and bars.bar_time >= %s::timestamp and bars.bar_time <= %s::timestamp
+      and (%s::timestamp is null or (bars.bar_time, bars.product_code) > (%s::timestamp, %s::text))
+    group by bars.product_code, bars.exchange, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
+             bars.volume, bars.open_interest, bars.adjustment_offset
+    order by bars.bar_time, bars.product_code
+    limit %s
+"""
+
+_FUTURES_PARTIAL_COVERAGE_QUERY = """
+    select interval_row.product_code, series.exchange,
+           greatest(interval_row.start_time, %s::timestamp)::text as start_time,
+           least(interval_row.end_time, %s::timestamp)::text as end_time,
+           interval_row.status,
+           (select count(*) from fact.future_bar_1m observed join audit.future_bar_1m_partial_source_boundary b
+              on b.qmp_id=revision.qmp_id and b.product_code=observed.product_code and b.exchange=observed.exchange
+             and b.series_type=observed.series_type and b.source_key=observed.source_key and observed.bar_time between b.start_time and b.end_time
+             where observed.product_code=interval_row.product_code and observed.series_type='apex_l0_adjusted'
+               and observed.bar_time between greatest(interval_row.start_time,%s::timestamp) and least(interval_row.end_time,%s::timestamp))::bigint as observed_count,
+           interval_row.interval_id, interval_row.residual_json
+    from audit.future_bar_1m_partial_revision_interval interval_row
+    join audit.future_bar_1m_partial_revision revision on revision.qmc_id = interval_row.qmc_id
+    join ref.future_series series on series.product_code = interval_row.product_code and series.series_type = 'apex_l0_adjusted'
+    where revision.qmp_id = %s and interval_row.qmc_id = %s
+      and interval_row.product_code = any(%s::text[])
+      and interval_row.end_time >= %s::timestamp and interval_row.start_time <= %s::timestamp
+      and (%s::text is null or (interval_row.product_code, interval_row.start_time, interval_row.end_time, interval_row.status, interval_row.interval_id) > (%s::text, %s::timestamp, %s::timestamp, %s::text, %s::text))
+    order by interval_row.product_code, interval_row.start_time, interval_row.end_time, interval_row.status, interval_row.interval_id
+    limit %s
+"""
+
 
 def _date_text(value: str, field_name: str) -> str:
     text = str(value).strip()
@@ -190,6 +250,24 @@ def _timestamp_value(value: str | datetime, field_name: str) -> str | datetime:
     except ValueError as exc:
         raise ValueError(f"{field_name} must be an ISO timestamp") from exc
     return text
+
+
+def _partial_cursor_encode(kind: str, payload: dict[str, object]) -> str:
+    canonical = json.dumps({"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return base64.urlsafe_b64encode(canonical).rstrip(b"=").decode("ascii")
+
+
+def _partial_cursor_decode(value: str | None, kind: str, query_hash: str) -> dict[str, object] | None:
+    if value in (None, ""):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(str(value) + "=" * (-len(str(value)) % 4))
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise FuturesPartialPublicationQueryError("invalid partial cursor") from exc
+    if not isinstance(payload, dict) or payload.get("kind") != kind or payload.get("query_hash") != query_hash:
+        raise FuturesPartialPublicationQueryError("partial cursor does not match query")
+    return payload
 
 
 def _stock_code(value: object) -> str:
@@ -407,6 +485,65 @@ class QuoteMuxPublicReader:
             (storage_series_type, storage_series_type),
             stage="futures_series_state",
         )
+
+    def read_futures_1m_partial_page(
+        self, codes: str | Iterable[str], start_time: str | datetime, end_time: str | datetime,
+        *, qmp_id: str, qmc_id: str, qmg_id: str, cursor: str | None = None, limit: int = 10_000,
+    ) -> tuple[QueryBatch, str | None]:
+        """Read only admitted bars; output includes ``boundary_ids`` and ``source_keys`` evidence."""
+        from quotemux.store.futures_partial_publication import validate_identity
+        try:
+            validate_identity(qmp_id, "qmp"); validate_identity(qmc_id, "qmc"); validate_identity(qmg_id, "qmg")
+        except ValueError as exc:
+            raise FuturesPartialPublicationStaleError(str(exc)) from exc
+        normalized_codes = _future_codes(codes)
+        if not normalized_codes or any(code not in _PARTIAL_PRODUCTS for code in normalized_codes):
+            raise FuturesPartialPublicationQueryError("codes must be non-empty S000012 products; TL is not accepted")
+        start, end = _timestamp_value(start_time, "start_time"), _timestamp_value(end_time, "end_time")
+        if datetime.fromisoformat(str(start)) > datetime.fromisoformat(str(end)):
+            raise FuturesPartialPublicationQueryError("start_time must not be after end_time")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _MAX_FUTURES_1M_LIMIT:
+            raise FuturesPartialPublicationQueryError("limit must be a positive bounded integer")
+        query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
+        prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
+        prior_time = prior.get("bar_time") if prior else None
+        prior_code = prior.get("product_code") if prior else None
+        batch = self._client.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
+        rows = batch.rows[:limit]
+        output = QueryBatch(batch.columns, rows)
+        next_cursor = None
+        if len(batch.rows) > limit:
+            last = rows[-1]
+            next_cursor = _partial_cursor_encode("partial-bars", {"dataset_id": _PARTIAL_DATASET_ID, "qmp_id": qmp_id, "qmc_id": qmc_id, "qmg_id": qmg_id, "query_hash": query_hash, "bar_time": str(last[3]), "product_code": str(last[0])})
+        return output, next_cursor
+
+    def read_futures_1m_partial_coverage_page(
+        self, codes: str | Iterable[str], start_time: str | datetime, end_time: str | datetime, *, qmp_id: str, qmc_id: str, qmg_id: str, cursor: str | None = None, limit: int = 1_000,
+    ) -> tuple[QueryBatch, str | None]:
+        """Return observed accepted intervals. Missing bars are intentionally represented as skip residuals."""
+        from quotemux.store.futures_partial_publication import validate_identity
+        try:
+            validate_identity(qmp_id, "qmp"); validate_identity(qmc_id, "qmc"); validate_identity(qmg_id, "qmg")
+        except ValueError as exc:
+            raise FuturesPartialPublicationStaleError(str(exc)) from exc
+        normalized_codes = _future_codes(codes)
+        if not normalized_codes or any(code not in _PARTIAL_PRODUCTS for code in normalized_codes):
+            raise FuturesPartialPublicationQueryError("codes must be non-empty S000012 products; TL is not accepted")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= 10_000:
+            raise FuturesPartialPublicationQueryError("limit must be a positive bounded integer")
+        start, end = _timestamp_value(start_time, "start_time"), _timestamp_value(end_time, "end_time")
+        if datetime.fromisoformat(str(start)) > datetime.fromisoformat(str(end)):
+            raise FuturesPartialPublicationQueryError("start_time must not be after end_time")
+        query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
+        prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
+        params = (start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
+        batch = self._client.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
+        rows = batch.rows[:limit]; output = QueryBatch(batch.columns, rows)
+        next_cursor = None
+        if len(batch.rows) > limit:
+            last = rows[-1]
+            next_cursor = _partial_cursor_encode("partial-coverage", {"dataset_id": _PARTIAL_DATASET_ID, "qmp_id": qmp_id, "qmc_id": qmc_id, "qmg_id": qmg_id, "query_hash": query_hash, "product_code": str(last[0]), "start_time": str(last[2]), "end_time": str(last[3]), "status": str(last[4]), "interval_id": str(last[6])})
+        return output, next_cursor
 
     @staticmethod
     def _stock_1m_inputs(

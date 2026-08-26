@@ -347,10 +347,12 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     create or replace function audit.maintain_future_bar_1m_series_generation_after_insert()
-    returns trigger language plpgsql as $$
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     declare changed record;
     begin
-        for changed in select series_type, md5(string_agg(product_code || '|' || bar_time::text || '|' || source_key, ',' order by product_code, bar_time)) as delta_fingerprint from inserted_rows group by series_type loop
+        -- Compact aggregate: never materialize a multi-million-row string in a
+        -- transition trigger. The receipt's rowset SHA remains authoritative.
+        for changed in select series_type, md5(series_type || '|' || count(*)::text || '|' || min(bar_time)::text || '|' || max(bar_time)::text) as delta_fingerprint from inserted_rows group by series_type loop
             perform audit.record_future_bar_1m_series_generation(changed.series_type, 'insert', changed.delta_fingerprint);
         end loop;
         return null;
@@ -366,10 +368,11 @@ FUTURE_SCHEMA_SQL = (
     """,
     """
     create or replace function audit.maintain_future_bar_1m_series_generation_after_update()
-    returns trigger language plpgsql as $$
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
     declare changed record;
     begin
-        for changed in select series_type, md5(string_agg(product_code || '|' || bar_time::text || '|' || source_key, ',' order by product_code, bar_time)) as delta_fingerprint from updated_new_rows group by series_type loop
+        for changed in select series_type, md5(series_type || '|' || count(*)::text || '|' || min(bar_time)::text || '|' || max(bar_time)::text) as delta_fingerprint
+            from (select series_type, bar_time from updated_old_rows union select series_type, bar_time from updated_new_rows) changed_rows group by series_type loop
             perform audit.record_future_bar_1m_series_generation(changed.series_type, 'update', changed.delta_fingerprint);
         end loop;
         return null;
@@ -380,6 +383,24 @@ FUTURE_SCHEMA_SQL = (
     do $$ begin
         if not exists (select 1 from pg_trigger where tgrelid = 'fact.future_bar_1m'::regclass and tgname = 'future_bar_1m_series_generation_after_update' and not tgisinternal) then
             create trigger future_bar_1m_series_generation_after_update after update on fact.future_bar_1m referencing new table as updated_new_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_update();
+        end if;
+    end $$
+    """,
+    """
+    create or replace function audit.maintain_future_bar_1m_series_generation_after_delete()
+    returns trigger language plpgsql security definer set search_path = pg_catalog, fact, audit as $$
+    declare changed record;
+    begin
+        for changed in select series_type, md5(series_type || '|' || count(*)::text || '|' || min(bar_time)::text || '|' || max(bar_time)::text) as delta_fingerprint from deleted_rows group by series_type loop
+            perform audit.record_future_bar_1m_series_generation(changed.series_type, 'delete', changed.delta_fingerprint);
+        end loop;
+        return null;
+    end $$
+    """,
+    """
+    do $$ begin
+        if not exists (select 1 from pg_trigger where tgrelid='fact.future_bar_1m'::regclass and tgname='future_bar_1m_series_generation_after_delete' and not tgisinternal) then
+            create trigger future_bar_1m_series_generation_after_delete after delete on fact.future_bar_1m referencing old table as deleted_rows for each statement execute function audit.maintain_future_bar_1m_series_generation_after_delete();
         end if;
     end $$
     """,

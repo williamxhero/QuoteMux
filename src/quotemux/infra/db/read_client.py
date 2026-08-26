@@ -13,7 +13,7 @@ from uuid import uuid4
 import psycopg
 from psycopg.rows import tuple_row
 
-from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
+from quotemux.infra.db.config import DB_CONNECT_TIMEOUT, DB_HOST, DB_NAME, DB_PORT
 
 
 StageCallback = Callable[[str, float], None]
@@ -65,12 +65,19 @@ def _emit(callback: StageCallback | None, stage: str, started_at: float) -> None
 
 
 def _connect() -> psycopg.Connection:
+    # The public reader must never silently borrow the application's writer
+    # identity.  The production API must provide the separately provisioned
+    # reader secret before serving a MarketHub read.
+    reader_user = os.getenv("QUOTEMUX_READ_DB_USER", "").strip()
+    reader_password = os.getenv("QUOTEMUX_READ_DB_PASSWORD", "")
+    if not reader_user:
+        raise RuntimeError("QUOTEMUX_READ_DB_USER is required for public reads")
     return psycopg.connect(
         host=DB_HOST,
         port=DB_PORT,
         dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
+        user=reader_user,
+        password=reader_password,
         connect_timeout=DB_CONNECT_TIMEOUT,
         row_factory=tuple_row,
     )
