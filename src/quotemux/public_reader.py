@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from zoneinfo import ZoneInfo
 
 from quotemux.infra.db.read_client import QueryBatch, ReadOnlyClient, StageCallback
+from quotemux.futures_partial_contract import DATASET_ID as _CONTRACT_PARTIAL_DATASET_ID, admitted_rows_cte
 
 
 _CANONICAL_MARKET = """
@@ -127,7 +128,7 @@ _FUTURES_PRODUCT_CODES = (
 _FUTURES_CANONICAL_CODES = {code.lower(): code for code in _FUTURES_PRODUCT_CODES}
 _MAX_FUTURES_1M_LIMIT = 500_000
 
-_PARTIAL_DATASET_ID = "future_1m_partial_s000012_quotemux"
+_PARTIAL_DATASET_ID = _CONTRACT_PARTIAL_DATASET_ID
 _PARTIAL_PRODUCTS = frozenset(("ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"))
 
 
@@ -188,13 +189,15 @@ _FUTURES_SERIES_STATE_QUERY = """
     order by state.series_type, state.generation desc
 """
 
-_FUTURES_PARTIAL_BARS_QUERY = """
+_FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
+    qmi_expression="select publication.payload_json->>'qmi_id' from audit.future_bar_1m_partial_publication publication where publication.qmp_id=%s"
+) + """
     select bars.product_code, bars.exchange, 'back_adjusted_continuous' as series_type,
            bars.bar_time::text as bar_time, bars.open, bars.high, bars.low, bars.close,
            bars.volume, bars.open_interest, bars.adjustment_offset,
            array_agg(distinct boundary.boundary_id order by boundary.boundary_id) as boundary_ids,
            array_agg(distinct bars.source_key order by bars.source_key) as source_keys
-    from fact.future_bar_1m bars
+    from admitted_rows bars
     join audit.future_bar_1m_partial_source_boundary boundary
       on boundary.qmp_id = %s and boundary.product_code = bars.product_code
      and boundary.exchange = bars.exchange and boundary.series_type = bars.series_type
@@ -203,10 +206,7 @@ _FUTURES_PARTIAL_BARS_QUERY = """
     join audit.future_bar_1m_partial_revision_interval interval_row
       on interval_row.qmc_id = revision.qmc_id and interval_row.product_code = bars.product_code
      and interval_row.status = 'accepted' and bars.bar_time between interval_row.start_time and interval_row.end_time
-    where bars.product_code = any(%s::text[]) and bars.series_type = 'apex_l0_adjusted'
-      and bars.open is not null and bars.high is not null and bars.low is not null and bars.close is not null and bars.volume is not null
-      and bars.volume >= 0 and bars.high >= greatest(bars.open,bars.close,bars.low) and bars.low <= least(bars.open,bars.close,bars.high)
-      and (bars.product_code,bars.bar_time) not in (('TA','2010-11-17 09:05:00'::timestamp),('y','2010-11-11 14:01:00'::timestamp),('y','2011-02-23 11:22:00'::timestamp))
+    where bars.product_code = any(%s::text[])
       and bars.bar_time >= %s::timestamp and bars.bar_time <= %s::timestamp
       and (%s::timestamp is null or (bars.bar_time, bars.product_code) > (%s::timestamp, %s::text))
     group by bars.product_code, bars.exchange, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
@@ -215,15 +215,17 @@ _FUTURES_PARTIAL_BARS_QUERY = """
     limit %s
 """
 
-_FUTURES_PARTIAL_COVERAGE_QUERY = """
+_FUTURES_PARTIAL_COVERAGE_QUERY = admitted_rows_cte(
+    qmi_expression="select publication.payload_json->>'qmi_id' from audit.future_bar_1m_partial_publication publication where publication.qmp_id=%s"
+) + """
     select interval_row.product_code, series.exchange,
            greatest(interval_row.start_time, %s::timestamp)::text as start_time,
            least(interval_row.end_time, %s::timestamp)::text as end_time,
            interval_row.status,
-           (select count(*) from fact.future_bar_1m observed join audit.future_bar_1m_partial_source_boundary b
+           (select count(*) from admitted_rows observed join audit.future_bar_1m_partial_source_boundary b
               on b.qmp_id=revision.qmp_id and b.product_code=observed.product_code and b.exchange=observed.exchange
              and b.series_type=observed.series_type and b.source_key=observed.source_key and observed.bar_time between b.start_time and b.end_time
-             where observed.product_code=interval_row.product_code and observed.series_type='apex_l0_adjusted'
+             where observed.product_code=interval_row.product_code
                and observed.bar_time between greatest(interval_row.start_time,%s::timestamp) and least(interval_row.end_time,%s::timestamp))::bigint as observed_count,
            interval_row.interval_id, interval_row.residual_json
     from audit.future_bar_1m_partial_revision_interval interval_row
@@ -564,7 +566,7 @@ class QuoteMuxPublicReader:
         with snapshot_context as snapshot:
             self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
             prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
-            params = (start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
+            params = (qmp_id, start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
             batch = snapshot.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
         rows = batch.rows[:limit]; output = QueryBatch(batch.columns, rows)
         next_cursor = None
@@ -582,11 +584,44 @@ class QuoteMuxPublicReader:
         try:
             payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
             revision = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
-            actual_qmg = canonical_identity_for_reader({"dataset_id": _PARTIAL_DATASET_ID, "generation": int(row[2]), "row_count": int(row[3]), "first": str(row[4]), "last": str(row[5])})
+            actual_qmg = canonical_identity_for_reader({"dataset_id": _PARTIAL_DATASET_ID, "series_type": "apex_l0_adjusted", "generation": int(row[2]), "row_count": int(row[3]), "first_bar_time": str(row[4]), "last_bar_time": str(row[5])})
         except Exception as exc:
             raise FuturesPartialPublicationStaleError("partial publication identity is malformed") from exc
         if payload.get("qmg_id") != qmg_id or revision.get("qmp_id") != qmp_id or actual_qmg != qmg_id:
             raise FuturesPartialPublicationStaleError("partial publication generation is stale")
+
+    def get_futures_1m_partial_metadata(self, *, qmp_id: str, qmc_id: str, qmg_id: str) -> dict[str, object]:
+        """Return verified immutable contract metadata for the MarketHub facade.
+
+        A facade must not infer completeness from a 200 page; it can only state
+        the partial contract after this identity/generation check passes.
+        """
+        from quotemux.store.futures_partial_publication import validate_identity
+        try:
+            validate_identity(qmp_id, "qmp"); validate_identity(qmc_id, "qmc"); validate_identity(qmg_id, "qmg")
+        except ValueError as exc:
+            raise FuturesPartialPublicationStaleError(str(exc)) from exc
+        snapshot_context = self._client.snapshot() if hasattr(self._client, "snapshot") else nullcontext(self._client)
+        with snapshot_context as snapshot:
+            batch = snapshot.query_batch(_FUTURES_PARTIAL_IDENTITY_QUERY, (qmc_id, qmp_id), stage="futures_partial_metadata")
+            self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
+        row = batch.rows[0]
+        try:
+            publication = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
+            revision = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
+            warmup = revision.get("warmup", {})
+            return {
+                "dataset_id": _PARTIAL_DATASET_ID, "qmp_id": qmp_id, "qmc_id": qmc_id, "qmg_id": qmg_id,
+                "qmi_id": publication["qmi_id"], "catalog_identity": publication["catalog_identity"],
+                "publication_verified": True, "timezone": revision["timezone"], "interval_bounds": revision["interval_bounds"],
+                "coverage_semantics": revision["coverage_semantics"], "missing_bar_semantics": revision["missing_bar_semantics"],
+                "open_interest": revision["open_interest"], "session_grid": revision["session_grid"],
+                "sources": publication["sources"], "source_boundary_manifest": publication["source_boundary_manifest"],
+                "warmup": warmup, "residual_semantics": warmup.get("residual_semantics"),
+                "lineage_limitations": publication["lineage_limitations"],
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise FuturesPartialPublicationStaleError("partial publication metadata is malformed") from exc
 
     @staticmethod
     def _stock_1m_inputs(

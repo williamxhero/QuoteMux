@@ -161,26 +161,28 @@ def test_futures_coverage_reads_maintained_summary_without_fact_aggregate(monkey
 
 def test_futures_coverage_schema_has_one_time_backfill_and_write_maintenance() -> None:
     schema = "\n".join(futures.FUTURE_SCHEMA_SQL).lower()
+    from quotemux.store import futures_partial_migration as migration
+    hardened = "\n".join((*migration.HARDENED_FUNCTION_DDL, *migration.TRIGGER_DDL)).lower()
 
     assert "create table if not exists fact.future_bar_1m_coverage" in schema
     assert "where not exists (select 1 from fact.future_bar_1m_coverage)" in schema
     assert "group by bars.product_code, bars.exchange, bars.series_type" in schema
-    assert "after insert on fact.future_bar_1m" in schema
-    assert "referencing new table as inserted_rows" in schema
-    assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_insert" in schema
-    assert "after delete on fact.future_bar_1m" in schema
-    assert "referencing old table as deleted_rows" in schema
-    assert "after update on fact.future_bar_1m" in schema
-    assert "referencing old table as updated_old_rows new table as updated_new_rows" in schema
-    assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_update" in schema
-    assert "for each row execute function fact.maintain_future_bar_1m_coverage" not in schema
-    assert "except" in schema
+    assert "after insert on fact.future_bar_1m" not in schema
+    assert "after insert on fact.future_bar_1m" in hardened
+    assert "referencing new table as inserted_rows" in hardened
+    assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_insert" in hardened
+    assert "after delete on fact.future_bar_1m" in hardened
+    assert "referencing old table as deleted_rows" in hardened
+    assert "after update on fact.future_bar_1m" in hardened
+    assert "referencing old table as updated_old_rows new table as updated_new_rows" in hardened
+    assert "for each statement execute function fact.maintain_future_bar_1m_coverage_after_update" in hardened
+    assert "for each row execute function fact.maintain_future_bar_1m_coverage" not in hardened
     assert "create table if not exists audit.future_bar_1m_series_generation" in schema
     assert "where not exists (select 1 from audit.future_bar_1m_series_generation)" in schema
     assert "primary key (series_type, generation)" in schema
-    assert "future_bar_1m_series_generation_after_insert" in schema
-    assert "future_bar_1m_series_generation_after_update" in schema
-    assert "pg_advisory_xact_lock(hashtext('future_bar_1m_series_generation:' || target_series_type))" in schema
+    assert "future_bar_1m_series_generation_after_insert" in hardened
+    assert "future_bar_1m_series_generation_after_update" in hardened
+    assert "pg_advisory_xact_lock(hashtext('future_bar_1m_series_generation:'||target_series_type))" in hardened
 
 
 def test_future_schema_keeps_catalog_ddl_in_its_own_executor_unit() -> None:

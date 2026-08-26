@@ -1,29 +1,28 @@
-"""Idempotent, existing-first import of the user-authorized Pyramid archive.
-
-The archive is evidence, not a provider runtime.  It can add missing facts but
-can never replace a QuoteMux fact already present under the canonical key.
-"""
+"""Evidence-first Pyramid classifier and immutable QuoteMux facts importer."""
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import gzip
 import hashlib
 import json
-import re
-from typing import Any
-from pathlib import Path
 import os
+from pathlib import Path
+import re
+from typing import Any, Iterator
 
 import psycopg
 
+from quotemux.futures_partial_contract import (
+    FACT_NORMALIZATION_VERSION, PRODUCT_EXCHANGE, PRODUCTS, PYRAMID_SOURCE_KEY,
+    SERIES_TYPE, candidate_row, candidate_sha256, canonical_json_bytes,
+)
 from quotemux.infra.db.client import _acquire_connection, _release_connection
 
-STORAGE_SERIES_TYPE = "apex_l0_adjusted"
-SOURCE_KEY = "pyramid_back_adjusted_20260714"
-FACT_TRANSFORM_VERSION = "quotemux_fact_source_key_v1"
+SOURCE_KEY = PYRAMID_SOURCE_KEY
+FACT_TRANSFORM_VERSION = FACT_NORMALIZATION_VERSION
 _SHA = re.compile(r"^[0-9a-f]{64}$")
-_PRODUCTS = frozenset(("ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"))
-_EXCHANGE = {"ag":"SHFE","al":"SHFE","AP":"CZCE","CF":"CZCE","cu":"SHFE","hc":"SHFE","i":"DCE","j":"DCE","m":"DCE","MA":"CZCE","ni":"SHFE","p":"DCE","ru":"SHFE","sc":"INE","T":"CFFEX","TA":"CZCE","TF":"CFFEX","v":"DCE","y":"DCE","lh":"DCE","SA":"CZCE","ao":"SHFE","si":"GFEX"}
+_PARQUET_FIELDS = ("product_code", "exchange", "bar_time", "open", "high", "low", "close", "volume", "open_interest", "adjustment_offset", "source_key")
 
 
 class FuturesPyramidImportError(ValueError):
@@ -32,11 +31,12 @@ class FuturesPyramidImportError(ValueError):
 
 @dataclass(frozen=True)
 class PyramidBundle:
-    rows: tuple[dict[str, object], ...]
-    manifest: Mapping[str, object]
+    path: Path
+    manifest: dict[str, object]
     source_normalized_rowset_sha256: str
     canonical_fact_rowset_sha256: str
-    bundle_path: Path | None = None
+    normalized_row_count: int
+    rows: tuple[dict[str, object], ...] = ()
 
 
 def _sha(value: object, name: str) -> str:
@@ -46,187 +46,250 @@ def _sha(value: object, name: str) -> str:
     return text
 
 
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+def _hash_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def _fact_row(raw: Mapping[str, object]) -> dict[str, object]:
-    product = str(raw.get("product_code", ""))
-    if product not in _PRODUCTS or product == "TL":
-        raise FuturesPyramidImportError(f"unsupported Pyramid product_code: {product}")
-    if raw.get("exchange") != _EXCHANGE[product]:
-        raise FuturesPyramidImportError(f"Pyramid exchange mismatch for {product}")
-    required = ("exchange", "bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")
-    if any(raw.get(name) is None for name in required):
-        raise FuturesPyramidImportError("Pyramid canonical row has a missing required field")
-    row = {name: raw[name] for name in ("product_code", "exchange", "bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")}
-    row.update(series_type=STORAGE_SERIES_TYPE, source_key=SOURCE_KEY, open_interest=None)
-    return row
+def _strict_authorization(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise FuturesPyramidImportError("Pyramid authorization is required")
+    actual = dict(value)
+    required = {"status": "private_research_authorized", "source_thread_id": "01a031ef-006c-7de0-a585-68eecdf769c7", "private_server_retention": True, "transformation": True, "private_research": True, "redistribution": False}
+    for key, expected in required.items():
+        if actual.get(key) != expected:
+            raise FuturesPyramidImportError(f"authorization.{key} must be {expected!r}")
+    if not isinstance(actual.get("evidence"), str) or not actual["evidence"].strip():
+        raise FuturesPyramidImportError("authorization.evidence must be non-empty")
+    return actual
 
 
-def load_pyramid_bundle(artifact_bytes: bytes, manifest: Mapping[str, object]) -> PyramidBundle:
+def _verify_inventory(bundle_path: Path, entries: object, *, kind: str) -> None:
+    if not isinstance(entries, list) or not entries:
+        raise FuturesPyramidImportError(f"{kind} inventory is missing")
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise FuturesPyramidImportError(f"{kind} inventory entry is invalid")
+        relative = str(entry.get("path", ""))
+        if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise FuturesPyramidImportError(f"unsafe {kind} inventory path")
+        path = bundle_path / relative
+        if not path.is_file() or path.stat().st_size != int(entry.get("size_bytes", -1)):
+            raise FuturesPyramidImportError(f"{kind} inventory mismatch: {relative}")
+        if _hash_path(path) != _sha(entry.get("sha256"), f"{kind} sha256"):
+            raise FuturesPyramidImportError(f"{kind} hash mismatch: {relative}")
+
+
+def _arrow_value(value: object) -> object:
+    return value.isoformat(sep=" ") if hasattr(value, "isoformat") else value
+
+
+def _rows(path: Path, *, fields: tuple[str, ...]) -> Iterator[dict[str, object]]:
     try:
-        payload = json.loads(artifact_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FuturesPyramidImportError("Pyramid bundle must be UTF-8 JSON") from exc
-    if not isinstance(payload, Mapping) or payload.get("schema_version") != "futures_user_pyramid_archive_bundle_v1":
-        raise FuturesPyramidImportError("unsupported Pyramid bundle schema")
-    if manifest.get("schema_version") != "futures_user_pyramid_archive_manifest_v1":
-        raise FuturesPyramidImportError("unsupported Pyramid manifest schema")
-    if manifest.get("lineage") != "user_provided/pyramid_post_adjusted_20260714":
-        raise FuturesPyramidImportError("Pyramid lineage must remain user_provided")
-    authorization = manifest.get("authorization")
-    if not isinstance(authorization, Mapping) or authorization.get("status") != "private_research_authorized":
-        raise FuturesPyramidImportError("Pyramid private-research authorization is required")
-    rows = payload.get("rows")
-    if not isinstance(rows, list) or not rows:
-        raise FuturesPyramidImportError("Pyramid bundle rows must be non-empty")
-    source_hash = _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256")
-    fact_hash = _sha(manifest.get("canonical_fact_rowset_sha256"), "canonical_fact_rowset_sha256")
-    if manifest.get("fact_transform_version") != FACT_TRANSFORM_VERSION:
-        raise FuturesPyramidImportError("unexpected Pyramid fact transform version")
-    normalized = tuple(_fact_row(row) for row in rows if isinstance(row, Mapping))
-    if len(normalized) != len(rows) or len({(r["product_code"], r["bar_time"]) for r in normalized}) != len(normalized):
-        raise FuturesPyramidImportError("Pyramid bundle has invalid or duplicate keys")
-    if hashlib.sha256(_canonical_bytes(list(normalized))).hexdigest() != fact_hash:
-        raise FuturesPyramidImportError("canonical fact rowset SHA-256 mismatch")
-    return PyramidBundle(normalized, manifest, source_hash, fact_hash)
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pragma: no cover
+        raise FuturesPyramidImportError("pyarrow is required to read Pyramid evidence") from exc
+    parquet = pq.ParquetFile(path)
+    if tuple(parquet.schema_arrow.names) != fields:
+        raise FuturesPyramidImportError(f"unexpected parquet schema: {path.name}")
+    for batch in parquet.iter_batches(batch_size=100_000, columns=list(fields)):
+        for row in batch.to_pylist():
+            yield {key: _arrow_value(row.get(key)) for key in fields}
+
+
+def _fact_from_parquet(row: Mapping[str, object]) -> dict[str, object]:
+    product = str(row.get("product_code", ""))
+    if product not in PRODUCTS or product == "TL" or row.get("exchange") != PRODUCT_EXCHANGE[product]:
+        raise FuturesPyramidImportError("fact parquet product/exchange contract mismatch")
+    if row.get("source_key") != SOURCE_KEY or row.get("open_interest") is not None:
+        raise FuturesPyramidImportError("fact parquet source/OI contract mismatch")
+    if any(row.get(name) is None for name in ("bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")):
+        raise FuturesPyramidImportError("fact parquet has missing required fields")
+    return candidate_row(dict(row))
 
 
 def load_pyramid_filesystem_bundle(bundle_path: Path) -> PyramidBundle:
-    """Validate the package-produced Parquet bundle without reading it into RAM."""
-    manifest_path = bundle_path / "manifest.json"
+    """Verify all physical evidence before a database connection is made."""
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise FuturesPyramidImportError("Pyramid bundle manifest is unreadable") from exc
-    if not isinstance(manifest, Mapping) or manifest.get("schema_version") != "futures_user_pyramid_archive_bundle_v1":
-        raise FuturesPyramidImportError("unsupported Pyramid filesystem bundle schema")
-    if not isinstance(manifest.get("authorization"), Mapping) or manifest["authorization"].get("status") != "private_research_authorized":
-        raise FuturesPyramidImportError("Pyramid private-research authorization is required")
-    facts = bundle_path / "fact_normalized.parquet"
-    if not facts.is_file():
-        raise FuturesPyramidImportError("fact_normalized.parquet is missing")
-    actual = hashlib.sha256(facts.read_bytes()).hexdigest()
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "futures_user_pyramid_archive_bundle_v1":
+        raise FuturesPyramidImportError("unsupported Pyramid bundle schema")
+    _strict_authorization(manifest.get("authorization"))
+    lineage = manifest.get("source_lineage")
+    if not isinstance(lineage, Mapping) or lineage.get("source_class") != "user_provided" or lineage.get("source_identity") != "pyramid_post_adjusted_20260714" or lineage.get("vendor_entitlement") != "unknown_not_asserted":
+        raise FuturesPyramidImportError("Pyramid lineage/entitlement contract mismatch")
+    _verify_inventory(bundle_path, manifest.get("raw_files"), kind="raw")
+    _verify_inventory(bundle_path, manifest.get("evidence_files"), kind="evidence")
+    raw_inventory = manifest.get("raw_byte_inventory")
+    if not isinstance(raw_inventory, list) or len(raw_inventory) != 23:
+        raise FuturesPyramidImportError("exact 23-file raw inventory is required")
+    if hashlib.sha256(canonical_json_bytes(manifest.get("raw_files"))).hexdigest() != _sha(manifest.get("raw_aggregate_sha256"), "raw_aggregate_sha256"):
+        raise FuturesPyramidImportError("raw aggregate hash mismatch")
     normalization = manifest.get("fact_normalization")
-    if not isinstance(normalization, Mapping) or actual != _sha(normalization.get("fact_normalized_artifact_sha256"), "fact_normalized_artifact_sha256"):
-        raise FuturesPyramidImportError("fact-normalized artifact SHA-256 mismatch")
-    return PyramidBundle((), manifest, _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256"), _sha(normalization.get("fact_normalized_rowset_sha256"), "fact_normalized_rowset_sha256"), bundle_path)
+    if not isinstance(normalization, Mapping) or normalization.get("version") != FACT_TRANSFORM_VERSION or normalization.get("source_key") != SOURCE_KEY:
+        raise FuturesPyramidImportError("fact_normalization version/source_key mismatch")
+    normalized_path, fact_path = bundle_path / "normalized.parquet", bundle_path / "fact_normalized.parquet"
+    if not normalized_path.is_file() or _hash_path(normalized_path) != _sha(manifest.get("normalized_artifact_sha256"), "normalized_artifact_sha256"):
+        raise FuturesPyramidImportError("normalized artifact hash mismatch")
+    if not fact_path.is_file() or _hash_path(fact_path) != _sha(normalization.get("fact_normalized_artifact_sha256"), "fact_normalized_artifact_sha256"):
+        raise FuturesPyramidImportError("fact-normalized artifact hash mismatch")
+    source_digest, fact_digest, previous, count = hashlib.sha256(), hashlib.sha256(), None, 0
+    for source, fact in zip(_rows(normalized_path, fields=_PARQUET_FIELDS), _rows(fact_path, fields=_PARQUET_FIELDS), strict=True):
+        canonical = _fact_from_parquet(fact); key = (canonical["product_code"], canonical["exchange"], canonical["bar_time"])
+        if previous is not None and key <= previous:
+            raise FuturesPyramidImportError("fact parquet primary keys must be sorted/unique")
+        previous = key
+        if source.get("product_code") != canonical["product_code"] or source.get("exchange") != canonical["exchange"] or str(source.get("bar_time")) != str(canonical["bar_time"]):
+            raise FuturesPyramidImportError("normalized/fact parquet key mismatch")
+        source_digest.update(canonical_json_bytes(source) + b"\n"); fact_digest.update(canonical_json_bytes(canonical) + b"\n"); count += 1
+    if count != int(manifest.get("normalized_row_count", -1)):
+        raise FuturesPyramidImportError("normalized row count mismatch")
+    source_sha, fact_sha = source_digest.hexdigest(), fact_digest.hexdigest()
+    if source_sha != _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256") or fact_sha != _sha(normalization.get("fact_normalized_rowset_sha256"), "fact_normalized_rowset_sha256"):
+        raise FuturesPyramidImportError("rowset hash mismatch")
+    return PyramidBundle(bundle_path, manifest, source_sha, fact_sha, count)
 
 
-def _main() -> int:
-    """Administrative command: classify/publish an immutable on-disk bundle."""
-    import argparse
-    parser = argparse.ArgumentParser(description="Classify and publish a Pyramid futures evidence bundle")
-    parser.add_argument("command", choices=("classify", "publish"))
-    parser.add_argument("--bundle", type=Path, required=True)
-    args = parser.parse_args()
-    bundle = load_pyramid_filesystem_bundle(args.bundle)
-    if args.command == "classify":
-        print(json.dumps({"source_normalized_rowset_sha256": bundle.source_normalized_rowset_sha256, "canonical_fact_rowset_sha256": bundle.canonical_fact_rowset_sha256, "rows": bundle.manifest.get("normalized_row_count")}, sort_keys=True)); return 0
-    print(json.dumps(FuturesPyramidImporter(_publisher_connection).publish_filesystem_bundle(args.bundle), sort_keys=True)); return 0
+def load_pyramid_bundle(artifact_bytes: bytes, manifest: Mapping[str, object]) -> PyramidBundle:
+    """Small-fixture compatibility helper; production must use filesystem bundle."""
+    try: payload = json.loads(artifact_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc: raise FuturesPyramidImportError("Pyramid bundle must be UTF-8 JSON") from exc
+    rows = payload.get("rows") if isinstance(payload, Mapping) else None
+    if not isinstance(rows, list): raise FuturesPyramidImportError("Pyramid bundle rows must be a list")
+    digest, legacy_digest, previous, canonical_rows = hashlib.sha256(), hashlib.sha256(), None, []
+    for row in rows:
+        if not isinstance(row, Mapping): raise FuturesPyramidImportError("Pyramid bundle row is invalid")
+        product = str(row.get("product_code", ""))
+        if product not in PRODUCTS or product == "TL": raise FuturesPyramidImportError(f"unsupported Pyramid product_code: {product}")
+        if row.get("exchange") != PRODUCT_EXCHANGE[product]: raise FuturesPyramidImportError(f"Pyramid exchange mismatch for {product}")
+        fact = candidate_row(dict(row)); key = (fact["product_code"], fact["exchange"], fact["bar_time"])
+        if previous is not None and key <= previous: raise FuturesPyramidImportError("Pyramid bundle primary keys must be sorted/unique")
+        previous = key; canonical_rows.append(fact); digest.update(canonical_json_bytes(fact) + b"\n")
+    legacy_digest.update(canonical_json_bytes(canonical_rows))
+    normalization = manifest.get("fact_normalization") if isinstance(manifest, Mapping) else None
+    expected = normalization.get("fact_normalized_rowset_sha256") if isinstance(normalization, Mapping) else manifest.get("canonical_fact_rowset_sha256")
+    expected_sha = _sha(expected, "canonical_fact_rowset_sha256")
+    if digest.hexdigest() != expected_sha and legacy_digest.hexdigest() != expected_sha: raise FuturesPyramidImportError("canonical fact rowset SHA-256 mismatch")
+    return PyramidBundle(Path("."), dict(manifest), _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256"), digest.hexdigest(), len(rows), tuple(canonical_rows))
 
 
 def _publisher_connection() -> Any:
-    """Fail-closed admin connection; never reuse the legacy application DSN."""
-    required = {name: os.getenv(f"QUOTEMUX_PUBLISH_DB_{name}", "").strip() for name in ("HOST", "PORT", "NAME", "USER", "PASSWORD")}
-    if not all(required.values()):
-        raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_HOST/PORT/NAME/USER/PASSWORD are required")
+    values = {name: os.getenv(f"QUOTEMUX_PUBLISH_DB_{name}", "").strip() for name in ("HOST", "PORT", "NAME", "USER", "PASSWORD")}
+    if not all(values.values()): raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_HOST/PORT/NAME/USER/PASSWORD are required")
+    try: port = int(values["PORT"])
+    except ValueError as exc: raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_PORT must be an integer") from exc
+    return psycopg.connect(host=values["HOST"], port=port, dbname=values["NAME"], user=values["USER"], password=values["PASSWORD"])
+
+
+def _write_plan(path: Path, header: dict[str, object], rows: Iterator[dict[str, object]]) -> dict[str, object]:
+    if path.exists(): raise FuturesPyramidImportError("refusing to overwrite a disposition artifact")
+    digest, count, counts = hashlib.sha256(), 0, {"missing_valid": 0, "already_present_equivalent": 0, "existing_conflict": 0}
+    partial = path.with_suffix(path.suffix + ".records.partial")
+    if partial.exists(): raise FuturesPyramidImportError("refusing to overwrite a partial disposition artifact")
     try:
-        port = int(required["PORT"])
-    except ValueError as exc:
-        raise FuturesPyramidImportError("QUOTEMUX_PUBLISH_DB_PORT must be an integer") from exc
-    return psycopg.connect(host=required["HOST"], port=port, dbname=required["NAME"], user=required["USER"], password=required["PASSWORD"])
+        with partial.open("x", encoding="utf-8", newline="\n") as stream:
+            for row in rows:
+                text = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False); stream.write(text + "\n"); digest.update(text.encode() + b"\n")
+                count += 1; counts[str(row["disposition"])] += 1
+        complete = {**header, "disposition_count": count, "disposition_sha256": digest.hexdigest(), "counts": counts}
+        with gzip.open(path, "xt", encoding="utf-8", newline="\n") as stream, partial.open("r", encoding="utf-8") as records:
+            stream.write(json.dumps({"kind": "header", **complete}, sort_keys=True, separators=(",", ":")) + "\n")
+            for line in records: stream.write(line)
+    finally:
+        if partial.exists(): partial.unlink()
+    return {**complete, "artifact": str(path)}
+
+
+def _read_plan(path: Path) -> tuple[dict[str, object], Iterator[dict[str, object]]]:
+    stream = gzip.open(path, "rt", encoding="utf-8")
+    try: head = json.loads(next(stream))
+    except Exception: stream.close(); raise FuturesPyramidImportError("invalid disposition artifact")
+    if not isinstance(head, dict) or head.get("kind") != "header": stream.close(); raise FuturesPyramidImportError("disposition artifact header missing")
+    def records() -> Iterator[dict[str, object]]:
+        try:
+            for line in stream:
+                row = json.loads(line)
+                if not isinstance(row, dict): raise FuturesPyramidImportError("invalid disposition record")
+                yield row
+        finally: stream.close()
+    return head, records()
 
 
 class FuturesPyramidImporter:
-    def __init__(self, connection_factory: Callable[[], Any] = _acquire_connection) -> None:
-        self._connection_factory = connection_factory
+    def __init__(self, connection_factory: Callable[[], Any] = _acquire_connection) -> None: self._connection_factory = connection_factory
 
-    def publish(self, artifact_bytes: bytes, manifest: Mapping[str, object]) -> dict[str, object]:
-        bundle = load_pyramid_bundle(artifact_bytes, manifest)
-        connection = self._connection_factory()
-        owns_connection = self._connection_factory is _acquire_connection
+    def classify_filesystem_bundle(self, bundle_path: Path, plan_path: Path) -> dict[str, object]:
+        """Read-only deterministic classification; it does not write temp tables."""
+        bundle = load_pyramid_filesystem_bundle(bundle_path); connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
             with connection.cursor() as cursor:
-                cursor.execute("select qmi_id, payload_sha256 from audit.future_bar_1m_import_publication where source_normalized_rowset_sha256=%s and fact_transform_version=%s and canonical_fact_rowset_sha256=%s", (bundle.source_normalized_rowset_sha256, FACT_TRANSFORM_VERSION, bundle.canonical_fact_rowset_sha256))
-                existing = cursor.fetchone()
-                payload_hash = hashlib.sha256(_canonical_bytes(manifest)).hexdigest()
-                if existing:
-                    if existing[1] != payload_hash:
-                        raise FuturesPyramidImportError("existing qmi payload differs")
-                    connection.rollback()
-                    return {"status": "idempotent", "qmi_id": existing[0]}
-                self._stage(cursor, bundle)
-                cursor.execute("select count(*) filter (where disposition='missing_valid'), count(*) filter (where disposition='already_present_equivalent'), count(*) filter (where disposition='existing_conflict') from future_pyramid_stage")
-                missing, equivalent, conflict = cursor.fetchone()
-                if missing:
-                    cursor.execute("""insert into fact.future_bar_1m (product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key)
-                    select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where disposition='missing_valid'""", (STORAGE_SERIES_TYPE, SOURCE_KEY))
-                qmi_id = "qmi-" + hashlib.sha256(_canonical_bytes({"source": bundle.source_normalized_rowset_sha256, "fact": bundle.canonical_fact_rowset_sha256, "transform": FACT_TRANSFORM_VERSION})).hexdigest()
-                cursor.execute("""insert into audit.future_bar_1m_import_publication (qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count)
-                values (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""", (qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_hash,json.dumps(manifest, sort_keys=True),missing,equivalent,conflict))
-            connection.commit()
-            return {"status": "success", "qmi_id": qmi_id, "inserted_count": missing, "equivalent_count": equivalent, "conflict_count": conflict}
-        except Exception:
-            connection.rollback()
-            raise
+                cursor.execute("begin isolation level repeatable read read only")
+                cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1", (SERIES_TYPE,)); generation = cursor.fetchone()
+                if not generation: raise FuturesPyramidImportError("future series generation is absent")
+                cursor.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset from fact.future_bar_1m where series_type=%s and product_code=any(%s::text[]) order by product_code,exchange,bar_time", (SERIES_TYPE, list(PRODUCTS)))
+                existing = iter(cursor.fetchall()); current = next(existing, None)
+                def dispositions() -> Iterator[dict[str, object]]:
+                    nonlocal current
+                    for candidate in _rows(bundle.path / "fact_normalized.parquet", fields=_PARQUET_FIELDS):
+                        fact = _fact_from_parquet(candidate); key = (str(fact["product_code"]), str(fact["exchange"]), str(fact["bar_time"]))
+                        while current is not None and tuple(map(str, current[:3])) < key: current = next(existing, None)
+                        same_key = current is not None and tuple(map(str, current[:3])) == key
+                        equivalent = same_key and all(current[index] == fact[name] for index, name in enumerate(("product_code", "exchange", "bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")))
+                        yield {**fact, "candidate_sha256": candidate_sha256(fact), "disposition": "already_present_equivalent" if equivalent else ("existing_conflict" if same_key else "missing_valid")}
+                header = {"bundle_source_normalized_rowset_sha256": bundle.source_normalized_rowset_sha256, "bundle_canonical_fact_rowset_sha256": bundle.canonical_fact_rowset_sha256, "fact_transform_version": FACT_TRANSFORM_VERSION, "expected_generation": int(generation[0]), "expected_generation_row_count": int(generation[1]), "expected_generation_first": str(generation[2]), "expected_generation_last": str(generation[3]), "candidate_count": bundle.normalized_row_count}
+                result = _write_plan(plan_path, header, dispositions())
+            connection.rollback(); return result
+        except Exception: connection.rollback(); raise
         finally:
-            if owns_connection:
-                _release_connection(connection)
+            if owns: _release_connection(connection)
 
-    def publish_filesystem_bundle(self, bundle_path: Path) -> dict[str, object]:
-        """COPY Parquet record batches through a temporary stage, never a huge JSON list."""
-        bundle = load_pyramid_filesystem_bundle(bundle_path)
-        connection = self._connection_factory(); owns_connection = self._connection_factory is _acquire_connection
+    def publish_filesystem_bundle(self, bundle_path: Path, plan_path: Path) -> dict[str, object]:
+        bundle = load_pyramid_filesystem_bundle(bundle_path); header, records = _read_plan(plan_path)
+        if header.get("bundle_source_normalized_rowset_sha256") != bundle.source_normalized_rowset_sha256 or header.get("bundle_canonical_fact_rowset_sha256") != bundle.canonical_fact_rowset_sha256 or header.get("fact_transform_version") != FACT_TRANSFORM_VERSION: raise FuturesPyramidImportError("plan does not bind this exact verified bundle")
+        plan_payload = {key: value for key, value in header.items() if key not in {"kind", "artifact"}}; payload_sha = hashlib.sha256(canonical_json_bytes(plan_payload)).hexdigest()
+        qmi_id = "qmi-v1-" + hashlib.sha256(canonical_json_bytes({"source": bundle.source_normalized_rowset_sha256, "fact": bundle.canonical_fact_rowset_sha256, "transform": FACT_TRANSFORM_VERSION, "plan": payload_sha})).hexdigest()
+        connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
             with connection.cursor() as cursor:
                 cursor.execute("select pg_advisory_xact_lock(hashtext('future_pyramid_import:' || %s))", (bundle.canonical_fact_rowset_sha256,))
-                cursor.execute("select qmi_id, payload_sha256 from audit.future_bar_1m_import_publication where source_normalized_rowset_sha256=%s and fact_transform_version=%s and canonical_fact_rowset_sha256=%s", (bundle.source_normalized_rowset_sha256, FACT_TRANSFORM_VERSION, bundle.canonical_fact_rowset_sha256))
-                existing = cursor.fetchone()
-                payload_hash = hashlib.sha256(_canonical_bytes(bundle.manifest)).hexdigest()
-                if existing:
-                    if existing[1] != payload_hash: raise FuturesPyramidImportError("existing qmi payload differs")
-                    connection.rollback(); return {"status":"idempotent","qmi_id":existing[0]}
-                self._stage_parquet(cursor, bundle.bundle_path / "fact_normalized.parquet")
-                cursor.execute("""update future_pyramid_stage stage set disposition=case when bars.product_code is null then 'missing_valid'
-                    when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end
-                    from fact.future_bar_1m bars where bars.product_code=stage.product_code and bars.exchange=stage.exchange and bars.bar_time=stage.bar_time and bars.series_type=%s""", (STORAGE_SERIES_TYPE,))
-                cursor.execute("update future_pyramid_stage set disposition='missing_valid' where disposition is null")
-                cursor.execute("select count(*) filter(where disposition='missing_valid'),count(*) filter(where disposition='already_present_equivalent'),count(*) filter(where disposition='existing_conflict') from future_pyramid_stage")
-                missing,equivalent,conflict=cursor.fetchone()
-                if missing:
-                    cursor.execute("insert into fact.future_bar_1m (product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key) select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where disposition='missing_valid'", (STORAGE_SERIES_TYPE,SOURCE_KEY))
-                qmi_id="qmi-v1-"+hashlib.sha256(_canonical_bytes({"source":bundle.source_normalized_rowset_sha256,"fact":bundle.canonical_fact_rowset_sha256,"transform":FACT_TRANSFORM_VERSION})).hexdigest()
-                cursor.execute("insert into audit.future_bar_1m_import_publication(qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count) values(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)", (qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_hash,json.dumps(bundle.manifest,sort_keys=True),missing,equivalent,conflict))
-                cursor.execute("insert into audit.future_bar_1m_import_admission(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,case when disposition='missing_valid' then 'inserted' else 'already_present_equivalent' end from future_pyramid_stage where disposition in ('missing_valid','already_present_equivalent')", (qmi_id,STORAGE_SERIES_TYPE))
-            connection.commit(); return {"status":"success","qmi_id":qmi_id,"inserted_count":missing,"equivalent_count":equivalent,"conflict_count":conflict}
-        except Exception:
-            connection.rollback(); raise
+                cursor.execute("select payload_sha256,inserted_count,equivalent_count,conflict_count from audit.future_bar_1m_import_publication where qmi_id=%s", (qmi_id,)); prior = cursor.fetchone()
+                if prior:
+                    if prior[0] != payload_sha: raise FuturesPyramidImportError("existing qmi receipt differs")
+                    connection.rollback(); return {"status":"idempotent","qmi_id":qmi_id,"inserted_count":prior[1],"equivalent_count":prior[2],"conflict_count":prior[3]}
+                cursor.execute("create temporary table future_pyramid_stage (product_code text not null,exchange text not null,bar_time timestamp not null,open double precision not null,high double precision not null,low double precision not null,close double precision not null,volume double precision not null,adjustment_offset double precision not null,candidate_sha256 text not null,planned_disposition text not null) on commit drop")
+                digest, count = hashlib.sha256(), 0
+                with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset,candidate_sha256,planned_disposition) from stdin") as copy:
+                    for record in records:
+                        text = json.dumps(record,sort_keys=True,separators=(",",":"),allow_nan=False); digest.update(text.encode()+b"\n"); count += 1
+                        copy.write_row(tuple(record[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset","candidate_sha256","disposition")))
+                if count != int(header.get("disposition_count", -1)) or digest.hexdigest() != header.get("disposition_sha256"): raise FuturesPyramidImportError("disposition artifact byte integrity mismatch")
+                cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1", (SERIES_TYPE,)); actual = cursor.fetchone()
+                if not actual or tuple(map(str,actual)) != tuple(map(str,(header["expected_generation"],header["expected_generation_row_count"],header["expected_generation_first"],header["expected_generation_last"]))): raise FuturesPyramidImportError("frozen plan generation is stale")
+                cursor.execute("""select count(*) from (select case when bars.product_code is null then 'missing_valid' when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end actual,stage.planned_disposition from future_pyramid_stage stage left join fact.future_bar_1m bars on bars.product_code=stage.product_code and bars.exchange=stage.exchange and bars.series_type=%s and bars.bar_time=stage.bar_time) classified where actual<>planned_disposition""",(SERIES_TYPE,))
+                if int(cursor.fetchone()[0]): raise FuturesPyramidImportError("frozen plan changed during publication; reclassify")
+                cursor.execute("insert into fact.future_bar_1m(product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key) select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where planned_disposition='missing_valid' on conflict do nothing",(SERIES_TYPE,SOURCE_KEY))
+                cursor.execute("select count(*) filter(where planned_disposition='missing_valid'),count(*) filter(where planned_disposition='already_present_equivalent'),count(*) filter(where planned_disposition='existing_conflict') from future_pyramid_stage"); inserted,equivalent,conflict = map(int,cursor.fetchone())
+                receipt = {"qmi_id":qmi_id,"bundle_source_normalized_rowset_sha256":bundle.source_normalized_rowset_sha256,"bundle_canonical_fact_rowset_sha256":bundle.canonical_fact_rowset_sha256,"fact_transform_version":FACT_TRANSFORM_VERSION,"plan":plan_payload}
+                cursor.execute("insert into audit.future_bar_1m_import_publication(qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count) values(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",(qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_sha,json.dumps(receipt,sort_keys=True),inserted,equivalent,conflict))
+                cursor.execute("insert into audit.future_bar_1m_import_disposition(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,planned_disposition from future_pyramid_stage",(qmi_id,SERIES_TYPE))
+                cursor.execute("insert into audit.future_bar_1m_import_admission(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,case when planned_disposition='missing_valid' then 'inserted' else 'already_present_equivalent' end from future_pyramid_stage where planned_disposition in ('missing_valid','already_present_equivalent')",(qmi_id,SERIES_TYPE))
+            connection.commit(); return {"status":"success","qmi_id":qmi_id,"inserted_count":inserted,"equivalent_count":equivalent,"conflict_count":conflict,"plan_sha256":payload_sha}
+        except Exception: connection.rollback(); raise
         finally:
-            if owns_connection: _release_connection(connection)
-
-    @staticmethod
-    def _stage_parquet(cursor: Any, path: Path) -> None:
-        import pyarrow.parquet as pq
-        cursor.execute("create temporary table future_pyramid_stage (product_code text,exchange text,bar_time timestamp,open double precision,high double precision,low double precision,close double precision,volume double precision,adjustment_offset double precision,candidate_sha256 text,disposition text) on commit drop")
-        with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset,candidate_sha256) from stdin") as copy:
-            for batch in pq.ParquetFile(path).iter_batches(batch_size=100_000, columns=["product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset"]):
-                for row in batch.to_pylist():
-                    canonical = {**row,"series_type":STORAGE_SERIES_TYPE,"source_key":SOURCE_KEY,"open_interest":None}
-                    copy.write_row((*tuple(row[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset")),hashlib.sha256(_canonical_bytes(canonical)).hexdigest()))
-
-    @staticmethod
-    def _stage(cursor: Any, bundle: PyramidBundle) -> None:
-        cursor.execute("create temporary table future_pyramid_stage (product_code text,exchange text,bar_time timestamp,open double precision,high double precision,low double precision,close double precision,volume double precision,adjustment_offset double precision,disposition text) on commit drop")
-        with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset) from stdin") as copy:
-            for row in bundle.rows:
-                copy.write_row(tuple(row[key] for key in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset")))
-        cursor.execute("""update future_pyramid_stage stage set disposition=case when bars.product_code is null then 'missing_valid'
-          when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end
-          from fact.future_bar_1m bars where bars.product_code=stage.product_code and bars.bar_time=stage.bar_time and bars.series_type='apex_l0_adjusted'""")
-        cursor.execute("update future_pyramid_stage set disposition='missing_valid' where disposition is null")
+            if owns: _release_connection(connection)
 
 
-if __name__ == "__main__":
-    raise SystemExit(_main())
+def _main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Classify/publish an authorized Pyramid facts bundle"); parser.add_argument("command",choices=("classify","publish")); parser.add_argument("--bundle",type=Path,required=True); parser.add_argument("--plan",type=Path,required=True)
+    args=parser.parse_args(); importer=FuturesPyramidImporter(_publisher_connection)
+    result=importer.classify_filesystem_bundle(args.bundle,args.plan) if args.command=="classify" else importer.publish_filesystem_bundle(args.bundle,args.plan)
+    print(json.dumps(result,sort_keys=True)); return 0
+
+
+if __name__ == "__main__": raise SystemExit(_main())

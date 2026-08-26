@@ -469,6 +469,19 @@ FUTURE_SCHEMA_SQL = (
     """,
 )
 
+# Core bootstrap is deliberately table/reference-only.  Trigger/function
+# replacement is a privileged, versioned migration in
+# ``store.futures_partial_migration``: an ordinary datalake bootstrap must not
+# attempt to alter SECURITY DEFINER functions owned by the NOLOGIN QuoteMux
+# futures owner.
+FUTURE_SCHEMA_SQL = tuple(
+    statement for statement in FUTURE_SCHEMA_SQL
+    if not any(marker in statement.lower() for marker in (
+        "create or replace function", "create trigger", "drop trigger",
+        "after truncate on fact.future_bar_1m", "alter function",
+    ))
+)
+
 _FUTURE_SCHEMA_READY = False
 _FUTURE_SCHEMA_LOCK = Lock()
 
