@@ -96,13 +96,25 @@ def _main() -> int:
     from quotemux.store.futures_pyramid_import import _publisher_connection
     parser = argparse.ArgumentParser(description="Plan or publish QuoteMux futures partial metadata")
     parser.add_argument("command", choices=("plan", "publish"))
-    parser.add_argument("--qmi-id", required=True)
-    parser.add_argument("--catalog-identity", required=True)
+    parser.add_argument("--qmi-id")
+    parser.add_argument("--catalog-identity")
+    parser.add_argument("--manifest")
     parser.add_argument("--expected-generation", type=int)
     parser.add_argument("--out")
     args = parser.parse_args()
     publisher = FuturesPartialPublisher(_publisher_connection)
-    result = publisher.plan(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation) if args.command == "plan" else publisher.publish(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation)
+    if args.manifest:
+        from pathlib import Path
+        frozen = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+        if not isinstance(frozen, dict): raise ValueError("manifest must be an object")
+        qmi_id, catalog_identity, expected = str(frozen.get("qmi_id","")), str(frozen.get("catalog_identity","")), frozen.get("expected_generation")
+        actual = publisher.plan(qmi_id=qmi_id, catalog_identity=catalog_identity, expected_generation=int(expected))
+        if json.dumps(actual,sort_keys=True,separators=(",",":")) != json.dumps(frozen,sort_keys=True,separators=(",",":")):
+            raise ValueError("manifest differs from current deterministic partial plan")
+        result = actual if args.command == "plan" else publisher.publish(qmi_id=qmi_id, catalog_identity=catalog_identity, expected_generation=int(expected))
+    else:
+        if not args.qmi_id or not args.catalog_identity: raise ValueError("--qmi-id and --catalog-identity are required without --manifest")
+        result = publisher.plan(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation) if args.command == "plan" else publisher.publish(qmi_id=args.qmi_id, catalog_identity=args.catalog_identity, expected_generation=args.expected_generation)
     if args.out:
         from pathlib import Path
         Path(args.out).write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
