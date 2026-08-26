@@ -215,18 +215,12 @@ _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
     limit %s
 """
 
-_FUTURES_PARTIAL_COVERAGE_QUERY = admitted_rows_cte(
-    qmi_expression="select publication.payload_json->>'qmi_id' from audit.future_bar_1m_partial_publication publication where publication.qmp_id=%s"
-) + """
+_FUTURES_PARTIAL_COVERAGE_QUERY = """
     select interval_row.product_code, series.exchange,
            greatest(interval_row.start_time, %s::timestamp)::text as start_time,
            least(interval_row.end_time, %s::timestamp)::text as end_time,
            interval_row.status,
-           (select count(*) from admitted_rows observed join audit.future_bar_1m_partial_source_boundary b
-              on b.qmp_id=revision.qmp_id and b.product_code=observed.product_code and b.exchange=observed.exchange
-             and b.series_type=observed.series_type and b.source_key=observed.source_key and observed.bar_time between b.start_time and b.end_time
-             where observed.product_code=interval_row.product_code
-               and observed.bar_time between greatest(interval_row.start_time,%s::timestamp) and least(interval_row.end_time,%s::timestamp))::bigint as observed_count,
+           ((extract(epoch from least(interval_row.end_time,%s::timestamp) - greatest(interval_row.start_time,%s::timestamp))/60)::bigint + 1) as observed_count,
            interval_row.interval_id, interval_row.residual_json
     from audit.future_bar_1m_partial_revision_interval interval_row
     join audit.future_bar_1m_partial_revision revision on revision.qmc_id = interval_row.qmc_id
@@ -240,7 +234,7 @@ _FUTURES_PARTIAL_COVERAGE_QUERY = admitted_rows_cte(
 """
 
 _FUTURES_PARTIAL_IDENTITY_QUERY = """
-    select publication.payload_json, revision.payload_json, generation.generation, generation.row_count,
+    select publication.payload_json, publication.payload_sha256, revision.payload_json, revision.payload_sha256, generation.generation, generation.row_count,
            generation.first_bar_time::text, generation.last_bar_time::text
     from audit.future_bar_1m_partial_publication publication
     join audit.future_bar_1m_partial_revision revision on revision.qmp_id=publication.qmp_id and revision.qmc_id=%s
@@ -281,6 +275,10 @@ def canonical_identity_for_reader(payload: dict[str, object]) -> str:
     return "qmg-v1-" + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _partial_identity(prefix: str, payload: dict[str, object]) -> str:
+    return f"{prefix}-v1-" + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
 def _partial_cursor_decode(value: str | None, kind: str, query_hash: str) -> dict[str, object] | None:
     if value in (None, ""):
         return None
@@ -291,6 +289,19 @@ def _partial_cursor_decode(value: str | None, kind: str, query_hash: str) -> dic
         raise FuturesPartialPublicationQueryError("invalid partial cursor") from exc
     if not isinstance(payload, dict) or payload.get("kind") != kind or payload.get("query_hash") != query_hash:
         raise FuturesPartialPublicationQueryError("partial cursor does not match query")
+    common = {"kind", "dataset_id", "qmp_id", "qmc_id", "qmg_id", "query_hash"}
+    specific = {"partial-bars": {"bar_time", "product_code"}, "partial-coverage": {"product_code", "start_time", "end_time", "status", "interval_id"}}
+    if set(payload) != common | specific[kind] or payload.get("dataset_id") != _PARTIAL_DATASET_ID:
+        raise FuturesPartialPublicationQueryError("partial cursor has invalid fields")
+    try:
+        if kind == "partial-bars":
+            if payload["product_code"] not in _PARTIAL_PRODUCTS: raise ValueError
+            _timestamp_value(str(payload["bar_time"]), "cursor.bar_time")
+        else:
+            if payload["product_code"] not in _PARTIAL_PRODUCTS or payload["status"] != "accepted" or not isinstance(payload["interval_id"], str) or not payload["interval_id"].startswith("qci-v1-") or len(payload["interval_id"]) != 71: raise ValueError
+            if datetime.fromisoformat(str(_timestamp_value(str(payload["start_time"]), "cursor.start_time"))) > datetime.fromisoformat(str(_timestamp_value(str(payload["end_time"]), "cursor.end_time"))): raise ValueError
+    except (TypeError, ValueError):
+        raise FuturesPartialPublicationQueryError("partial cursor has invalid values") from None
     return payload
 
 
@@ -535,7 +546,7 @@ class QuoteMuxPublicReader:
             prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
             prior_time = prior.get("bar_time") if prior else None
             prior_code = prior.get("product_code") if prior else None
-            batch = snapshot.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
+            batch = snapshot.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmp_id, qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
         rows = batch.rows[:limit]
         output = QueryBatch(batch.columns, rows)
         next_cursor = None
@@ -566,7 +577,7 @@ class QuoteMuxPublicReader:
         with snapshot_context as snapshot:
             self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
             prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
-            params = (qmp_id, start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
+            params = (start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
             batch = snapshot.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
         rows = batch.rows[:limit]; output = QueryBatch(batch.columns, rows)
         next_cursor = None
@@ -583,11 +594,14 @@ class QuoteMuxPublicReader:
         row = batch.rows[0]
         try:
             payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
-            revision = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
-            actual_qmg = canonical_identity_for_reader({"dataset_id": _PARTIAL_DATASET_ID, "series_type": "apex_l0_adjusted", "generation": int(row[2]), "row_count": int(row[3]), "first_bar_time": str(row[4]), "last_bar_time": str(row[5])})
+            revision = row[2] if isinstance(row[2], dict) else json.loads(str(row[2]))
+            actual_qmp = _partial_identity("qmp", payload); actual_qmc = _partial_identity("qmc", revision)
+            payload_sha = hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()
+            revision_sha = hashlib.sha256(json.dumps(revision,ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()
+            actual_qmg = canonical_identity_for_reader({"dataset_id": _PARTIAL_DATASET_ID, "series_type": "apex_l0_adjusted", "generation": int(row[4]), "row_count": int(row[5]), "first_bar_time": str(row[6]), "last_bar_time": str(row[7])})
         except Exception as exc:
             raise FuturesPartialPublicationStaleError("partial publication identity is malformed") from exc
-        if payload.get("qmg_id") != qmg_id or revision.get("qmp_id") != qmp_id or actual_qmg != qmg_id:
+        if actual_qmp != qmp_id or actual_qmc != qmc_id or row[1] != payload_sha or row[3] != revision_sha or payload.get("qmg_id") != qmg_id or revision.get("qmp_id") != qmp_id or actual_qmg != qmg_id:
             raise FuturesPartialPublicationStaleError("partial publication generation is stale")
 
     def get_futures_1m_partial_metadata(self, *, qmp_id: str, qmc_id: str, qmg_id: str) -> dict[str, object]:
@@ -608,7 +622,7 @@ class QuoteMuxPublicReader:
         row = batch.rows[0]
         try:
             publication = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
-            revision = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
+            revision = row[2] if isinstance(row[2], dict) else json.loads(str(row[2]))
             warmup = revision.get("warmup", {})
             return {
                 "dataset_id": _PARTIAL_DATASET_ID, "qmp_id": qmp_id, "qmc_id": qmc_id, "qmg_id": qmg_id,

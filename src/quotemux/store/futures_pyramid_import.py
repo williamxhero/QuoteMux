@@ -23,6 +23,7 @@ SOURCE_KEY = PYRAMID_SOURCE_KEY
 FACT_TRANSFORM_VERSION = FACT_NORMALIZATION_VERSION
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _PARQUET_FIELDS = ("product_code", "exchange", "bar_time", "open", "high", "low", "close", "volume", "open_interest", "adjustment_offset", "source_key")
+_CORRECTED_RAW_AGGREGATE_SHA256 = "0afda7afcfa0749ab5ebf243c577a639793e29809a6ca0dc8aa51d3602781149"
 
 
 class FuturesPyramidImportError(ValueError):
@@ -128,6 +129,8 @@ def load_pyramid_filesystem_bundle(bundle_path: Path) -> PyramidBundle:
     raw_inventory = manifest.get("raw_byte_inventory")
     if not isinstance(raw_inventory, list) or len(raw_inventory) != 23:
         raise FuturesPyramidImportError("exact 23-file raw inventory is required")
+    if _sha(manifest.get("raw_aggregate_sha256"), "raw_aggregate_sha256") != _CORRECTED_RAW_AGGREGATE_SHA256:
+        raise FuturesPyramidImportError("corrected raw aggregate hash is not the authorized archive")
     if hashlib.sha256(canonical_json_bytes(manifest.get("raw_files"))).hexdigest() != _sha(manifest.get("raw_aggregate_sha256"), "raw_aggregate_sha256"):
         raise FuturesPyramidImportError("raw aggregate hash mismatch")
     normalization = manifest.get("fact_normalization")
@@ -138,7 +141,13 @@ def load_pyramid_filesystem_bundle(bundle_path: Path) -> PyramidBundle:
         raise FuturesPyramidImportError("normalized artifact hash mismatch")
     if not fact_path.is_file() or _hash_path(fact_path) != _sha(normalization.get("fact_normalized_artifact_sha256"), "fact_normalized_artifact_sha256"):
         raise FuturesPyramidImportError("fact-normalized artifact hash mismatch")
-    source_digest, fact_digest, previous, count = hashlib.sha256(), hashlib.sha256(), None, 0
+    staged_path, intervals_path = bundle_path / "staged.parquet", bundle_path / "intervals.jsonl"
+    interval_meta = manifest.get("interval_artifact")
+    if not staged_path.is_file() or _hash_path(staged_path) != _sha(manifest.get("staged_artifact_sha256"), "staged_artifact_sha256"):
+        raise FuturesPyramidImportError("staged artifact hash mismatch")
+    if not isinstance(interval_meta, Mapping) or not intervals_path.is_file() or _hash_path(intervals_path) != _sha(interval_meta.get("sha256"), "interval artifact sha256"):
+        raise FuturesPyramidImportError("interval artifact hash mismatch")
+    source_digest, package_fact_digest, database_fact_digest, previous, count = hashlib.sha256(), hashlib.sha256(), hashlib.sha256(), None, 0
     for source, fact in zip(_rows(normalized_path, fields=_PARQUET_FIELDS), _rows(fact_path, fields=_PARQUET_FIELDS), strict=True):
         canonical = _fact_from_parquet(fact); key = (canonical["product_code"], canonical["exchange"], canonical["bar_time"])
         if previous is not None and key <= previous:
@@ -146,11 +155,16 @@ def load_pyramid_filesystem_bundle(bundle_path: Path) -> PyramidBundle:
         previous = key
         if source.get("product_code") != canonical["product_code"] or source.get("exchange") != canonical["exchange"] or str(source.get("bar_time")) != str(canonical["bar_time"]):
             raise FuturesPyramidImportError("normalized/fact parquet key mismatch")
-        source_digest.update(canonical_json_bytes(source) + b"\n"); fact_digest.update(canonical_json_bytes(canonical) + b"\n"); count += 1
+        source_digest.update(canonical_json_bytes(source) + b"\n")
+        # The archive's fact artifact has the package NORMALIZED_SCHEMA (no
+        # storage series field).  QuoteMux derives a separately named DB-fact
+        # rowset by adding only the fixed storage series/source contract.
+        package_fact_digest.update(canonical_json_bytes(fact) + b"\n")
+        database_fact_digest.update(canonical_json_bytes(canonical) + b"\n"); count += 1
     if count != int(manifest.get("normalized_row_count", -1)):
         raise FuturesPyramidImportError("normalized row count mismatch")
-    source_sha, fact_sha = source_digest.hexdigest(), fact_digest.hexdigest()
-    if source_sha != _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256") or fact_sha != _sha(normalization.get("fact_normalized_rowset_sha256"), "fact_normalized_rowset_sha256"):
+    source_sha, package_fact_sha, fact_sha = source_digest.hexdigest(), package_fact_digest.hexdigest(), database_fact_digest.hexdigest()
+    if source_sha != _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256") or package_fact_sha != _sha(normalization.get("fact_normalized_rowset_sha256"), "fact_normalized_rowset_sha256"):
         raise FuturesPyramidImportError("rowset hash mismatch")
     return PyramidBundle(bundle_path, manifest, source_sha, fact_sha, count)
 
@@ -231,8 +245,15 @@ class FuturesPyramidImporter:
                 cursor.execute("begin isolation level repeatable read read only")
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1", (SERIES_TYPE,)); generation = cursor.fetchone()
                 if not generation: raise FuturesPyramidImportError("future series generation is absent")
-                cursor.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset from fact.future_bar_1m where series_type=%s and product_code=any(%s::text[]) order by product_code,exchange,bar_time", (SERIES_TYPE, list(PRODUCTS)))
-                existing = iter(cursor.fetchall()); current = next(existing, None)
+                stream = connection.cursor(name="future_pyramid_classify_existing")
+                stream.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset,open_interest,source_key from fact.future_bar_1m where series_type=%s and product_code=any(%s::text[]) order by product_code collate \"C\",exchange collate \"C\",bar_time", (SERIES_TYPE, list(PRODUCTS)))
+                def existing_rows() -> Iterator[tuple[object, ...]]:
+                    try:
+                        while rows := stream.fetchmany(100_000):
+                            yield from rows
+                    finally:
+                        stream.close()
+                existing = existing_rows(); current = next(existing, None)
                 def dispositions() -> Iterator[dict[str, object]]:
                     nonlocal current
                     for candidate in _rows(bundle.path / "fact_normalized.parquet", fields=_PARQUET_FIELDS):
@@ -240,7 +261,8 @@ class FuturesPyramidImporter:
                         while current is not None and tuple(map(str, current[:3])) < key: current = next(existing, None)
                         same_key = current is not None and tuple(map(str, current[:3])) == key
                         equivalent = same_key and all(current[index] == fact[name] for index, name in enumerate(("product_code", "exchange", "bar_time", "open", "high", "low", "close", "volume", "adjustment_offset")))
-                        yield {**fact, "candidate_sha256": candidate_sha256(fact), "disposition": "already_present_equivalent" if equivalent else ("existing_conflict" if same_key else "missing_valid")}
+                        existing_payload = None if not same_key else {"product_code":current[0],"exchange":current[1],"bar_time":str(current[2]),"open":current[3],"high":current[4],"low":current[5],"close":current[6],"volume":current[7],"adjustment_offset":current[8],"open_interest":current[9],"series_type":SERIES_TYPE,"source_key":current[10]}
+                        yield {**fact, "candidate_sha256": candidate_sha256(fact), "disposition": "already_present_equivalent" if equivalent else ("existing_conflict" if same_key else "missing_valid"), "existing_source_key": None if existing_payload is None else current[10], "existing_fact_sha256": None if existing_payload is None else hashlib.sha256(canonical_json_bytes(existing_payload)).hexdigest()}
                 header = {"bundle_source_normalized_rowset_sha256": bundle.source_normalized_rowset_sha256, "bundle_canonical_fact_rowset_sha256": bundle.canonical_fact_rowset_sha256, "fact_transform_version": FACT_TRANSFORM_VERSION, "expected_generation": int(generation[0]), "expected_generation_row_count": int(generation[1]), "expected_generation_first": str(generation[2]), "expected_generation_last": str(generation[3]), "candidate_count": bundle.normalized_row_count}
                 result = _write_plan(plan_path, header, dispositions())
             connection.rollback(); return result
@@ -261,23 +283,31 @@ class FuturesPyramidImporter:
                 if prior:
                     if prior[0] != payload_sha: raise FuturesPyramidImportError("existing qmi receipt differs")
                     connection.rollback(); return {"status":"idempotent","qmi_id":qmi_id,"inserted_count":prior[1],"equivalent_count":prior[2],"conflict_count":prior[3]}
-                cursor.execute("create temporary table future_pyramid_stage (product_code text not null,exchange text not null,bar_time timestamp not null,open double precision not null,high double precision not null,low double precision not null,close double precision not null,volume double precision not null,adjustment_offset double precision not null,candidate_sha256 text not null,planned_disposition text not null) on commit drop")
+                cursor.execute("create temporary table future_pyramid_stage (product_code text not null,exchange text not null,bar_time timestamp not null,open double precision not null,high double precision not null,low double precision not null,close double precision not null,volume double precision not null,adjustment_offset double precision not null,candidate_sha256 text not null,planned_disposition text not null,existing_source_key text,existing_fact_sha256 text,actual_disposition text) on commit drop")
                 digest, count = hashlib.sha256(), 0
-                with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset,candidate_sha256,planned_disposition) from stdin") as copy:
-                    for record in records:
+                with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset,candidate_sha256,planned_disposition,existing_source_key,existing_fact_sha256) from stdin") as copy:
+                    verified_candidates = _rows(bundle.path / "fact_normalized.parquet", fields=_PARQUET_FIELDS)
+                    for record, candidate in zip(records, verified_candidates, strict=True):
+                        fact = _fact_from_parquet(candidate)
+                        if any(record.get(name) != fact.get(name) for name in ("product_code","exchange","bar_time","open","high","low","close","volume","open_interest","adjustment_offset","series_type","source_key")) or record.get("candidate_sha256") != candidate_sha256(fact):
+                            raise FuturesPyramidImportError("disposition record does not match the verified fact artifact")
                         text = json.dumps(record,sort_keys=True,separators=(",",":"),allow_nan=False); digest.update(text.encode()+b"\n"); count += 1
-                        copy.write_row(tuple(record[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset","candidate_sha256","disposition")))
+                        copy.write_row(tuple(record[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset","candidate_sha256","disposition","existing_source_key","existing_fact_sha256")))
                 if count != int(header.get("disposition_count", -1)) or digest.hexdigest() != header.get("disposition_sha256"): raise FuturesPyramidImportError("disposition artifact byte integrity mismatch")
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1", (SERIES_TYPE,)); actual = cursor.fetchone()
                 if not actual or tuple(map(str,actual)) != tuple(map(str,(header["expected_generation"],header["expected_generation_row_count"],header["expected_generation_first"],header["expected_generation_last"]))): raise FuturesPyramidImportError("frozen plan generation is stale")
                 cursor.execute("""select count(*) from (select case when bars.product_code is null then 'missing_valid' when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end actual,stage.planned_disposition from future_pyramid_stage stage left join fact.future_bar_1m bars on bars.product_code=stage.product_code and bars.exchange=stage.exchange and bars.series_type=%s and bars.bar_time=stage.bar_time) classified where actual<>planned_disposition""",(SERIES_TYPE,))
                 if int(cursor.fetchone()[0]): raise FuturesPyramidImportError("frozen plan changed during publication; reclassify")
-                cursor.execute("insert into fact.future_bar_1m(product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key) select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where planned_disposition='missing_valid' on conflict do nothing",(SERIES_TYPE,SOURCE_KEY))
-                cursor.execute("select count(*) filter(where planned_disposition='missing_valid'),count(*) filter(where planned_disposition='already_present_equivalent'),count(*) filter(where planned_disposition='existing_conflict') from future_pyramid_stage"); inserted,equivalent,conflict = map(int,cursor.fetchone())
-                receipt = {"qmi_id":qmi_id,"bundle_source_normalized_rowset_sha256":bundle.source_normalized_rowset_sha256,"bundle_canonical_fact_rowset_sha256":bundle.canonical_fact_rowset_sha256,"fact_transform_version":FACT_TRANSFORM_VERSION,"plan":plan_payload}
+                cursor.execute("create temporary table future_pyramid_inserted(product_code text,exchange text,bar_time timestamp) on commit drop")
+                cursor.execute("with inserted as (insert into fact.future_bar_1m(product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key) select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where planned_disposition='missing_valid' on conflict do nothing returning product_code,exchange,bar_time) insert into future_pyramid_inserted select product_code,exchange,bar_time from inserted",(SERIES_TYPE,SOURCE_KEY))
+                cursor.execute("""update future_pyramid_stage stage set actual_disposition=case when inserted.product_code is not null then 'inserted' when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end from fact.future_bar_1m bars left join future_pyramid_inserted inserted on inserted.product_code=bars.product_code and inserted.exchange=bars.exchange and inserted.bar_time=bars.bar_time where bars.product_code=stage.product_code and bars.exchange=stage.exchange and bars.series_type=%s and bars.bar_time=stage.bar_time""",(SERIES_TYPE,))
+                cursor.execute("select count(*) from future_pyramid_stage where actual_disposition is null or (planned_disposition='missing_valid' and actual_disposition='existing_conflict')")
+                if int(cursor.fetchone()[0]): raise FuturesPyramidImportError("post-insert fact equality/race verification failed")
+                cursor.execute("select count(*) filter(where actual_disposition='inserted'),count(*) filter(where actual_disposition='already_present_equivalent'),count(*) filter(where actual_disposition='existing_conflict') from future_pyramid_stage"); inserted,equivalent,conflict = map(int,cursor.fetchone())
+                receipt = {"qmi_id":qmi_id,"bundle_manifest":bundle.manifest,"bundle_source_normalized_rowset_sha256":bundle.source_normalized_rowset_sha256,"bundle_archive_fact_normalized_rowset_sha256":bundle.manifest["fact_normalization"]["fact_normalized_rowset_sha256"],"bundle_canonical_fact_rowset_sha256":bundle.canonical_fact_rowset_sha256,"fact_transform_version":FACT_TRANSFORM_VERSION,"plan":plan_payload}
                 cursor.execute("insert into audit.future_bar_1m_import_publication(qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count) values(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",(qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_sha,json.dumps(receipt,sort_keys=True),inserted,equivalent,conflict))
-                cursor.execute("insert into audit.future_bar_1m_import_disposition(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,planned_disposition from future_pyramid_stage",(qmi_id,SERIES_TYPE))
-                cursor.execute("insert into audit.future_bar_1m_import_admission(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,case when planned_disposition='missing_valid' then 'inserted' else 'already_present_equivalent' end from future_pyramid_stage where planned_disposition in ('missing_valid','already_present_equivalent')",(qmi_id,SERIES_TYPE))
+                cursor.execute("insert into audit.future_bar_1m_import_disposition(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition,existing_source_key,existing_fact_sha256) select %s,product_code,exchange,%s,bar_time,candidate_sha256,case when actual_disposition='inserted' then 'missing_valid' else actual_disposition end,existing_source_key,existing_fact_sha256 from future_pyramid_stage",(qmi_id,SERIES_TYPE))
+                cursor.execute("insert into audit.future_bar_1m_import_admission(qmi_id,product_code,exchange,series_type,bar_time,candidate_sha256,disposition) select %s,product_code,exchange,%s,bar_time,candidate_sha256,actual_disposition from future_pyramid_stage where actual_disposition in ('inserted','already_present_equivalent')",(qmi_id,SERIES_TYPE))
             connection.commit(); return {"status":"success","qmi_id":qmi_id,"inserted_count":inserted,"equivalent_count":equivalent,"conflict_count":conflict,"plan_sha256":payload_sha}
         except Exception: connection.rollback(); raise
         finally:

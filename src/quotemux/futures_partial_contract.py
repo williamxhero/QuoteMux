@@ -72,14 +72,20 @@ def admitted_rows_cte(*, qmi_expression: str, cte_name: str = "admitted_rows") -
     invalid = ", ".join("(%r::text, %r::timestamp)" % value for value in INVALID_APEX_KEYS)
     return f"""
         with partial_products(product_code, exchange) as (values {products}),
-        pyramid_admission as materialized (
+        pyramid_admission as (
             select admission.product_code, admission.exchange, admission.series_type,
                    admission.bar_time, admission.candidate_sha256
             from audit.future_bar_1m_import_admission admission
             where admission.qmi_id = ({qmi_expression})
               and admission.disposition in ('inserted', 'already_present_equivalent')
         ),
-        {cte_name} as materialized (
+        pyramid_conflicts as (
+            select disposition.product_code, disposition.exchange, disposition.series_type, disposition.bar_time
+            from audit.future_bar_1m_import_disposition disposition
+            where disposition.qmi_id = ({qmi_expression})
+              and disposition.disposition = 'existing_conflict'
+        ),
+        {cte_name} as (
             select bars.product_code, bars.exchange, bars.series_type, bars.bar_time,
                    bars.open, bars.high, bars.low, bars.close, bars.volume,
                    bars.open_interest, bars.adjustment_offset, bars.source_key,
@@ -93,12 +99,18 @@ def admitted_rows_cte(*, qmi_expression: str, cte_name: str = "admitted_rows") -
              and admission.exchange = bars.exchange
              and admission.series_type = bars.series_type
              and admission.bar_time = bars.bar_time
+            left join pyramid_conflicts conflict
+              on conflict.product_code = bars.product_code
+             and conflict.exchange = bars.exchange
+             and conflict.series_type = bars.series_type
+             and conflict.bar_time = bars.bar_time
             where bars.series_type = '{SERIES_TYPE}'
               and bars.open is not null and bars.high is not null
               and bars.low is not null and bars.close is not null
               and bars.volume is not null and bars.volume >= 0
               and bars.high >= greatest(bars.open, bars.close, bars.low)
               and bars.low <= least(bars.open, bars.close, bars.high)
+              and conflict.product_code is null
               and (
                     (bars.source_key = '{PYRAMID_SOURCE_KEY}'
                      and admission.candidate_sha256 is not null)

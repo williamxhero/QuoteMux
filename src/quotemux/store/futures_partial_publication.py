@@ -43,9 +43,10 @@ def _interval_id(row: Mapping[str, object]) -> str:
     return "qci-v1-" + hashlib.sha256(canonical_json_bytes(row)).hexdigest()
 
 
-def _collect_admitted(cursor: Any, qmi_id: str) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     """Derive actual source islands and observed one-minute runs from one CTE."""
-    cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows order by product_code,exchange,series_type,bar_time", (qmi_id,))
+    cursor = connection.cursor(name="future_partial_admitted_rows")
+    cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows order by product_code,exchange,series_type,bar_time", (qmi_id,qmi_id))
     boundaries: list[dict[str, object]] = []; intervals: list[dict[str, object]] = []
     current_boundary: dict[str, object] | None = None; current_interval: dict[str, object] | None = None
     boundary_digest: Any | None = None; interval_digest: Any | None = None
@@ -60,7 +61,8 @@ def _collect_admitted(cursor: Any, qmi_id: str) -> tuple[list[dict[str, object]]
         if current_interval is not None:
             current_interval["observed_rowset_sha256"] = interval_digest.hexdigest(); current_interval["interval_id"] = _interval_id({key:value for key,value in current_interval.items() if key != "interval_id"}); intervals.append(current_interval)
         current_interval = None; interval_digest = None
-    while True:
+    try:
+      while True:
         rows = cursor.fetchmany(100_000)
         if not rows: break
         for raw in rows:
@@ -75,6 +77,8 @@ def _collect_admitted(cursor: Any, qmi_id: str) -> tuple[list[dict[str, object]]
             if start_new:
                 close_interval(); current_interval = {"product_code":product,"exchange":row["exchange"],"start_time":str(row["bar_time"]),"end_time":str(row["bar_time"]),"status":"accepted","observed_count":0,"residual_json":{"missing_bar_semantics":"skip","meaning":"observed consecutive one-minute facts only; session completeness is not asserted","open_interest":"unavailable_or_null"}}; interval_digest = hashlib.sha256()
             current_interval["end_time"] = str(row["bar_time"]); current_interval["observed_count"] = int(current_interval["observed_count"]) + 1; interval_digest.update(canonical_json_bytes(row) + b"\n")
+    finally:
+      cursor.close()
     close_boundary(); close_interval()
     # The three known legacy exclusions are product-specific evidence; all
     # other gaps are represented by absent observed runs, never fabricated.
@@ -83,7 +87,7 @@ def _collect_admitted(cursor: Any, qmi_id: str) -> tuple[list[dict[str, object]]
     for interval in intervals:
         product = str(interval["product_code"])
         if product in exclusions: interval["residual_json"]["excluded_legacy_apex_keys"] = exclusions[product]
-    return boundaries, intervals, {"warmup_first_observed": warmup, "accepted_interval_semantics":"consecutive_observed_minutes_only", "residual_semantics":"absent/excluded rows are skipped; no interpolation or zero-fill", "excluded_legacy_apex_keys": exclusions}
+    return boundaries, intervals, {"warmup_first_observed": warmup, "accepted_interval_semantics":"consecutive_observed_minutes_only", "residual_semantics":"excluded_or_missing_rows_are_skipped", "excluded_legacy_apex_keys": exclusions}
 
 
 def _manifest(rows: list[dict[str, object]]) -> dict[str, object]:
@@ -94,17 +98,24 @@ def _manifest(rows: list[dict[str, object]]) -> dict[str, object]:
 
 def _verify_persisted_manifest(cursor: Any, *, qmp_id: str, qmc_id: str, boundaries: list[dict[str, object]], intervals: list[dict[str, object]]) -> None:
     """Stream persisted immutable rows and reject stale extras or hash drift."""
+    expected_boundaries = sorted(boundaries, key=lambda row: (str(row["product_code"]),str(row["start_time"]),str(row["end_time"]),str(row["boundary_id"])))
+    expected_intervals = sorted(intervals, key=lambda row: (str(row["product_code"]),str(row["start_time"]),str(row["end_time"]),str(row["interval_id"])))
+    expected_interval_exchange = {str(row["interval_id"]): row["exchange"] for row in intervals}
     cursor.execute("select boundary_id,product_code,exchange,series_type,source_key,start_time::text,end_time::text,evidence_json from audit.future_bar_1m_partial_source_boundary where qmp_id=%s order by product_code,start_time,end_time,boundary_id",(qmp_id,))
-    actual_boundaries=[]
-    for boundary_id,product,exchange,series,source,start,end,evidence in cursor.fetchall():
-        detail=evidence if isinstance(evidence,dict) else json.loads(str(evidence))
-        actual_boundaries.append({"product_code":product,"exchange":exchange,"series_type":series,"source_key":source,"start_time":start,"end_time":end,"eligible_row_count":detail["eligible_row_count"],"quality_predicate_version":detail["quality_predicate_version"],"pyramid_admission":detail["pyramid_admission"],"eligible_rowset_sha256":detail["eligible_rowset_sha256"],"boundary_id":boundary_id})
+    boundary_digest, boundary_count = hashlib.sha256(), 0
+    while rows := cursor.fetchmany(100_000):
+        for boundary_id,product,exchange,series,source,start,end,evidence in rows:
+            detail=evidence if isinstance(evidence,dict) else json.loads(str(evidence))
+            actual={"product_code":product,"exchange":exchange,"series_type":series,"source_key":source,"start_time":start,"end_time":end,"eligible_row_count":detail["eligible_row_count"],"quality_predicate_version":detail["quality_predicate_version"],"pyramid_admission":detail["pyramid_admission"],"eligible_rowset_sha256":detail["eligible_rowset_sha256"],"boundary_id":boundary_id}
+            boundary_digest.update(canonical_json_bytes(actual)+b"\n"); boundary_count += 1
     cursor.execute("select interval_id,product_code,start_time::text,end_time::text,status,observed_count,residual_json from audit.future_bar_1m_partial_revision_interval where qmc_id=%s order by product_code,start_time,end_time,interval_id",(qmc_id,))
-    actual_intervals=[]
-    for interval_id,product,start,end,status,count,residual in cursor.fetchall():
-        detail=residual if isinstance(residual,dict) else json.loads(str(residual)); detail={key:value for key,value in detail.items() if key!="observed_rowset_sha256"}
-        actual_intervals.append({"product_code":product,"exchange":next(item["exchange"] for item in intervals if item["interval_id"]==interval_id),"start_time":start,"end_time":end,"status":status,"observed_count":count,"residual_json":detail,"observed_rowset_sha256":(residual if isinstance(residual,dict) else json.loads(str(residual)))["observed_rowset_sha256"],"interval_id":interval_id})
-    if _manifest(actual_boundaries) != _manifest(boundaries) or _manifest(actual_intervals) != _manifest(intervals):
+    interval_digest, interval_count = hashlib.sha256(), 0
+    while rows := cursor.fetchmany(100_000):
+        for interval_id,product,start,end,status,count,residual in rows:
+            full=residual if isinstance(residual,dict) else json.loads(str(residual)); detail={key:value for key,value in full.items() if key!="observed_rowset_sha256"}
+            actual={"product_code":product,"exchange":expected_interval_exchange[str(interval_id)],"start_time":start,"end_time":end,"status":status,"observed_count":count,"residual_json":detail,"observed_rowset_sha256":full["observed_rowset_sha256"],"interval_id":interval_id}
+            interval_digest.update(canonical_json_bytes(actual)+b"\n"); interval_count += 1
+    if boundary_count != len(expected_boundaries) or interval_count != len(expected_intervals) or boundary_digest.hexdigest() != _manifest(expected_boundaries)["sha256"] or interval_digest.hexdigest() != _manifest(expected_intervals)["sha256"]:
         raise ValueError("persisted immutable boundary/interval manifest differs from plan")
 
 
@@ -121,7 +132,7 @@ class FuturesPartialPublisher:
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1",(SERIES_TYPE,)); generation = cursor.fetchone()
                 if not receipt or not generation: raise ValueError("required qmi receipt or future generation is absent")
                 if expected_generation is not None and int(generation[0]) != expected_generation: raise ValueError("future generation is stale")
-                boundaries, intervals, coverage = _collect_admitted(cursor,qmi_id)
+                boundaries, intervals, coverage = _collect_admitted(connection,qmi_id)
                 qmg_payload = {"dataset_id":DATASET_ID,"series_type":SERIES_TYPE,"generation":int(generation[0]),"row_count":int(generation[1]),"first_bar_time":str(generation[2]),"last_bar_time":str(generation[3])}; qmg_id = canonical_identity("qmg",qmg_payload)
                 boundary_manifest, interval_manifest = _manifest(boundaries), _manifest(intervals)
                 qmp_payload = {"dataset_id":DATASET_ID,"qmi_id":qmi_id,"qmi_fact_rowset_sha256":receipt[0],"catalog_identity":catalog_identity,"qmg_id":qmg_id,"sources":[{"source_key":APEX_SOURCE_KEY,"lineage":"legacy_reconstructed","entitlement":"unverified","admission":"generic_quality_with_three_exact_exclusions"},{"source_key":PYRAMID_SOURCE_KEY,"lineage":"user_provided/pyramid_post_adjusted_20260714","entitlement":"unknown_not_asserted","admission":"exact_qmi_key_candidate_hash"},{"source_key":SHINNY_SOURCE_KEY,"lineage":"derived_back_adjusted","admission":"generic_quality","actual_contract_mapping":"recorded_in_source_key"}],"source_boundary_manifest":boundary_manifest,"lineage_limitations":"Pyramid vendor entitlement is unknown/not asserted; legacy Apex raw artifact is unavailable; no source is claimed complete"}; qmp_id = canonical_identity("qmp",qmp_payload)
@@ -162,3 +173,32 @@ class FuturesPartialPublisher:
         except Exception: connection.rollback(); raise
         finally:
             if owns: _release_connection(connection)
+
+
+def _main() -> int:
+    """Administrative plan/freeze/publish/verify command; no implicit writes."""
+    import argparse
+    from pathlib import Path
+    from quotemux.store.futures_pyramid_import import _publisher_connection
+    parser = argparse.ArgumentParser(description="Publish immutable QuoteMux futures partial metadata")
+    parser.add_argument("command", choices=("plan", "publish", "verify"))
+    parser.add_argument("--qmi-id"); parser.add_argument("--catalog-identity"); parser.add_argument("--expected-generation", type=int)
+    parser.add_argument("--plan", type=Path, required=True)
+    args = parser.parse_args(); publisher = FuturesPartialPublisher(_publisher_connection)
+    if args.command == "plan":
+        if not args.qmi_id or not args.catalog_identity: raise ValueError("plan requires --qmi-id and --catalog-identity")
+        result = publisher.plan(qmi_id=args.qmi_id,catalog_identity=args.catalog_identity,expected_generation=args.expected_generation)
+        with args.plan.open("x", encoding="utf-8") as stream: stream.write(canonical_json_bytes(result).decode("utf-8"))
+    else:
+        frozen=json.loads(args.plan.read_text(encoding="utf-8"))
+        if not isinstance(frozen,dict): raise ValueError("plan must be a JSON object")
+        if args.command == "publish": result=publisher.publish(frozen)
+        else:
+            actual=publisher.plan(qmi_id=str(frozen.get("qmi_id","")),catalog_identity=str(frozen.get("catalog_identity","")),expected_generation=int(frozen["expected_generation"]))
+            if canonical_json_bytes(actual)!=canonical_json_bytes(frozen): raise ValueError("frozen partial plan differs from current facts")
+            result={"status":"verified","qmp_id":actual["qmp_id"],"qmc_id":actual["qmc_id"],"qmg_id":actual["qmg_id"]}
+    print(json.dumps(result,sort_keys=True)); return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

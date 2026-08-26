@@ -51,12 +51,16 @@ def test_partial_reader_binds_generation_and_rejects_tl() -> None:
 
 def test_partial_metadata_requires_verified_identity_and_exposes_skip_contract() -> None:
     qmg_payload = {"dataset_id": "future_1m_partial_s000012_quotemux", "series_type": "apex_l0_adjusted", "generation": 7, "row_count": 9, "first_bar_time": "2020-01-01 09:01:00", "last_bar_time": "2020-01-01 09:09:00"}
-    qmg = canonical_identity("qmg", qmg_payload); qmp = canonical_identity("qmp", {"x": 1}); qmc = canonical_identity("qmc", {"x": 1})
+    qmg = canonical_identity("qmg", qmg_payload)
     publication = {"qmg_id": qmg, "qmi_id": "qmi-v1-" + "1" * 64, "catalog_identity": "mhd-v1-catalog", "sources": [], "source_boundary_manifest": {"count": 0, "sha256": "0" * 64}, "lineage_limitations": "known"}
+    qmp = canonical_identity("qmp", publication)
     revision = {"qmp_id": qmp, "timezone": "Asia/Shanghai", "interval_bounds": "inclusive_local_naive", "coverage_semantics": "observed_admitted_runs_only", "missing_bar_semantics": "skip", "open_interest": "null_or_unavailable", "session_grid": "not_asserted_complete", "warmup": {"residual_semantics": "skip"}}
+    qmc = canonical_identity("qmc", revision)
     class Client:
         def query_batch(self, _query, _params=(), *, stage="sql"):
-            return QueryBatch(("publication",), ((publication, revision, 7, 9, "2020-01-01 09:01:00", "2020-01-01 09:09:00"),))
+            import hashlib
+            encoded = lambda value: hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+            return QueryBatch(("publication",), ((publication, encoded(publication), revision, encoded(revision), 7, 9, "2020-01-01 09:01:00", "2020-01-01 09:09:00"),))
     metadata = QuoteMuxPublicReader(client=Client()).get_futures_1m_partial_metadata(qmp_id=qmp,qmc_id=qmc,qmg_id=qmg)
     assert metadata["publication_verified"] is True
     assert metadata["missing_bar_semantics"] == "skip"
@@ -71,7 +75,7 @@ def test_partial_sql_keeps_exact_exclusions_and_boundary_evidence() -> None:
     schema = "\n".join(futures.FUTURE_SCHEMA_SQL)
     shared_relation = contract.admitted_rows_cte(qmi_expression="%s")
     assert "pyramid_admission" in shared_relation
-    assert "existing_conflict" not in shared_relation
+    assert "pyramid_conflicts" in shared_relation
     assert "TA" in repr(contract.INVALID_APEX_KEYS)
     assert "eligible_rowset_sha256" in source
     assert "qmg_id" in source
@@ -86,3 +90,16 @@ def test_futures_partial_migration_grants_trigger_and_receipt_path() -> None:
     assert "audit.future_bar_1m_series_generation" in text
     assert "quotemux_futures_partial_publisher" in text
     assert "quotemux_futures_owner" in text
+
+
+def test_disposition_plan_persists_actual_stream_hash_and_count(tmp_path) -> None:
+    from quotemux.store.futures_pyramid_import import _read_plan, _write_plan
+    path = tmp_path / "plan.jsonl.gz"
+    result = _write_plan(path, {"candidate_count": 2}, iter((
+        {"product_code": "T", "disposition": "missing_valid"},
+        {"product_code": "ag", "disposition": "existing_conflict"},
+    )))
+    header, rows = _read_plan(path)
+    assert header["disposition_count"] == 2
+    assert header["disposition_sha256"] == result["disposition_sha256"]
+    assert list(rows)[1]["disposition"] == "existing_conflict"
