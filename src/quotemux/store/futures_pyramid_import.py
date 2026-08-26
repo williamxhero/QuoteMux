@@ -13,6 +13,7 @@ import re
 from typing import Any, Iterator
 
 import psycopg
+from psycopg.rows import tuple_row
 
 from quotemux.futures_partial_contract import (
     FACT_NORMALIZATION_VERSION, PRODUCT_EXCHANGE, PRODUCTS, PYRAMID_SOURCE_KEY,
@@ -246,11 +247,11 @@ class FuturesPyramidImporter:
         """Read-only deterministic classification; it does not write temp tables."""
         bundle = load_pyramid_filesystem_bundle(bundle_path); connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
-            with connection.cursor() as cursor:
+            with connection.cursor(row_factory=tuple_row) as cursor:
                 cursor.execute("begin isolation level repeatable read read only")
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1", (SERIES_TYPE,)); generation = cursor.fetchone()
                 if not generation: raise FuturesPyramidImportError("future series generation is absent")
-                stream = connection.cursor(name="future_pyramid_classify_existing")
+                stream = connection.cursor(name="future_pyramid_classify_existing", row_factory=tuple_row)
                 stream.execute("select product_code,exchange,bar_time::text,open,high,low,close,volume,adjustment_offset,open_interest,source_key from fact.future_bar_1m where series_type=%s and product_code=any(%s::text[]) order by product_code collate \"C\",exchange collate \"C\",bar_time", (SERIES_TYPE, list(PRODUCTS)))
                 def existing_rows() -> Iterator[tuple[object, ...]]:
                     try:
@@ -283,7 +284,7 @@ class FuturesPyramidImporter:
         qmi_id = "qmi-v1-" + hashlib.sha256(canonical_json_bytes({"manifest": manifest_sha, "source": bundle.source_normalized_rowset_sha256, "fact": bundle.canonical_fact_rowset_sha256, "transform": FACT_TRANSFORM_VERSION, "plan": payload_sha})).hexdigest()
         connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
-            with connection.cursor() as cursor:
+            with connection.cursor(row_factory=tuple_row) as cursor:
                 cursor.execute("select pg_advisory_xact_lock(hashtext('future_pyramid_import:' || %s))", (bundle.canonical_fact_rowset_sha256,))
                 cursor.execute("select payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count from audit.future_bar_1m_import_publication where qmi_id=%s", (qmi_id,)); prior = cursor.fetchone()
                 if prior:
@@ -301,7 +302,7 @@ class FuturesPyramidImporter:
                         text = json.dumps(record,sort_keys=True,separators=(",",":"),allow_nan=False); digest.update(text.encode()+b"\n"); count += 1
                         copy.write_row(tuple(record[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset","candidate_sha256","disposition","existing_source_key","existing_fact_sha256")))
                 if count != int(header.get("disposition_count", -1)) or digest.hexdigest() != header.get("disposition_sha256"): raise FuturesPyramidImportError("disposition artifact byte integrity mismatch")
-                evidence_cursor = connection.cursor(name="future_pyramid_publish_evidence")
+                evidence_cursor = connection.cursor(name="future_pyramid_publish_evidence", row_factory=tuple_row)
                 evidence_cursor.execute("select stage.planned_disposition,stage.existing_source_key,stage.existing_fact_sha256,bars.product_code,bars.exchange,bars.bar_time::text,bars.open,bars.high,bars.low,bars.close,bars.volume,bars.adjustment_offset,bars.open_interest,bars.source_key from future_pyramid_stage stage left join fact.future_bar_1m bars on bars.product_code=stage.product_code and bars.exchange=stage.exchange and bars.series_type=%s and bars.bar_time=stage.bar_time where stage.planned_disposition in ('already_present_equivalent','existing_conflict')",(SERIES_TYPE,))
                 try:
                     while evidence_rows := evidence_cursor.fetchmany(100_000):

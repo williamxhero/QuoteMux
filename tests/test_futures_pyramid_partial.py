@@ -118,6 +118,18 @@ def test_partial_role_provisioning_forces_tuple_rows_on_dict_default_connection(
     assert connection.row_factories and all(factory is tuple_row for factory in connection.row_factories)
 
 
+def test_partial_import_and_publication_force_tuple_rows_on_default_pool_connections() -> None:
+    from quotemux.store import futures_partial_publication as publication
+    from quotemux.store import futures_pyramid_import as importer
+
+    publication_source = open(publication.__file__, encoding="utf-8").read()
+    importer_source = open(importer.__file__, encoding="utf-8").read()
+    assert "connection.cursor()" not in publication_source
+    assert "connection.cursor()" not in importer_source
+    assert publication_source.count("row_factory=tuple_row") >= 4
+    assert importer_source.count("row_factory=tuple_row") >= 4
+
+
 def test_disposition_plan_persists_actual_stream_hash_and_count(tmp_path) -> None:
     from quotemux.store.futures_pyramid_import import _read_plan, _write_plan
     path = tmp_path / "plan.jsonl.gz"

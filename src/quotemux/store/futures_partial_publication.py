@@ -7,6 +7,7 @@ import hashlib
 import json
 from typing import Any
 
+from psycopg.rows import tuple_row
 from quotemux.futures_partial_contract import (
     APEX_SOURCE_KEY, DATASET_ID, INVALID_APEX_KEYS, PYRAMID_SOURCE_KEY,
     SERIES_TYPE, SHINNY_SOURCE_KEY, admitted_rows_cte, canonical_json_bytes,
@@ -45,7 +46,7 @@ def _interval_id(row: Mapping[str, object]) -> str:
 
 def _collect_admitted(connection: Any, qmi_id: str) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     """Derive actual source islands and observed one-minute runs from one CTE."""
-    cursor = connection.cursor(name="future_partial_admitted_rows")
+    cursor = connection.cursor(name="future_partial_admitted_rows", row_factory=tuple_row)
     cursor.execute(admitted_rows_cte(qmi_expression="%s") + " select product_code,exchange,series_type,bar_time::text,open,high,low,close,volume,open_interest,adjustment_offset,source_key,pyramid_candidate_sha256 from admitted_rows order by product_code collate \"C\",exchange collate \"C\",series_type collate \"C\",bar_time", (qmi_id,qmi_id))
     boundaries: list[dict[str, object]] = []; intervals: list[dict[str, object]] = []
     current_boundary: dict[str, object] | None = None; current_interval: dict[str, object] | None = None
@@ -126,7 +127,7 @@ class FuturesPartialPublisher:
     def plan(self, *, qmi_id: str, catalog_identity: str, expected_generation: int | None = None) -> dict[str, object]:
         connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
-            with connection.cursor() as cursor:
+            with connection.cursor(row_factory=tuple_row) as cursor:
                 cursor.execute("begin isolation level repeatable read read only")
                 cursor.execute("select canonical_fact_rowset_sha256,manifest_json,inserted_count,equivalent_count,conflict_count from audit.future_bar_1m_import_publication where qmi_id=%s",(qmi_id,)); receipt = cursor.fetchone()
                 cursor.execute("select generation,row_count,first_bar_time::text,last_bar_time::text from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1",(SERIES_TYPE,)); generation = cursor.fetchone()
@@ -150,7 +151,7 @@ class FuturesPartialPublisher:
         if canonical_json_bytes(current) != canonical_json_bytes(dict(frozen_plan)): raise ValueError("frozen partial plan differs from current facts; re-plan")
         connection = self._connection_factory(); owns = self._connection_factory is _acquire_connection
         try:
-            with connection.cursor() as cursor:
+            with connection.cursor(row_factory=tuple_row) as cursor:
                 cursor.execute("select pg_advisory_xact_lock(hashtext(%s))",(DATASET_ID,))
                 # Re-plan under the publication lock to close the check/write race.
                 cursor.execute("select generation from audit.future_bar_1m_series_generation where series_type=%s order by generation desc limit 1",(SERIES_TYPE,)); locked_generation=cursor.fetchone()
@@ -187,7 +188,7 @@ class FuturesPartialPublisher:
         if canonical_json_bytes(current)!=canonical_json_bytes(dict(frozen_plan)): raise ValueError("frozen partial plan differs from current facts")
         connection=self._connection_factory(); owns=self._connection_factory is _acquire_connection
         try:
-            with connection.cursor() as cursor:
+            with connection.cursor(row_factory=tuple_row) as cursor:
                 cursor.execute("begin isolation level repeatable read read only")
                 cursor.execute("select payload_sha256 from audit.future_bar_1m_partial_publication where qmp_id=%s",(current["qmp_id"],)); qmp=cursor.fetchone()
                 cursor.execute("select payload_sha256 from audit.future_bar_1m_partial_revision where qmc_id=%s",(current["qmc_id"],)); qmc=cursor.fetchone()
