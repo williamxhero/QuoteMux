@@ -237,6 +237,16 @@ _FUTURES_PARTIAL_COVERAGE_QUERY = """
     limit %s
 """
 
+_FUTURES_PARTIAL_IDENTITY_QUERY = """
+    select publication.payload_json, revision.payload_json, generation.generation, generation.row_count,
+           generation.first_bar_time::text, generation.last_bar_time::text
+    from audit.future_bar_1m_partial_publication publication
+    join audit.future_bar_1m_partial_revision revision on revision.qmp_id=publication.qmp_id and revision.qmc_id=%s
+    join lateral (select generation,row_count,first_bar_time,last_bar_time from audit.future_bar_1m_series_generation
+                  where series_type='apex_l0_adjusted' order by generation desc limit 1) generation on true
+    where publication.qmp_id=%s
+"""
+
 
 def _date_text(value: str, field_name: str) -> str:
     text = str(value).strip()
@@ -260,6 +270,11 @@ def _timestamp_value(value: str | datetime, field_name: str) -> str | datetime:
 def _partial_cursor_encode(kind: str, payload: dict[str, object]) -> str:
     canonical = json.dumps({"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return base64.urlsafe_b64encode(canonical).rstrip(b"=").decode("ascii")
+
+
+def canonical_identity_for_reader(payload: dict[str, object]) -> str:
+    """Mirror the metadata identity algorithm without importing writer modules."""
+    return "qmg-v1-" + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 def _partial_cursor_decode(value: str | None, kind: str, query_hash: str) -> dict[str, object] | None:
@@ -510,6 +525,7 @@ class QuoteMuxPublicReader:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _MAX_FUTURES_1M_LIMIT:
             raise FuturesPartialPublicationQueryError("limit must be a positive bounded integer")
         query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
+        self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id)
         prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
         prior_time = prior.get("bar_time") if prior else None
         prior_code = prior.get("product_code") if prior else None
@@ -540,6 +556,7 @@ class QuoteMuxPublicReader:
         if datetime.fromisoformat(str(start)) > datetime.fromisoformat(str(end)):
             raise FuturesPartialPublicationQueryError("start_time must not be after end_time")
         query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
+        self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id)
         prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
         params = (start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
         batch = self._client.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
@@ -549,6 +566,21 @@ class QuoteMuxPublicReader:
             last = rows[-1]
             next_cursor = _partial_cursor_encode("partial-coverage", {"dataset_id": _PARTIAL_DATASET_ID, "qmp_id": qmp_id, "qmc_id": qmc_id, "qmg_id": qmg_id, "query_hash": query_hash, "product_code": str(last[0]), "start_time": str(last[2]), "end_time": str(last[3]), "status": str(last[4]), "interval_id": str(last[6])})
         return output, next_cursor
+
+    def _verify_futures_partial_identity(self, qmp_id: str, qmc_id: str, qmg_id: str) -> None:
+        """Reject stale publications before returning any bar. Called inside the reader path."""
+        batch = self._client.query_batch(_FUTURES_PARTIAL_IDENTITY_QUERY, (qmc_id, qmp_id), stage="futures_partial_identity")
+        if len(batch.rows) != 1:
+            raise FuturesPartialPublicationStaleError("partial publication identity is absent or incoherent")
+        row = batch.rows[0]
+        try:
+            payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
+            revision = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
+            actual_qmg = canonical_identity_for_reader({"dataset_id": _PARTIAL_DATASET_ID, "generation": int(row[2]), "row_count": int(row[3]), "first": str(row[4]), "last": str(row[5])})
+        except Exception as exc:
+            raise FuturesPartialPublicationStaleError("partial publication identity is malformed") from exc
+        if payload.get("qmg_id") != qmg_id or revision.get("qmp_id") != qmp_id or actual_qmg != qmg_id:
+            raise FuturesPartialPublicationStaleError("partial publication generation is stale")
 
     @staticmethod
     def _stock_1m_inputs(
