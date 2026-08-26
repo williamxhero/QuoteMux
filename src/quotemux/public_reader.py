@@ -8,6 +8,7 @@ import json
 import sys
 from typing import Any
 from contextlib import nullcontext
+from zoneinfo import ZoneInfo
 
 from quotemux.infra.db.read_client import QueryBatch, ReadOnlyClient, StageCallback
 
@@ -261,14 +262,16 @@ def _date_text(value: str, field_name: str) -> str:
 
 
 def _timestamp_value(value: str | datetime, field_name: str) -> str | datetime:
-    if isinstance(value, datetime):
-        return value
-    text = str(value).strip()
+    parsed = value if isinstance(value, datetime) else None
+    text = str(value).strip() if parsed is None else ""
     try:
-        datetime.fromisoformat(text)
+        parsed = parsed or datetime.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"{field_name} must be an ISO timestamp") from exc
-    return text
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    # PostgreSQL facts deliberately use local-naive Asia/Shanghai timestamps.
+    return parsed.isoformat(sep=" ")
 
 
 def _partial_cursor_encode(kind: str, payload: dict[str, object]) -> str:
