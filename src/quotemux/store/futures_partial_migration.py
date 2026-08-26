@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from psycopg import sql
+from psycopg.rows import tuple_row
 from quotemux.infra.db.client import _acquire_connection, _release_connection
 
 
@@ -77,7 +78,7 @@ def apply_futures_partial_migration(connection_factory: Callable[[], Any] = _acq
     """Apply the locked privileged migration; it is safe to repeat."""
     connection = connection_factory(); owns = connection_factory is _acquire_connection
     try:
-        with connection.cursor() as cursor:
+        with connection.cursor(row_factory=tuple_row) as cursor:
             cursor.execute("set local lock_timeout='3s'"); cursor.execute("select pg_advisory_xact_lock(hashtext('quotemux_futures_partial_migration_v2'))")
             cursor.execute("do $$ begin if not exists(select 1 from pg_roles where rolname='quotemux_futures_owner') then create role quotemux_futures_owner nologin; end if; end $$")
             for statement in METADATA_DDL: cursor.execute(statement)
@@ -96,7 +97,10 @@ def provision_futures_partial_roles(publisher_password: str, reader_password: st
     if not publisher_password or not reader_password: raise ValueError("publisher and reader secrets are required")
     apply_futures_partial_migration(connection_factory); connection=connection_factory(); owns=connection_factory is _acquire_connection
     try:
-        with connection.cursor() as cursor:
+        # The pooled application connection defaults to ``dict_row``.  This
+        # privileged migration deliberately uses positional rows, so force a
+        # tuple cursor instead of depending on the caller's connection setup.
+        with connection.cursor(row_factory=tuple_row) as cursor:
             cursor.execute("do $$ begin if not exists(select 1 from pg_roles where rolname='quotemux_futures_partial_publisher') then create role quotemux_futures_partial_publisher login; end if; if not exists(select 1 from pg_roles where rolname='quotemux_public_reader') then create role quotemux_public_reader login; end if; end $$")
             cursor.execute(sql.SQL("alter role quotemux_futures_partial_publisher password {}").format(sql.Literal(publisher_password))); cursor.execute(sql.SQL("alter role quotemux_public_reader password {}").format(sql.Literal(reader_password)))
             cursor.execute("select current_database()"); database_name = str(cursor.fetchone()[0])
@@ -104,10 +108,10 @@ def provision_futures_partial_roles(publisher_password: str, reader_password: st
             cursor.execute("revoke all privileges on fact.future_bar_1m,ref.future_series,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_publication,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval from quotemux_futures_partial_publisher")
             cursor.execute("grant usage on schema fact,audit,ref to quotemux_futures_partial_publisher; grant select on fact.future_bar_1m,ref.future_series,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_publication,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval to quotemux_futures_partial_publisher; grant insert on fact.future_bar_1m,audit.future_bar_1m_import_publication,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval to quotemux_futures_partial_publisher; revoke update,delete,truncate on fact.future_bar_1m from quotemux_futures_partial_publisher")
             cursor.execute(sql.SQL("grant connect on database {} to quotemux_public_reader").format(sql.Identifier(database_name)))
-            cursor.execute("revoke all privileges on fact.stock_daily_1d,fact.stock_bar_1m,fact.future_bar_1m,fact.future_bar_1m_coverage,readmodel.stock_bar_1m_daily_coverage,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval,ref.future_series from quotemux_public_reader")
-            cursor.execute("grant usage on schema fact,readmodel,audit,ref to quotemux_public_reader; grant select on fact.stock_daily_1d,fact.stock_bar_1m,fact.future_bar_1m,fact.future_bar_1m_coverage,readmodel.stock_bar_1m_daily_coverage,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval,ref.future_series to quotemux_public_reader")
-            cursor.execute("""do $$ declare relation text; begin foreach relation in array array['ref.trade_calendar','readmodel.dataset_build_state','readmodel.future_1m_completeness_active_revision','readmodel.future_1m_completeness_revision','readmodel.future_1m_completeness_revision_interval'] loop if to_regclass(relation) is not null then execute format('grant select on %s to quotemux_public_reader',relation); end if; end loop; end $$""")
-            cursor.execute("grant usage on schema fact,audit to quotemux_futures_owner; grant select,insert,update,delete on fact.future_bar_1m,fact.future_bar_1m_coverage,audit.future_bar_1m_series_generation to quotemux_futures_owner")
+            cursor.execute("revoke all privileges on fact.stock_daily_1d,fact.stock_bar_1m,fact.future_bar_1m,fact.future_bar_1m_coverage,readmodel.stock_bar_1m_daily_coverage,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval,ref.future_series from quotemux_public_reader")
+            cursor.execute("grant usage on schema fact,readmodel,audit,ref to quotemux_public_reader; grant select on fact.stock_daily_1d,fact.stock_bar_1m,fact.future_bar_1m,fact.future_bar_1m_coverage,readmodel.stock_bar_1m_daily_coverage,audit.future_bar_1m_series_generation,audit.future_bar_1m_import_disposition,audit.future_bar_1m_import_admission,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_source_boundary,audit.future_bar_1m_partial_revision,audit.future_bar_1m_partial_revision_interval,ref.future_series to quotemux_public_reader")
+            cursor.execute("""do $$ declare relation text; begin foreach relation in array array['ref.trade_calendar','readmodel.dataset_build_state','readmodel.future_1m_completeness_active_revision','readmodel.future_1m_completeness_revision','readmodel.future_1m_completeness_revision_interval','readmodel.future_1m_completeness_interval'] loop if to_regclass(relation) is not null then execute format('grant select on %s to quotemux_public_reader',relation); end if; end loop; end $$""")
+            cursor.execute("grant usage on schema fact,audit to quotemux_futures_owner; grant select,insert,update,delete on fact.future_bar_1m,fact.future_bar_1m_coverage,audit.future_bar_1m_series_generation to quotemux_futures_owner; grant select on audit.future_bar_1m_import_publication,audit.future_bar_1m_partial_publication,audit.future_bar_1m_partial_revision to quotemux_futures_owner")
         connection.commit()
     except Exception: connection.rollback(); raise
     finally:

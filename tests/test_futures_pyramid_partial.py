@@ -52,9 +52,9 @@ def test_partial_reader_binds_generation_and_rejects_tl() -> None:
 def test_partial_metadata_requires_verified_identity_and_exposes_skip_contract() -> None:
     qmg_payload = {"dataset_id": "future_1m_partial_s000012_quotemux", "series_type": "apex_l0_adjusted", "generation": 7, "row_count": 9, "first_bar_time": "2020-01-01 09:01:00", "last_bar_time": "2020-01-01 09:09:00"}
     qmg = canonical_identity("qmg", qmg_payload)
-    publication = {"qmg_id": qmg, "qmi_id": "qmi-v1-" + "1" * 64, "catalog_identity": "mhd-v1-catalog", "sources": [], "source_boundary_manifest": {"count": 0, "sha256": "0" * 64}, "lineage_limitations": "known"}
+    publication = {"dataset_id": "future_1m_partial_s000012_quotemux", "qmg_id": qmg, "qmi_id": "qmi-v1-" + "1" * 64, "catalog_identity": "mhd-v1-catalog", "sources": [], "source_boundary_manifest": {"count": 0, "sha256": "0" * 64}, "lineage_limitations": "known"}
     qmp = canonical_identity("qmp", publication)
-    revision = {"qmp_id": qmp, "timezone": "Asia/Shanghai", "interval_bounds": "inclusive_local_naive", "coverage_semantics": "observed_admitted_runs_only", "missing_bar_semantics": "skip", "open_interest": "null_or_unavailable", "session_grid": "not_asserted_complete", "warmup": {"residual_semantics": "skip"}}
+    revision = {"dataset_id": "future_1m_partial_s000012_quotemux", "qmp_id": qmp, "qmg_id": qmg, "timezone": "Asia/Shanghai", "interval_bounds": "inclusive_local_naive", "coverage_semantics": "observed_admitted_runs_only", "missing_bar_semantics": "skip", "open_interest": "null_or_unavailable", "session_grid": "not_asserted_complete", "warmup": {"residual_semantics": "skip"}}
     qmc = canonical_identity("qmc", revision)
     class Client:
         def query_batch(self, _query, _params=(), *, stage="sql"):
@@ -92,6 +92,32 @@ def test_futures_partial_migration_grants_trigger_and_receipt_path() -> None:
     assert "quotemux_futures_owner" in text
 
 
+def test_partial_role_provisioning_forces_tuple_rows_on_dict_default_connection() -> None:
+    from psycopg.rows import tuple_row
+    from quotemux.store.futures_partial_migration import provision_futures_partial_roles
+
+    class Cursor:
+        def __init__(self, row_factory): self.row_factory = row_factory; self.last_sql = ""
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, statement, _params=None): self.last_sql = str(statement)
+        def fetchone(self):
+            if "current_database" in self.last_sql:
+                return ("datalake_dev",) if self.row_factory is tuple_row else {"current_database": "datalake_dev"}
+            return None
+
+    class Connection:
+        def __init__(self): self.row_factories = []; self.commits = 0
+        def cursor(self, *, row_factory=None, **_kwargs): self.row_factories.append(row_factory); return Cursor(row_factory)
+        def commit(self): self.commits += 1
+        def rollback(self): pass
+
+    connection = Connection()
+    provision_futures_partial_roles("publisher-secret", "reader-secret", lambda: connection)
+    assert connection.commits == 2
+    assert connection.row_factories and all(factory is tuple_row for factory in connection.row_factories)
+
+
 def test_disposition_plan_persists_actual_stream_hash_and_count(tmp_path) -> None:
     from quotemux.store.futures_pyramid_import import _read_plan, _write_plan
     path = tmp_path / "plan.jsonl.gz"
@@ -103,3 +129,74 @@ def test_disposition_plan_persists_actual_stream_hash_and_count(tmp_path) -> Non
     assert header["disposition_count"] == 2
     assert header["disposition_sha256"] == result["disposition_sha256"]
     assert list(rows)[1]["disposition"] == "existing_conflict"
+
+
+def test_partial_coverage_binds_all_sql_placeholders() -> None:
+    qmg_payload={"dataset_id":"future_1m_partial_s000012_quotemux","series_type":"apex_l0_adjusted","generation":1,"row_count":1,"first_bar_time":"2020-01-01 09:01:00","last_bar_time":"2020-01-01 09:01:00"}; qmg=canonical_identity("qmg",qmg_payload)
+    publication={"dataset_id":"future_1m_partial_s000012_quotemux","qmg_id":qmg}; qmp=canonical_identity("qmp",publication); revision={"dataset_id":"future_1m_partial_s000012_quotemux","qmp_id":qmp,"qmg_id":qmg}; qmc=canonical_identity("qmc",revision)
+    class Client:
+        def __init__(self): self.calls=[]
+        def query_batch(self, query, params=(), *, stage="sql"):
+            self.calls.append((query,params,stage))
+            if stage == "futures_partial_identity":
+                encoded=lambda value: hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+                return QueryBatch(("x",),((publication,encoded(publication),revision,encoded(revision),1,1,"2020-01-01 09:01:00","2020-01-01 09:01:00"),))
+            return QueryBatch(("x",),())
+    client=Client(); QuoteMuxPublicReader(client=client).read_futures_1m_partial_coverage_page("T","2020-01-01 09:01:00","2020-01-01 09:02:00",qmp_id=qmp,qmc_id=qmc,qmg_id=qmg)
+    query,params,stage=client.calls[-1]
+    assert stage == "futures_partial_coverage" and query.count("%s") == len(params) == 16
+
+
+def test_partial_manifest_order_uses_c_collation_for_mixed_case_products() -> None:
+    from quotemux.store import futures_partial_publication as publication
+    source = open(publication.__file__, encoding="utf-8").read()
+    # Python's Unicode/codepoint sort agrees with PostgreSQL COLLATE "C";
+    # it deliberately differs from the live database's en_US default here.
+    assert sorted(("ag", "AP", "CF", "ao")) == ["AP", "CF", "ag", "ao"]
+    assert source.count(r'product_code collate \"C\"') >= 3
+    assert r'boundary_id collate \"C\"' in source and r'interval_id collate \"C\"' in source
+
+
+def test_partial_verify_requires_persisted_parents() -> None:
+    from quotemux.store.futures_partial_publication import FuturesPartialPublisher
+
+    publication = {"dataset_id": "future_1m_partial_s000012_quotemux"}
+    revision = {"dataset_id": "future_1m_partial_s000012_quotemux"}
+    plan = {
+        "qmi_id": "qmi-v1-" + "1" * 64, "catalog_identity": "catalog", "expected_generation": 1,
+        "qmp_id": "qmp-v1-" + "2" * 64, "qmc_id": "qmc-v1-" + "3" * 64, "qmg_id": "qmg-v1-" + "4" * 64,
+        "publication_payload": publication, "revision_payload": revision, "boundaries": [], "intervals": [],
+    }
+    encoded = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    class Cursor:
+        def __init__(self, parents): self.parents = parents; self.last_sql = ""
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, query, _params=()): self.last_sql = str(query)
+        def fetchone(self):
+            if "partial_publication where" in self.last_sql: return (encoded(publication),) if self.parents else None
+            if "partial_revision where" in self.last_sql: return (encoded(revision),) if self.parents else None
+            return None
+        def fetchmany(self, _size): return []
+
+    class Connection:
+        def __init__(self, parents): self.parents = parents
+        def cursor(self, **_kwargs): return Cursor(self.parents)
+        def rollback(self): pass
+
+    class Publisher(FuturesPartialPublisher):
+        def plan(self, **_kwargs): return plan
+
+    assert Publisher(lambda: Connection(True)).verify_published(plan)["status"] == "verified"
+    with pytest.raises(ValueError, match="parents are absent"):
+        Publisher(lambda: Connection(False)).verify_published(plan)
+
+
+def test_partial_queries_reject_second_precision_windows() -> None:
+    reader = QuoteMuxPublicReader(client=object())
+    with pytest.raises(FuturesPartialPublicationQueryError, match="minute-aligned"):
+        reader.read_futures_1m_partial_page(
+            "T", "2020-01-01 09:01:01", "2020-01-01 09:02:00",
+            qmp_id="qmp-v1-" + "1" * 64, qmc_id="qmc-v1-" + "2" * 64, qmg_id="qmg-v1-" + "3" * 64,
+        )

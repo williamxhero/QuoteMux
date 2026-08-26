@@ -265,6 +265,12 @@ def _timestamp_value(value: str | datetime, field_name: str) -> str | datetime:
     return parsed.isoformat(sep=" ")
 
 
+def _partial_minute_timestamp(value: str | datetime, field_name: str) -> str | datetime:
+    actual = _timestamp_value(value, field_name); parsed = datetime.fromisoformat(str(actual))
+    if parsed.second or parsed.microsecond: raise FuturesPartialPublicationQueryError(f"{field_name} must be minute-aligned")
+    return actual
+
+
 def _partial_cursor_encode(kind: str, payload: dict[str, object]) -> str:
     canonical = json.dumps({"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return base64.urlsafe_b64encode(canonical).rstrip(b"=").decode("ascii")
@@ -534,7 +540,7 @@ class QuoteMuxPublicReader:
         normalized_codes = _future_codes(codes)
         if not normalized_codes or any(code not in _PARTIAL_PRODUCTS for code in normalized_codes):
             raise FuturesPartialPublicationQueryError("codes must be non-empty S000012 products; TL is not accepted")
-        start, end = _timestamp_value(start_time, "start_time"), _timestamp_value(end_time, "end_time")
+        start, end = _partial_minute_timestamp(start_time, "start_time"), _partial_minute_timestamp(end_time, "end_time")
         if datetime.fromisoformat(str(start)) > datetime.fromisoformat(str(end)):
             raise FuturesPartialPublicationQueryError("start_time must not be after end_time")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _MAX_FUTURES_1M_LIMIT:
@@ -569,7 +575,7 @@ class QuoteMuxPublicReader:
             raise FuturesPartialPublicationQueryError("codes must be non-empty S000012 products; TL is not accepted")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= 10_000:
             raise FuturesPartialPublicationQueryError("limit must be a positive bounded integer")
-        start, end = _timestamp_value(start_time, "start_time"), _timestamp_value(end_time, "end_time")
+        start, end = _partial_minute_timestamp(start_time, "start_time"), _partial_minute_timestamp(end_time, "end_time")
         if datetime.fromisoformat(str(start)) > datetime.fromisoformat(str(end)):
             raise FuturesPartialPublicationQueryError("start_time must not be after end_time")
         query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
@@ -577,7 +583,7 @@ class QuoteMuxPublicReader:
         with snapshot_context as snapshot:
             self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
             prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
-            params = (start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
+            params = (start, end, end, start, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
             batch = snapshot.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
         rows = batch.rows[:limit]; output = QueryBatch(batch.columns, rows)
         next_cursor = None
@@ -601,7 +607,7 @@ class QuoteMuxPublicReader:
             actual_qmg = canonical_identity_for_reader({"dataset_id": _PARTIAL_DATASET_ID, "series_type": "apex_l0_adjusted", "generation": int(row[4]), "row_count": int(row[5]), "first_bar_time": str(row[6]), "last_bar_time": str(row[7])})
         except Exception as exc:
             raise FuturesPartialPublicationStaleError("partial publication identity is malformed") from exc
-        if actual_qmp != qmp_id or actual_qmc != qmc_id or row[1] != payload_sha or row[3] != revision_sha or payload.get("qmg_id") != qmg_id or revision.get("qmp_id") != qmp_id or actual_qmg != qmg_id:
+        if payload.get("dataset_id") != _PARTIAL_DATASET_ID or revision.get("dataset_id") != _PARTIAL_DATASET_ID or actual_qmp != qmp_id or actual_qmc != qmc_id or row[1] != payload_sha or row[3] != revision_sha or payload.get("qmg_id") != qmg_id or revision.get("qmp_id") != qmp_id or revision.get("qmg_id") != qmg_id or actual_qmg != qmg_id:
             raise FuturesPartialPublicationStaleError("partial publication generation is stale")
 
     def get_futures_1m_partial_metadata(self, *, qmp_id: str, qmc_id: str, qmg_id: str) -> dict[str, object]:
