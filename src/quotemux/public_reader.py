@@ -7,6 +7,7 @@ import hashlib
 import json
 import sys
 from typing import Any
+from contextlib import nullcontext
 
 from quotemux.infra.db.read_client import QueryBatch, ReadOnlyClient, StageCallback
 
@@ -525,11 +526,13 @@ class QuoteMuxPublicReader:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _MAX_FUTURES_1M_LIMIT:
             raise FuturesPartialPublicationQueryError("limit must be a positive bounded integer")
         query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
-        self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id)
-        prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
-        prior_time = prior.get("bar_time") if prior else None
-        prior_code = prior.get("product_code") if prior else None
-        batch = self._client.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
+        snapshot_context = self._client.snapshot() if hasattr(self._client, "snapshot") else nullcontext(self._client)
+        with snapshot_context as snapshot:
+            self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
+            prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
+            prior_time = prior.get("bar_time") if prior else None
+            prior_code = prior.get("product_code") if prior else None
+            batch = snapshot.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
         rows = batch.rows[:limit]
         output = QueryBatch(batch.columns, rows)
         next_cursor = None
@@ -556,10 +559,12 @@ class QuoteMuxPublicReader:
         if datetime.fromisoformat(str(start)) > datetime.fromisoformat(str(end)):
             raise FuturesPartialPublicationQueryError("start_time must not be after end_time")
         query_hash = hashlib.sha256(json.dumps([_PARTIAL_DATASET_ID, qmp_id, qmc_id, qmg_id, normalized_codes, str(start), str(end)], separators=(",", ":")).encode()).hexdigest()
-        self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id)
-        prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
-        params = (start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
-        batch = self._client.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
+        snapshot_context = self._client.snapshot() if hasattr(self._client, "snapshot") else nullcontext(self._client)
+        with snapshot_context as snapshot:
+            self._verify_futures_partial_identity(qmp_id, qmc_id, qmg_id, snapshot)
+            prior = _partial_cursor_decode(cursor, "partial-coverage", query_hash)
+            params = (start, end, start, end, qmp_id, qmc_id, normalized_codes, start, end, prior.get("product_code") if prior else None, *( [prior.get(k) for k in ("product_code", "start_time", "end_time", "status", "interval_id")] if prior else [None] * 5), limit + 1)
+            batch = snapshot.query_batch(_FUTURES_PARTIAL_COVERAGE_QUERY, params, stage="futures_partial_coverage")
         rows = batch.rows[:limit]; output = QueryBatch(batch.columns, rows)
         next_cursor = None
         if len(batch.rows) > limit:
@@ -567,9 +572,9 @@ class QuoteMuxPublicReader:
             next_cursor = _partial_cursor_encode("partial-coverage", {"dataset_id": _PARTIAL_DATASET_ID, "qmp_id": qmp_id, "qmc_id": qmc_id, "qmg_id": qmg_id, "query_hash": query_hash, "product_code": str(last[0]), "start_time": str(last[2]), "end_time": str(last[3]), "status": str(last[4]), "interval_id": str(last[6])})
         return output, next_cursor
 
-    def _verify_futures_partial_identity(self, qmp_id: str, qmc_id: str, qmg_id: str) -> None:
+    def _verify_futures_partial_identity(self, qmp_id: str, qmc_id: str, qmg_id: str, client: Any) -> None:
         """Reject stale publications before returning any bar. Called inside the reader path."""
-        batch = self._client.query_batch(_FUTURES_PARTIAL_IDENTITY_QUERY, (qmc_id, qmp_id), stage="futures_partial_identity")
+        batch = client.query_batch(_FUTURES_PARTIAL_IDENTITY_QUERY, (qmc_id, qmp_id), stage="futures_partial_identity")
         if len(batch.rows) != 1:
             raise FuturesPartialPublicationStaleError("partial publication identity is absent or incoherent")
         row = batch.rows[0]
