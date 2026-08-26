@@ -11,12 +11,13 @@ import hashlib
 import json
 import re
 from typing import Any
+from pathlib import Path
 
 from quotemux.infra.db.client import _acquire_connection, _release_connection
 
 STORAGE_SERIES_TYPE = "apex_l0_adjusted"
 SOURCE_KEY = "pyramid_back_adjusted_20260714"
-FACT_TRANSFORM_VERSION = "pyramid_source_key_to_quotemux_fact_v1"
+FACT_TRANSFORM_VERSION = "quotemux_fact_source_key_v1"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _PRODUCTS = frozenset(("ag", "al", "AP", "CF", "cu", "hc", "i", "j", "m", "MA", "ni", "p", "ru", "sc", "T", "TA", "TF", "v", "y", "lh", "SA", "ao", "si"))
 
@@ -31,6 +32,7 @@ class PyramidBundle:
     manifest: Mapping[str, object]
     source_normalized_rowset_sha256: str
     canonical_fact_rowset_sha256: str
+    bundle_path: Path | None = None
 
 
 def _sha(value: object, name: str) -> str:
@@ -85,6 +87,44 @@ def load_pyramid_bundle(artifact_bytes: bytes, manifest: Mapping[str, object]) -
     return PyramidBundle(normalized, manifest, source_hash, fact_hash)
 
 
+def load_pyramid_filesystem_bundle(bundle_path: Path) -> PyramidBundle:
+    """Validate the package-produced Parquet bundle without reading it into RAM."""
+    manifest_path = bundle_path / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FuturesPyramidImportError("Pyramid bundle manifest is unreadable") from exc
+    if not isinstance(manifest, Mapping) or manifest.get("schema_version") != "futures_user_pyramid_archive_bundle_v1":
+        raise FuturesPyramidImportError("unsupported Pyramid filesystem bundle schema")
+    if not isinstance(manifest.get("authorization"), Mapping) or manifest["authorization"].get("status") != "private_research_authorized":
+        raise FuturesPyramidImportError("Pyramid private-research authorization is required")
+    facts = bundle_path / "fact_normalized.parquet"
+    if not facts.is_file():
+        raise FuturesPyramidImportError("fact_normalized.parquet is missing")
+    actual = hashlib.sha256(facts.read_bytes()).hexdigest()
+    normalization = manifest.get("fact_normalization")
+    if not isinstance(normalization, Mapping) or actual != _sha(normalization.get("fact_normalized_artifact_sha256"), "fact_normalized_artifact_sha256"):
+        raise FuturesPyramidImportError("fact-normalized artifact SHA-256 mismatch")
+    return PyramidBundle((), manifest, _sha(manifest.get("source_normalized_rowset_sha256"), "source_normalized_rowset_sha256"), _sha(normalization.get("fact_normalized_rowset_sha256"), "fact_normalized_rowset_sha256"), bundle_path)
+
+
+def _main() -> int:
+    """Administrative command: classify/publish an immutable on-disk bundle."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Classify and publish a Pyramid futures evidence bundle")
+    parser.add_argument("command", choices=("classify", "publish"))
+    parser.add_argument("--bundle", type=Path, required=True)
+    args = parser.parse_args()
+    bundle = load_pyramid_filesystem_bundle(args.bundle)
+    if args.command == "classify":
+        print(json.dumps({"source_normalized_rowset_sha256": bundle.source_normalized_rowset_sha256, "canonical_fact_rowset_sha256": bundle.canonical_fact_rowset_sha256, "rows": bundle.manifest.get("normalized_row_count")}, sort_keys=True)); return 0
+    print(json.dumps(FuturesPyramidImporter().publish_filesystem_bundle(args.bundle), sort_keys=True)); return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
+
+
 class FuturesPyramidImporter:
     def __init__(self, connection_factory: Callable[[], Any] = _acquire_connection) -> None:
         self._connection_factory = connection_factory
@@ -92,6 +132,7 @@ class FuturesPyramidImporter:
     def publish(self, artifact_bytes: bytes, manifest: Mapping[str, object]) -> dict[str, object]:
         bundle = load_pyramid_bundle(artifact_bytes, manifest)
         connection = self._connection_factory()
+        owns_connection = self._connection_factory is _acquire_connection
         try:
             with connection.cursor() as cursor:
                 cursor.execute("select qmi_id, payload_sha256 from audit.future_bar_1m_import_publication where source_normalized_rowset_sha256=%s and fact_transform_version=%s and canonical_fact_rowset_sha256=%s", (bundle.source_normalized_rowset_sha256, FACT_TRANSFORM_VERSION, bundle.canonical_fact_rowset_sha256))
@@ -117,7 +158,46 @@ class FuturesPyramidImporter:
             connection.rollback()
             raise
         finally:
-            _release_connection(connection)
+            if owns_connection:
+                _release_connection(connection)
+
+    def publish_filesystem_bundle(self, bundle_path: Path) -> dict[str, object]:
+        """COPY Parquet record batches through a temporary stage, never a huge JSON list."""
+        bundle = load_pyramid_filesystem_bundle(bundle_path)
+        connection = self._connection_factory(); owns_connection = self._connection_factory is _acquire_connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("select pg_advisory_xact_lock(hashtext('future_pyramid_import:' || %s))", (bundle.canonical_fact_rowset_sha256,))
+                cursor.execute("select qmi_id, payload_sha256 from audit.future_bar_1m_import_publication where source_normalized_rowset_sha256=%s and fact_transform_version=%s and canonical_fact_rowset_sha256=%s", (bundle.source_normalized_rowset_sha256, FACT_TRANSFORM_VERSION, bundle.canonical_fact_rowset_sha256))
+                existing = cursor.fetchone()
+                payload_hash = hashlib.sha256(_canonical_bytes(bundle.manifest)).hexdigest()
+                if existing:
+                    if existing[1] != payload_hash: raise FuturesPyramidImportError("existing qmi payload differs")
+                    connection.rollback(); return {"status":"idempotent","qmi_id":existing[0]}
+                self._stage_parquet(cursor, bundle.bundle_path / "fact_normalized.parquet")
+                cursor.execute("""update future_pyramid_stage stage set disposition=case when bars.product_code is null then 'missing_valid'
+                    when bars.exchange is not distinct from stage.exchange and bars.open is not distinct from stage.open and bars.high is not distinct from stage.high and bars.low is not distinct from stage.low and bars.close is not distinct from stage.close and bars.volume is not distinct from stage.volume and bars.adjustment_offset is not distinct from stage.adjustment_offset then 'already_present_equivalent' else 'existing_conflict' end
+                    from fact.future_bar_1m bars where bars.product_code=stage.product_code and bars.exchange=stage.exchange and bars.bar_time=stage.bar_time and bars.series_type=%s""", (STORAGE_SERIES_TYPE,))
+                cursor.execute("update future_pyramid_stage set disposition='missing_valid' where disposition is null")
+                cursor.execute("select count(*) filter(where disposition='missing_valid'),count(*) filter(where disposition='already_present_equivalent'),count(*) filter(where disposition='existing_conflict') from future_pyramid_stage")
+                missing,equivalent,conflict=cursor.fetchone()
+                if missing:
+                    cursor.execute("insert into fact.future_bar_1m (product_code,exchange,series_type,bar_time,open,high,low,close,volume,open_interest,adjustment_offset,source_key) select product_code,exchange,%s,bar_time,open,high,low,close,volume,null,adjustment_offset,%s from future_pyramid_stage where disposition='missing_valid'", (STORAGE_SERIES_TYPE,SOURCE_KEY))
+                qmi_id="qmi-v1-"+hashlib.sha256(_canonical_bytes({"source":bundle.source_normalized_rowset_sha256,"fact":bundle.canonical_fact_rowset_sha256,"transform":FACT_TRANSFORM_VERSION})).hexdigest()
+                cursor.execute("insert into audit.future_bar_1m_import_publication(qmi_id,source_normalized_rowset_sha256,fact_transform_version,canonical_fact_rowset_sha256,payload_sha256,manifest_json,inserted_count,equivalent_count,conflict_count) values(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)", (qmi_id,bundle.source_normalized_rowset_sha256,FACT_TRANSFORM_VERSION,bundle.canonical_fact_rowset_sha256,payload_hash,json.dumps(bundle.manifest,sort_keys=True),missing,equivalent,conflict))
+            connection.commit(); return {"status":"success","qmi_id":qmi_id,"inserted_count":missing,"equivalent_count":equivalent,"conflict_count":conflict}
+        except Exception:
+            connection.rollback(); raise
+        finally:
+            if owns_connection: _release_connection(connection)
+
+    @staticmethod
+    def _stage_parquet(cursor: Any, path: Path) -> None:
+        import pyarrow.parquet as pq
+        cursor.execute("create temporary table future_pyramid_stage (product_code text,exchange text,bar_time timestamp,open double precision,high double precision,low double precision,close double precision,volume double precision,adjustment_offset double precision,disposition text) on commit drop")
+        with cursor.copy("copy future_pyramid_stage (product_code,exchange,bar_time,open,high,low,close,volume,adjustment_offset) from stdin") as copy:
+            for batch in pq.ParquetFile(path).iter_batches(batch_size=100_000, columns=["product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset"]):
+                for row in batch.to_pylist(): copy.write_row(tuple(row[name] for name in ("product_code","exchange","bar_time","open","high","low","close","volume","adjustment_offset")))
 
     @staticmethod
     def _stage(cursor: Any, bundle: PyramidBundle) -> None:

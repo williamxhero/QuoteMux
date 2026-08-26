@@ -14,6 +14,7 @@ DDL = (
 
 def apply_futures_partial_migration(connection_factory: Callable[[], Any] = _acquire_connection) -> None:
     connection = connection_factory()
+    owns_connection = connection_factory is _acquire_connection
     try:
         with connection.cursor() as cursor:
             cursor.execute("set local lock_timeout = '3s'")
@@ -21,7 +22,9 @@ def apply_futures_partial_migration(connection_factory: Callable[[], Any] = _acq
         connection.commit()
     except Exception:
         connection.rollback(); raise
-    finally: _release_connection(connection)
+    finally:
+        if owns_connection:
+            _release_connection(connection)
 
 
 def provision_futures_partial_roles(
@@ -34,7 +37,12 @@ def provision_futures_partial_roles(
     """
     if not publisher_password or not reader_password:
         raise ValueError("publisher and reader secrets are required")
+    # Roles reference the metadata tables, so DDL is deliberately applied
+    # first. A caller-supplied privileged connection is never returned to the
+    # QuoteMux read/write pool.
+    apply_futures_partial_migration(connection_factory)
     connection = connection_factory()
+    owns_connection = connection_factory is _acquire_connection
     try:
         with connection.cursor() as cursor:
             cursor.execute("do $$ begin if not exists (select 1 from pg_roles where rolname='quotemux_futures_owner') then create role quotemux_futures_owner nologin; end if; if not exists (select 1 from pg_roles where rolname='quotemux_futures_partial_publisher') then create role quotemux_futures_partial_publisher login; end if; if not exists (select 1 from pg_roles where rolname='quotemux_public_reader') then create role quotemux_public_reader login; end if; end $$")
@@ -48,4 +56,6 @@ def provision_futures_partial_roles(
         connection.commit()
     except Exception:
         connection.rollback(); raise
-    finally: _release_connection(connection)
+    finally:
+        if owns_connection:
+            _release_connection(connection)
