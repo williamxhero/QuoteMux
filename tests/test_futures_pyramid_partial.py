@@ -6,9 +6,17 @@ import json
 import pytest
 
 from quotemux.infra.db.read_client import QueryBatch
-from quotemux.public_reader import FuturesPartialPublicationQueryError, QuoteMuxPublicReader
+from quotemux.public_reader import (
+    FuturesPartialPublicationQueryError,
+    FuturesPartialPublicationStaleError,
+    QuoteMuxPublicReader,
+)
 from quotemux.store.futures_partial_publication import canonical_identity, validate_identity
-from quotemux.store.futures_pyramid_import import FACT_TRANSFORM_VERSION, FuturesPyramidImportError, load_pyramid_bundle
+from quotemux.store.futures_pyramid_import import (
+    FACT_TRANSFORM_VERSION,
+    FuturesPyramidImportError,
+    load_pyramid_bundle,
+)
 
 
 def _artifact(product: str = "T") -> tuple[bytes, dict[str, object]]:
@@ -63,6 +71,67 @@ def test_partial_reader_binds_generation_and_rejects_tl() -> None:
     reader = QuoteMuxPublicReader(client=Client())
     with pytest.raises(FuturesPartialPublicationQueryError, match="TL"):
         reader.read_futures_1m_partial_page("TL", "2026-07-14 09:01:00", "2026-07-14 15:00:00", qmp_id=qmp, qmc_id=qmc, qmg_id=qmg)
+
+
+def test_partial_bars_page_limits_admitted_keys_before_boundary_aggregation() -> None:
+    """The page boundary is admitted fact keys, not boundary join rows."""
+    from quotemux import public_reader
+
+    query = public_reader._FUTURES_PARTIAL_BARS_QUERY
+    page_start = query.index("page_rows as materialized")
+    output_start = query.index("from page_rows bars")
+    assert "pyramid_conflicts" in query and "existing_conflict" in query
+    assert "('TA'" in query  # legacy invalid Apex keys remain excluded by the shared relation
+    assert query.index("order by bars.bar_time, bars.product_code", page_start) < query.index("limit %s", page_start) < output_start
+    assert query.count("and exists (") >= 2
+    assert "from page_rows bars" in query
+
+
+def test_partial_bars_page_cursor_never_repeats_or_skips_admitted_rows() -> None:
+    qmg_payload = {"dataset_id": "future_1m_partial_s000012_quotemux", "series_type": "apex_l0_adjusted", "generation": 1, "row_count": 3, "first_bar_time": "2020-01-01 09:01:00", "last_bar_time": "2020-01-01 09:02:00"}
+    qmg = canonical_identity("qmg", qmg_payload)
+    publication = {"dataset_id": "future_1m_partial_s000012_quotemux", "qmg_id": qmg, "qmi_id": "qmi-v1-" + "1" * 64}
+    qmp = canonical_identity("qmp", publication)
+    revision = {"dataset_id": "future_1m_partial_s000012_quotemux", "qmp_id": qmp, "qmg_id": qmg}
+    qmc = canonical_identity("qmc", revision)
+    encoded = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    # These are the exact public rows after the fixture's legacy/conflict rows
+    # have been excluded by the admitted-key CTE.  AP has two source-boundary
+    # evidence ids at 09:01, exercising aggregation after, not before, paging.
+    admitted = (
+        ("AP", "CZCE", "back_adjusted_continuous", "2020-01-01 09:01:00", 1.0, 2.0, 0.5, 1.5, 9.0, None, 0.0, ("b-ap-1", "b-ap-2"), ("apex_l0_import",)),
+        ("ag", "SHFE", "back_adjusted_continuous", "2020-01-01 09:01:00", 3.0, 4.0, 2.5, 3.5, 8.0, None, 0.0, ("b-ag-1",), ("pyramid_back_adjusted_20260714",)),
+        ("AP", "CZCE", "back_adjusted_continuous", "2020-01-01 09:02:00", 5.0, 6.0, 4.5, 5.5, 7.0, None, 0.0, ("b-ap-3",), ("shinny_edb_derived_back_adjusted_20260811",)),
+    )
+
+    class Client:
+        def __init__(self): self.bar_params = []
+        def query_batch(self, _query, params=(), *, stage="sql"):
+            if stage == "futures_partial_identity":
+                return QueryBatch(("identity",), ((publication, encoded(publication), revision, encoded(revision), 1, 3, "2020-01-01 09:01:00", "2020-01-01 09:02:00"),))
+            self.bar_params.append(params)
+            return QueryBatch(("product_code",), admitted if params[5] is None else admitted[2:])
+
+    client = Client(); reader = QuoteMuxPublicReader(client=client)
+    first, cursor = reader.read_futures_1m_partial_page(("AP", "ag"), "2020-01-01 09:01:00", "2020-01-01 09:02:00", qmp_id=qmp, qmc_id=qmc, qmg_id=qmg, limit=2)
+    second, terminal = reader.read_futures_1m_partial_page(("AP", "ag"), "2020-01-01 09:01:00", "2020-01-01 09:02:00", qmp_id=qmp, qmc_id=qmc, qmg_id=qmg, cursor=cursor, limit=2)
+    assert first.rows + second.rows == admitted
+    assert terminal is None
+    assert len({(row[3], row[0]) for row in first.rows + second.rows}) == 3
+    assert len(client.bar_params[0]) == 14
+    assert client.bar_params[0][2:12] == (["AP", "ag"], "2020-01-01 09:01:00", "2020-01-01 09:02:00", None, None, None, qmp, qmc, qmp, 3)
+    assert client.bar_params[1][5:8] == ("2020-01-01 09:01:00", "2020-01-01 09:01:00", "ag")
+
+
+def test_partial_bars_page_rejects_identity_drift_before_the_page_query() -> None:
+    qmg = canonical_identity("qmg", {"dataset_id": "future_1m_partial_s000012_quotemux", "series_type": "apex_l0_adjusted", "generation": 1, "row_count": 1, "first_bar_time": "2020-01-01 09:01:00", "last_bar_time": "2020-01-01 09:01:00"})
+    qmp = canonical_identity("qmp", {"expected": "publication"}); qmc = canonical_identity("qmc", {"expected": "revision"})
+    class Client:
+        def query_batch(self, _query, _params=(), *, stage="sql"):
+            assert stage == "futures_partial_identity"
+            return QueryBatch(("identity",), (({"different": "publication"}, "", {"different": "revision"}, "", 1, 1, "2020-01-01 09:01:00", "2020-01-01 09:01:00"),))
+    with pytest.raises(FuturesPartialPublicationStaleError, match="stale"):
+        QuoteMuxPublicReader(client=Client()).read_futures_1m_partial_page("AP", "2020-01-01 09:01:00", "2020-01-01 09:01:00", qmp_id=qmp, qmc_id=qmc, qmg_id=qmg)
 
 
 def test_partial_metadata_requires_verified_identity_and_exposes_skip_contract() -> None:

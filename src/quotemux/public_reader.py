@@ -192,12 +192,46 @@ _FUTURES_SERIES_STATE_QUERY = """
 _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
     qmi_expression="select publication.payload_json->>'qmi_id' from audit.future_bar_1m_partial_publication publication where publication.qmp_id=%s"
 ) + """
+    , page_rows as materialized (
+        -- Select complete, admitted fact keys before collecting publication
+        -- evidence.  The former shape aggregated every admitted historical
+        -- row before LIMIT could apply; this is deliberately the keyset
+        -- boundary for the public page.
+        select bars.*
+        from admitted_rows bars
+        where bars.product_code = any(%s::text[])
+          and bars.bar_time >= %s::timestamp and bars.bar_time <= %s::timestamp
+          and (%s::timestamp is null or (bars.bar_time, bars.product_code) > (%s::timestamp, %s::text))
+          and exists (
+              select 1
+              from audit.future_bar_1m_partial_source_boundary boundary
+              where boundary.qmp_id = %s
+                and boundary.product_code = bars.product_code
+                and boundary.exchange = bars.exchange
+                and boundary.series_type = bars.series_type
+                and boundary.source_key = bars.source_key
+                and bars.bar_time between boundary.start_time and boundary.end_time
+          )
+          and exists (
+              select 1
+              from audit.future_bar_1m_partial_revision revision
+              join audit.future_bar_1m_partial_revision_interval interval_row
+                on interval_row.qmc_id = revision.qmc_id
+               and interval_row.product_code = bars.product_code
+               and interval_row.status = 'accepted'
+               and bars.bar_time between interval_row.start_time and interval_row.end_time
+              where revision.qmc_id = %s
+                and revision.qmp_id = %s
+          )
+        order by bars.bar_time, bars.product_code
+        limit %s
+    )
     select bars.product_code, bars.exchange, 'back_adjusted_continuous' as series_type,
            bars.bar_time::text as bar_time, bars.open, bars.high, bars.low, bars.close,
            bars.volume, bars.open_interest, bars.adjustment_offset,
            array_agg(distinct boundary.boundary_id order by boundary.boundary_id) as boundary_ids,
            array_agg(distinct bars.source_key order by bars.source_key) as source_keys
-    from admitted_rows bars
+    from page_rows bars
     join audit.future_bar_1m_partial_source_boundary boundary
       on boundary.qmp_id = %s and boundary.product_code = bars.product_code
      and boundary.exchange = bars.exchange and boundary.series_type = bars.series_type
@@ -206,13 +240,9 @@ _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
     join audit.future_bar_1m_partial_revision_interval interval_row
       on interval_row.qmc_id = revision.qmc_id and interval_row.product_code = bars.product_code
      and interval_row.status = 'accepted' and bars.bar_time between interval_row.start_time and interval_row.end_time
-    where bars.product_code = any(%s::text[])
-      and bars.bar_time >= %s::timestamp and bars.bar_time <= %s::timestamp
-      and (%s::timestamp is null or (bars.bar_time, bars.product_code) > (%s::timestamp, %s::text))
     group by bars.product_code, bars.exchange, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
              bars.volume, bars.open_interest, bars.adjustment_offset
     order by bars.bar_time, bars.product_code
-    limit %s
 """
 
 _FUTURES_PARTIAL_COVERAGE_QUERY = """
@@ -555,7 +585,17 @@ class QuoteMuxPublicReader:
             prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
             prior_time = prior.get("bar_time") if prior else None
             prior_code = prior.get("product_code") if prior else None
-            batch = snapshot.query_batch(_FUTURES_PARTIAL_BARS_QUERY, (qmp_id, qmp_id, qmp_id, qmc_id, normalized_codes, start, end, prior_time, prior_time, prior_code, limit + 1), stage="futures_partial_1m")
+            batch = snapshot.query_batch(
+                _FUTURES_PARTIAL_BARS_QUERY,
+                (
+                    qmp_id, qmp_id,
+                    normalized_codes, start, end, prior_time, prior_time, prior_code,
+                    qmp_id, qmc_id, qmp_id,
+                    limit + 1,
+                    qmp_id, qmc_id,
+                ),
+                stage="futures_partial_1m",
+            )
         rows = batch.rows[:limit]
         output = QueryBatch(batch.columns, rows)
         next_cursor = None
