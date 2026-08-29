@@ -139,13 +139,22 @@ def _runtime_project_root() -> Path:
 
 
 def _runtime_requirements_hash() -> str:
-    pyproject_path = _runtime_project_root() / "pyproject.toml"
+    runtime_root = _runtime_project_root()
+    pyproject_path = runtime_root / "pyproject.toml"
     if not pyproject_path.is_file():
         return ""
-    # Releases live under timestamped directories.  The absolute checkout path is
-    # not a dependency contract, and including it would rebuild every isolated
-    # provider environment after every otherwise-compatible deployment.
-    return hashlib.sha256(pyproject_path.read_bytes()).hexdigest()
+    # Releases live under timestamped directories.  Hash relative runtime source
+    # content, not the absolute checkout path: compatible releases reuse the
+    # environment, while a QuoteMux code change rebuilds it before providers run.
+    digest = hashlib.sha256()
+    paths = [pyproject_path]
+    source_root = runtime_root / "src"
+    if source_root.is_dir():
+        paths.extend(path for path in source_root.rglob("*.py") if "__pycache__" not in path.parts)
+    for path in sorted(paths, key=lambda item: str(item.relative_to(runtime_root))):
+        digest.update(str(path.relative_to(runtime_root)).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _venv_python_executable(venv_path: Path) -> Path:

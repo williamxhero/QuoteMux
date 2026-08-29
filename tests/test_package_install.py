@@ -128,6 +128,20 @@ def test_runtime_requirements_hash_is_stable_across_release_directories(monkeypa
     assert _runtime_requirements_hash() == first_hash
 
 
+def test_runtime_requirements_hash_changes_when_runtime_source_changes(monkeypatch, tmp_path: Path) -> None:
+    runtime_root = tmp_path / "release"
+    source_path = runtime_root / "src" / "quotemux" / "runtime.py"
+    source_path.parent.mkdir(parents=True)
+    (runtime_root / "pyproject.toml").write_text("[project]\nname = 'quotemux'\n", encoding="utf-8")
+    source_path.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr("quotemux.source_packages.environment._runtime_project_root", lambda: runtime_root)
+
+    first_hash = _runtime_requirements_hash()
+    source_path.write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert _runtime_requirements_hash() != first_hash
+
+
 def test_environment_is_not_ready_for_legacy_marker_without_source_hash(tmp_path: Path) -> None:
     marker_path = tmp_path / ".quotemux-installed.json"
     marker_path.write_text(
