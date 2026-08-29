@@ -191,4 +191,5 @@ def test_local_project_install_builds_from_temporary_copy(monkeypatch, tmp_path:
     _install_local_project_copy("python", source_root)
 
     assert commands[0][0:4] == ["python", "-m", "pip", "install"]
+    assert "--no-deps" in commands[0]
     assert (source_root / "source_project.egg-info").is_dir()

@@ -237,7 +237,11 @@ def _install_local_project_copy(python_executable: str, source_root: Path) -> No
             ignore=shutil.ignore_patterns(".git", ".venv", "build", "*.egg-info", "__pycache__"),
         )
         command = [python_executable, "-m", "pip", "install"]
-        command.extend(["--upgrade", "--force-reinstall", "--no-cache-dir", str(build_root)])
+        # The isolated venv inherits the deployment venv's verified core
+        # dependencies.  Reinstall only the local runtime code; resolving
+        # dependencies again can turn an atomic release into an hours-long
+        # network operation even when its marker already proved compatibility.
+        command.extend(["--upgrade", "--force-reinstall", "--no-deps", str(build_root)])
         subprocess.run(command, check=True)
 
 
