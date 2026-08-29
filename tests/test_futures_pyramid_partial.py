@@ -87,6 +87,50 @@ def test_partial_bars_page_limits_admitted_keys_before_boundary_aggregation() ->
     assert "from page_rows bars" in query
 
 
+def test_single_product_partial_bars_page_uses_exact_coverage_horizon() -> None:
+    """A single-product page bounds the expensive fact query to its next page."""
+    qmg_payload = {"dataset_id": "future_1m_partial_s000012_quotemux", "series_type": "apex_l0_adjusted", "generation": 1, "row_count": 3, "first_bar_time": "2020-01-01 09:01:00", "last_bar_time": "2020-01-01 09:03:00"}
+    qmg = canonical_identity("qmg", qmg_payload)
+    publication = {"dataset_id": "future_1m_partial_s000012_quotemux", "qmg_id": qmg, "qmi_id": "qmi-v1-" + "1" * 64}
+    qmp = canonical_identity("qmp", publication)
+    revision = {"dataset_id": "future_1m_partial_s000012_quotemux", "qmp_id": qmp, "qmg_id": qmg}
+    qmc = canonical_identity("qmc", revision)
+    encoded = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    admitted = tuple(
+        ("AP", "CZCE", "back_adjusted_continuous", f"2020-01-01 09:0{minute}:00", 1.0, 2.0, 0.5, 1.5, 9.0, None, 0.0, (f"b-ap-{minute}",), ("apex_l0_import",))
+        for minute in range(1, 4)
+    )
+
+    class Client:
+        def __init__(self): self.calls = []
+        def query_batch(self, _query, params=(), *, stage="sql"):
+            self.calls.append((stage, params))
+            if stage == "futures_partial_identity":
+                return QueryBatch(("identity",), ((publication, encoded(publication), revision, encoded(revision), 1, 3, "2020-01-01 09:01:00", "2020-01-01 09:03:00"),))
+            if stage == "futures_partial_horizon":
+                return QueryBatch(("page_end_time",), (("2020-01-01 09:03:00",),))
+            return QueryBatch(("product_code",), admitted)
+
+    client = Client()
+    page, cursor = QuoteMuxPublicReader(client=client).read_futures_1m_partial_page(
+        "AP", "2020-01-01 09:01:00", "2020-01-01 09:10:00",
+        qmp_id=qmp, qmc_id=qmc, qmg_id=qmg, limit=2,
+    )
+
+    assert [stage for stage, _ in client.calls] == [
+        "futures_partial_identity", "futures_partial_horizon", "futures_partial_1m",
+    ]
+    assert client.calls[1][1] == (
+        "2020-01-01 09:01:00", "2020-01-01 09:10:00", qmc, "AP",
+        "2020-01-01 09:01:00", "2020-01-01 09:10:00", 3, 3,
+    )
+    assert client.calls[2][1][2:5] == (
+        ["AP"], "2020-01-01 09:01:00", "2020-01-01 09:03:00",
+    )
+    assert page.rows == admitted[:2]
+    assert cursor is not None
+
+
 def test_partial_bars_page_cursor_never_repeats_or_skips_admitted_rows() -> None:
     qmg_payload = {"dataset_id": "future_1m_partial_s000012_quotemux", "series_type": "apex_l0_adjusted", "generation": 1, "row_count": 3, "first_bar_time": "2020-01-01 09:01:00", "last_bar_time": "2020-01-01 09:02:00"}
     qmg = canonical_identity("qmg", qmg_payload)

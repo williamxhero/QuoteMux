@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import base64
 import hashlib
 import json
@@ -243,6 +243,43 @@ _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
     group by bars.product_code, bars.exchange, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
              bars.volume, bars.open_interest, bars.adjustment_offset
     order by bars.bar_time, bars.product_code
+"""
+
+_FUTURES_PARTIAL_PAGE_HORIZON_QUERY = """
+    with clipped_intervals as (
+        select greatest(interval_row.start_time, %s::timestamp) as start_time,
+               least(interval_row.end_time, %s::timestamp) as end_time,
+               interval_row.interval_id
+        from audit.future_bar_1m_partial_revision_interval interval_row
+        where interval_row.qmc_id = %s
+          and interval_row.product_code = %s
+          and interval_row.status = 'accepted'
+          and interval_row.end_time >= %s::timestamp
+          and interval_row.start_time <= %s::timestamp
+    ), counted_intervals as (
+        select start_time, end_time, interval_id,
+               ((extract(epoch from end_time - start_time) / 60)::bigint + 1)
+                   as observed_count
+        from clipped_intervals
+        where start_time <= end_time
+    ), running_intervals as (
+        select *, sum(observed_count) over (
+            order by start_time, end_time, interval_id
+        ) as cumulative_count
+        from counted_intervals
+    )
+    select coalesce(
+        (
+            select start_time
+                   + (%s::bigint - (cumulative_count - observed_count) - 1)
+                     * interval '1 minute'
+            from running_intervals
+            where cumulative_count >= %s::bigint
+            order by cumulative_count
+            limit 1
+        ),
+        (select max(end_time) from counted_intervals)
+    )::text as page_end_time
 """
 
 _FUTURES_PARTIAL_COVERAGE_QUERY = """
@@ -585,11 +622,30 @@ class QuoteMuxPublicReader:
             prior = _partial_cursor_decode(cursor, "partial-bars", query_hash)
             prior_time = prior.get("bar_time") if prior else None
             prior_code = prior.get("product_code") if prior else None
+            page_start = (
+                datetime.fromisoformat(str(prior_time)) + timedelta(minutes=1)
+                if prior_time is not None and len(normalized_codes) == 1
+                else start
+            )
+            page_end = end
+            if len(normalized_codes) == 1:
+                horizon = snapshot.query_batch(
+                    _FUTURES_PARTIAL_PAGE_HORIZON_QUERY,
+                    (
+                        page_start, end, qmc_id, normalized_codes[0], page_start, end,
+                        limit + 1, limit + 1,
+                    ),
+                    stage="futures_partial_horizon",
+                )
+                if horizon.rows and horizon.rows[0][0] is not None:
+                    page_end = horizon.rows[0][0]
+                else:
+                    page_end = page_start
             batch = snapshot.query_batch(
                 _FUTURES_PARTIAL_BARS_QUERY,
                 (
                     qmp_id, qmp_id,
-                    normalized_codes, start, end, prior_time, prior_time, prior_code,
+                    normalized_codes, page_start, page_end, prior_time, prior_time, prior_code,
                     qmp_id, qmc_id, qmp_id,
                     limit + 1,
                     qmp_id, qmc_id,
