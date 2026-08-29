@@ -125,21 +125,6 @@ FUTURE_SCHEMA_SQL = (
     )
     """,
     """
-    insert into fact.future_bar_1m_coverage (
-        product_code, exchange, series_type, row_count, first_bar_time, last_bar_time, updated_at
-    )
-    select bars.product_code, bars.exchange, bars.series_type, count(*),
-           min(bars.bar_time), max(bars.bar_time), now()
-    from fact.future_bar_1m bars
-    where not exists (select 1 from fact.future_bar_1m_coverage)
-    group by bars.product_code, bars.exchange, bars.series_type
-    on conflict (product_code, exchange, series_type) do update set
-        row_count = excluded.row_count,
-        first_bar_time = excluded.first_bar_time,
-        last_bar_time = excluded.last_bar_time,
-        updated_at = now()
-    """,
-    """
     create or replace function fact.refresh_future_bar_1m_coverage_group(
         target_product_code text,
         target_exchange text,
@@ -497,6 +482,54 @@ def ensure_future_schema() -> None:
             if not execute_sql(statement):
                 raise RuntimeError("无法创建期货 1m 事实表")
         _FUTURE_SCHEMA_READY = True
+
+
+def resume_future_1m_coverage_backfill(max_groups: int = 8) -> dict[str, object]:
+    """Backfill missing coverage rows in bounded, restartable product groups.
+
+    Coverage rows are the checkpoint: a later invocation selects only groups
+    still missing from ``ref.future_series``.  This deliberately never runs as
+    part of schema initialization or a capture request, where an historical
+    aggregate would block a scheduled update indefinitely.
+    """
+    if isinstance(max_groups, bool) or not isinstance(max_groups, int) or max_groups < 1:
+        raise ValueError("max_groups must be a positive integer")
+    ensure_future_schema()
+    missing = query_dataframe(
+        """
+        select series.product_code, series.exchange, series.series_type
+        from ref.future_series series
+        left join fact.future_bar_1m_coverage coverage
+          on coverage.product_code = series.product_code
+         and coverage.exchange = series.exchange
+         and coverage.series_type = series.series_type
+        where coverage.product_code is null
+        order by series.series_type, series.exchange, series.product_code
+        limit %s
+        """,
+        (max_groups,),
+    )
+    completed: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+    for row in missing.to_dict("records"):
+        product_code = str(row["product_code"])
+        exchange = str(row["exchange"])
+        series_type = str(row["series_type"])
+        if execute_sql(
+            "select fact.refresh_future_bar_1m_coverage_group(%s, %s, %s)",
+            (product_code, exchange, series_type),
+        ):
+            completed.append({"product_code": product_code, "exchange": exchange, "series_type": series_type})
+        else:
+            failed.append({"product_code": product_code, "exchange": exchange, "series_type": series_type})
+    return {
+        "status": "failed" if failed else "success",
+        "checkpoint": "fact.future_bar_1m_coverage",
+        "max_groups": max_groups,
+        "completed_groups": completed,
+        "failed_groups": failed,
+        "resume": "invoke again; completed coverage rows are skipped",
+    }
 
 
 def normalize_product_codes(codes: str | Iterable[str]) -> tuple[str, ...]:

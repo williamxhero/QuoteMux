@@ -159,14 +159,13 @@ def test_futures_coverage_reads_maintained_summary_without_fact_aggregate(monkey
     assert captured["params"] == ("main_continuous", "main_continuous")
 
 
-def test_futures_coverage_schema_has_one_time_backfill_and_write_maintenance() -> None:
+def test_futures_coverage_schema_avoids_historical_backfill_and_keeps_write_maintenance() -> None:
     schema = "\n".join(futures.FUTURE_SCHEMA_SQL).lower()
     from quotemux.store import futures_partial_migration as migration
     hardened = "\n".join((*migration.HARDENED_FUNCTION_DDL, *migration.TRIGGER_DDL)).lower()
 
     assert "create table if not exists fact.future_bar_1m_coverage" in schema
-    assert "where not exists (select 1 from fact.future_bar_1m_coverage)" in schema
-    assert "group by bars.product_code, bars.exchange, bars.series_type" in schema
+    assert "where not exists (select 1 from fact.future_bar_1m_coverage)" not in schema
     assert "after insert on fact.future_bar_1m" not in schema
     assert "after insert on fact.future_bar_1m" in hardened
     assert "referencing new table as inserted_rows" in hardened
@@ -195,6 +194,32 @@ def test_future_schema_keeps_catalog_ddl_in_its_own_executor_unit() -> None:
 
     assert catalog_statement.lstrip().startswith("create table if not exists ref.future_contract_catalog_snapshot")
     assert "future_bar_1m_series_generation_after_update" not in catalog_statement
+def test_futures_coverage_backfill_is_bounded_and_uses_coverage_as_checkpoint(monkeypatch) -> None:
+    monkeypatch.setattr(futures, "ensure_future_schema", lambda: None)
+    monkeypatch.setattr(
+        futures,
+        "query_dataframe",
+        lambda _query, params: pd.DataFrame([
+            {"product_code": "IF", "exchange": "CFFEX", "series_type": "main_continuous"},
+            {"product_code": "rb", "exchange": "SHFE", "series_type": "main_continuous"},
+        ]),
+    )
+    writes: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(futures, "execute_sql", lambda query, params: writes.append((query, params)) or True)
+
+    result = futures.resume_future_1m_coverage_backfill(2)
+
+    assert result["status"] == "success"
+    assert result["checkpoint"] == "fact.future_bar_1m_coverage"
+    assert result["resume"] == "invoke again; completed coverage rows are skipped"
+    assert len(result["completed_groups"]) == 2
+    assert all("refresh_future_bar_1m_coverage_group" in query for query, _params in writes)
+    assert [params for _query, params in writes] == [("IF", "CFFEX", "main_continuous"), ("rb", "SHFE", "main_continuous")]
+
+
+def test_futures_coverage_backfill_rejects_unbounded_batch_size() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        futures.resume_future_1m_coverage_backfill(0)
 
 
 def test_future_schema_initializes_once_across_concurrent_callers(monkeypatch) -> None:
