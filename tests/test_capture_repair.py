@@ -235,6 +235,35 @@ def test_explicit_repair_bypasses_disabled_scheduler_but_not_cache_write_gate(mo
     assert result["detail_json"]["reason"] == "cache_policy_disabled"
 
 
+def test_daily_quote_repair_uses_the_formal_capture_path(monkeypatch) -> None:
+    job = QuoteMuxCaptureJob(
+        runtime=object(),
+        policies=_Policies(_policy("stocks.quotes.daily")),
+        runs=_Runs(),
+        locks=_Locks(),
+        cache_store=_Cache(),
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        job,
+        "_run_capture_requests",
+        lambda policy, requests, detail, *_args, **_kwargs: captured.update(
+            policy=policy, requests=requests, detail=detail
+        ) or {"status": CAPTURE_SUCCESS, "detail_json": detail},
+    )
+
+    result = job.run_repair(
+        "stocks.quotes.daily",
+        {"codes": ["000635"], "freq": "1d", "start_date": "2026-08-28", "end_date": "2026-08-28"},
+        "mhd-v1-repair-baseline",
+    )
+
+    assert result["status"] == CAPTURE_SUCCESS
+    assert captured["requests"][0].capability_id == "stocks.quotes.daily"
+    assert captured["requests"][0].request_identity["codes"] == ["000635"]
+    assert captured["detail"]["mode"] == "repair"
+
+
 def test_repair_without_executable_path_skips_closed_even_if_scheduler_is_disabled() -> None:
     job = QuoteMuxCaptureJob(
         runtime=object(),

@@ -2729,6 +2729,7 @@ class QuoteMuxCaptureJob:
             return self._back_adjusted_repair_evidence is not None and self._dataset_version_guard is not None
         return capability_id in {
             "futures.quotes.main_continuous.1m",
+            "stocks.quotes.daily",
             "stocks.quotes.intraday",
             "indexes.members",
             "concepts.quotes.daily",
