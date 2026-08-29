@@ -211,15 +211,22 @@ def test_futures_coverage_backfill_is_bounded_and_uses_coverage_as_checkpoint(mo
 
     assert result["status"] == "success"
     assert result["checkpoint"] == "fact.future_bar_1m_coverage"
-    assert result["resume"] == "invoke again; completed coverage rows are skipped"
+    assert result["statement_timeout_seconds"] == 120
+    assert result["resume"] == "invoke again; completed coverage rows are skipped; timed-out groups remain pending"
     assert len(result["completed_groups"]) == 2
+    assert all("set_config('statement_timeout'" in query for query, _params in writes)
     assert all("refresh_future_bar_1m_coverage_group" in query for query, _params in writes)
-    assert [params for _query, params in writes] == [("IF", "CFFEX", "main_continuous"), ("rb", "SHFE", "main_continuous")]
+    assert [params for _query, params in writes] == [
+        ("120s", "IF", "CFFEX", "main_continuous"),
+        ("120s", "rb", "SHFE", "main_continuous"),
+    ]
 
 
 def test_futures_coverage_backfill_rejects_unbounded_batch_size() -> None:
     with pytest.raises(ValueError, match="positive integer"):
         futures.resume_future_1m_coverage_backfill(0)
+    with pytest.raises(ValueError, match="positive integer"):
+        futures.resume_future_1m_coverage_backfill(1, 0)
 
 
 def test_future_schema_initializes_once_across_concurrent_callers(monkeypatch) -> None:

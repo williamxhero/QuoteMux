@@ -484,7 +484,10 @@ def ensure_future_schema() -> None:
         _FUTURE_SCHEMA_READY = True
 
 
-def resume_future_1m_coverage_backfill(max_groups: int = 8) -> dict[str, object]:
+def resume_future_1m_coverage_backfill(
+    max_groups: int = 8,
+    statement_timeout_seconds: int = 120,
+) -> dict[str, object]:
     """Backfill missing coverage rows in bounded, restartable product groups.
 
     Coverage rows are the checkpoint: a later invocation selects only groups
@@ -494,6 +497,12 @@ def resume_future_1m_coverage_backfill(max_groups: int = 8) -> dict[str, object]
     """
     if isinstance(max_groups, bool) or not isinstance(max_groups, int) or max_groups < 1:
         raise ValueError("max_groups must be a positive integer")
+    if (
+        isinstance(statement_timeout_seconds, bool)
+        or not isinstance(statement_timeout_seconds, int)
+        or statement_timeout_seconds < 1
+    ):
+        raise ValueError("statement_timeout_seconds must be a positive integer")
     ensure_future_schema()
     missing = query_dataframe(
         """
@@ -516,8 +525,14 @@ def resume_future_1m_coverage_backfill(max_groups: int = 8) -> dict[str, object]
         exchange = str(row["exchange"])
         series_type = str(row["series_type"])
         if execute_sql(
-            "select fact.refresh_future_bar_1m_coverage_group(%s, %s, %s)",
-            (product_code, exchange, series_type),
+            """
+            with statement_timeout as materialized (
+                select set_config('statement_timeout', %s, true)
+            )
+            select fact.refresh_future_bar_1m_coverage_group(%s, %s, %s)
+            from statement_timeout
+            """,
+            (f"{statement_timeout_seconds}s", product_code, exchange, series_type),
         ):
             completed.append({"product_code": product_code, "exchange": exchange, "series_type": series_type})
         else:
@@ -526,9 +541,10 @@ def resume_future_1m_coverage_backfill(max_groups: int = 8) -> dict[str, object]
         "status": "failed" if failed else "success",
         "checkpoint": "fact.future_bar_1m_coverage",
         "max_groups": max_groups,
+        "statement_timeout_seconds": statement_timeout_seconds,
         "completed_groups": completed,
         "failed_groups": failed,
-        "resume": "invoke again; completed coverage rows are skipped",
+        "resume": "invoke again; completed coverage rows are skipped; timed-out groups remain pending",
     }
 
 
