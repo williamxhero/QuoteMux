@@ -105,6 +105,13 @@ class MemoryCaptureRuns:
                 return True
         return False
 
+    def update_progress(self, run_id: int, detail_json: dict[str, object]) -> bool:
+        for index, run in enumerate(self.items):
+            if run.id == run_id and run.status == "running":
+                self.items[index] = replace(run, detail_json=detail_json)
+                return True
+        return False
+
     def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> CaptureRun:
         for index, run in enumerate(self.items):
             native = run.detail_json.get("publication", {})
@@ -411,6 +418,28 @@ def test_run_capture_success_status(monkeypatch) -> None:
     assert result["row_count"] == 2
     assert result["coverage_count"] == 1
     assert len(runtime.stocks.calls) == 1
+
+
+def test_concept_member_capture_is_bounded_and_resumes_from_checkpoint(monkeypatch) -> None:
+    policy = _policy(capability_id="concepts.members", scope_profile=PROFILE_CONCEPTS_RECENT_TRADING_DAYS, batch_size=2)
+    requests = tuple(
+        capture.CaptureRequest("concepts.members", {"concept_id": f"C{index}", "trade_date": "2026-04-27"})
+        for index in range(5)
+    )
+    monkeypatch.setattr(capture, "build_capture_requests", lambda *_args: requests)
+    runtime = FakeRuntime()
+    runs = MemoryCaptureRuns()
+    job = _job(policy, runtime=runtime, runs=runs)
+    monkeypatch.setattr(job, "_run_capture_batch", lambda _request: capture._CaptureBatchResult((), 1, row_count_override=1))
+
+    first = job.run_capture("concepts.members")
+    second = job.run_capture("concepts.members")
+    third = job.run_capture("concepts.members")
+
+    assert [item["status"] for item in (first, second, third)] == [CAPTURE_PARTIAL, CAPTURE_PARTIAL, CAPTURE_SUCCESS]
+    assert [item["detail_json"]["request_start_index"] for item in (first, second, third)] == [0, 2, 4]
+    assert first["detail_json"]["request_next_index"] == 2
+    assert runs.items[0].detail_json["completed_request_count"] == 2
 
 
 def test_catalog_repair_run_persists_its_own_publication_without_rewriting_history(monkeypatch) -> None:

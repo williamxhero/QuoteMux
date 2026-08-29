@@ -793,6 +793,19 @@ class CaptureRunRepository:
             (status, row_count, coverage_count, error_message, Jsonb(detail_json), run_id),
         )
 
+    def update_progress(self, run_id: int, detail_json: dict[str, object]) -> bool:
+        """Persist an in-flight checkpoint without changing the terminal status."""
+        if not _ensure_capture_schema():
+            return False
+        return execute_sql(
+            """
+            update capability_capture_runs
+            set detail_json = %s
+            where id = %s and status = 'running'
+            """,
+            (Jsonb(detail_json), run_id),
+        )
+
     def finalize_catalog_repair_publication(self, run_id: int, publication: dict[str, object]) -> CaptureRun:
         """Atomically attach MarketHub's finalized dataset evidence to one repair run."""
         if not _ensure_capture_schema():
@@ -2338,10 +2351,39 @@ class QuoteMuxCaptureJob:
         if acquired_lock is None and not lock.acquire():
             run = self._create_finished_run(policy, actual_planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "advisory_lock_busy"})
             return self._run_to_dict(run)
-        run = self._runs.create(policy.capability_id, CAPTURE_RUNNING, actual_planned_time, {"phase": "预处理", **run_detail})
+        run: CaptureRun | None = None
         try:
-            actual_requests = build_capture_requests(policy, _policy_local_now(policy, self._now_provider())) if requests is None else tuple(requests)
-            result = self._execute_requests(policy, actual_requests)
+            all_requests = build_capture_requests(policy, _policy_local_now(policy, self._now_provider())) if requests is None else tuple(requests)
+            actual_requests, checkpoint = self._request_checkpoint_window(policy, actual_planned_time, all_requests)
+            starting_detail = {"phase": "执行中", **run_detail, **checkpoint}
+            run = self._runs.create(policy.capability_id, CAPTURE_RUNNING, actual_planned_time, starting_detail)
+            update_progress = getattr(self._runs, "update_progress", None)
+
+            def persist_progress(completed: int, row_count: int, coverage_count: int, partial_count: int, failed_count: int) -> None:
+                if not callable(update_progress):
+                    return
+                update_progress(
+                    run.id,
+                    {
+                        **starting_detail,
+                        "completed_request_count": completed,
+                        "row_count_so_far": row_count,
+                        "coverage_count_so_far": coverage_count,
+                        "partial_batch_count_so_far": partial_count,
+                        "failed_batch_count_so_far": failed_count,
+                    },
+                )
+
+            result = self._execute_requests(policy, actual_requests, persist_progress)
+            if checkpoint.get("request_next_index", 0) < checkpoint.get("request_total", 0) and result.failed_batches == ():
+                next_index = int(checkpoint["request_next_index"])
+                result = CaptureExecutionResult(
+                    result.row_count,
+                    result.coverage_count,
+                    (*result.partial_batches, {"checkpoint": "pending", "next_request_index": next_index, "request_total": checkpoint["request_total"]}),
+                    result.failed_batches,
+                    result.publication,
+                )
             if run_detail.get("mode") == "repair":
                 result = self._require_repair_write_result(result, actual_requests)
             status = self._execution_status(result)
@@ -2353,6 +2395,8 @@ class QuoteMuxCaptureJob:
             detail_json = {
                 "phase": "后处理",
                 **run_detail,
+                **checkpoint,
+                "completed_request_count": len(actual_requests),
                 "partial_batches": list(result.partial_batches),
                 "failed_batches": list(result.failed_batches),
             }
@@ -2367,6 +2411,8 @@ class QuoteMuxCaptureJob:
             prefix = "interrupted" if is_base else "exception"
             error_message = f"{prefix}({type(exc).__name__}): {exc}"[:1000]
             detail_json = {"phase": "后处理", "error": str(exc), "error_type": type(exc).__name__, "is_base_exception": is_base}
+            if run is None:
+                run = self._runs.create(policy.capability_id, CAPTURE_RUNNING, actual_planned_time, {"phase": "准备失败", **run_detail})
             self._runs.finish(run.id, CAPTURE_FAILED, 0, 0, error_message, detail_json)
             return self._run_to_dict(self._merge_finished_run(run, CAPTURE_FAILED, 0, 0, error_message, detail_json))
         finally:
@@ -2376,13 +2422,40 @@ class QuoteMuxCaptureJob:
         policy_now = _policy_local_now(policy, self._now_provider())
         return self._execute_requests(policy, build_capture_requests(policy, policy_now))
 
-    def _execute_requests(self, policy: CapturePolicy, requests: Sequence[CaptureRequest]) -> CaptureExecutionResult:
+    def _request_checkpoint_window(
+        self,
+        policy: CapturePolicy,
+        planned_time: datetime,
+        requests: Sequence[CaptureRequest],
+    ) -> tuple[tuple[CaptureRequest, ...], dict[str, int]]:
+        """Bound expensive concept-member refreshes and resume from their durable run checkpoint."""
+        all_requests = tuple(requests)
+        if policy.capability_id != "concepts.members":
+            return all_requests, {"request_total": len(all_requests), "request_start_index": 0, "request_next_index": len(all_requests)}
+        previous = self._runs.latest_for_planned_time(policy.capability_id, planned_time)
+        previous_detail = previous.detail_json if previous is not None and previous.status == CAPTURE_PARTIAL else {}
+        start_index = max(0, min(len(all_requests), int(previous_detail.get("request_next_index", 0) or 0)))
+        request_limit = max(1, policy.batch_size)
+        selected = all_requests[start_index:start_index + request_limit]
+        return selected, {
+            "request_total": len(all_requests),
+            "request_start_index": start_index,
+            "request_next_index": start_index + len(selected),
+            "request_limit": request_limit,
+        }
+
+    def _execute_requests(
+        self,
+        policy: CapturePolicy,
+        requests: Sequence[CaptureRequest],
+        on_progress: Callable[[int, int, int, int, int], None] | None = None,
+    ) -> CaptureExecutionResult:
         row_count = 0
         coverage_count = 0
         partial_batches: list[dict[str, object]] = []
         failed_batches: list[dict[str, object]] = []
         publication: dict[str, object] | None = None
-        for request in requests:
+        for completed, request in enumerate(requests, start=1):
             try:
                 batch_result = self._run_capture_batch(request)
                 row_count += batch_result.row_count_override if batch_result.row_count_override is not None else len(batch_result.items)
@@ -2399,6 +2472,8 @@ class QuoteMuxCaptureJob:
                     for code in request.request_identity.get("codes", []):
                         self._gaps.record_system_failure(request.capability_id, str(code), trade_date, str(exc))
                 failed_batches.append({"request_identity": request.request_identity, "error": str(exc)})
+            if on_progress is not None:
+                on_progress(completed, row_count, coverage_count, len(partial_batches), len(failed_batches))
         if policy.capability_id == "stocks.quotes.intraday" and requests != () and row_count == 0 and partial_batches == () and failed_batches == ():
             failed_batches.append({"request_identity": {}, "error": "股票 1m 分钟线本轮未获取到任何数据"})
         if policy.capability_id == "stocks.quotes.intraday" and row_count > 0 and coverage_count == 0:
