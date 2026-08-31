@@ -192,6 +192,19 @@ _FUTURES_SERIES_STATE_QUERY = """
 _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
     qmi_expression="select publication.payload_json->>'qmi_id' from audit.future_bar_1m_partial_publication publication where publication.qmp_id=%s"
 ) + """
+    , accepted_ranges as materialized (
+        select interval_row.product_code,
+               range_agg(tsrange(interval_row.start_time, interval_row.end_time, '[]'))
+                   as accepted_times
+        from audit.future_bar_1m_partial_revision revision
+        join audit.future_bar_1m_partial_revision_interval interval_row
+          on interval_row.qmc_id = revision.qmc_id
+        where revision.qmc_id = %s
+          and revision.qmp_id = %s
+          and interval_row.product_code = any(%s::text[])
+          and interval_row.status = 'accepted'
+        group by interval_row.product_code
+    )
     , page_rows as materialized (
         -- Select complete, admitted fact keys before collecting publication
         -- evidence.  The former shape aggregated every admitted historical
@@ -199,30 +212,12 @@ _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
         -- boundary for the public page.
         select bars.*
         from admitted_rows bars
+        join accepted_ranges accepted
+          on accepted.product_code = bars.product_code
+         and bars.bar_time <@ accepted.accepted_times
         where bars.product_code = any(%s::text[])
           and bars.bar_time >= %s::timestamp and bars.bar_time <= %s::timestamp
           and (%s::timestamp is null or (bars.bar_time, bars.product_code) > (%s::timestamp, %s::text))
-          and exists (
-              select 1
-              from audit.future_bar_1m_partial_source_boundary boundary
-              where boundary.qmp_id = %s
-                and boundary.product_code = bars.product_code
-                and boundary.exchange = bars.exchange
-                and boundary.series_type = bars.series_type
-                and boundary.source_key = bars.source_key
-                and bars.bar_time between boundary.start_time and boundary.end_time
-          )
-          and exists (
-              select 1
-              from audit.future_bar_1m_partial_revision revision
-              join audit.future_bar_1m_partial_revision_interval interval_row
-                on interval_row.qmc_id = revision.qmc_id
-               and interval_row.product_code = bars.product_code
-               and interval_row.status = 'accepted'
-               and bars.bar_time between interval_row.start_time and interval_row.end_time
-              where revision.qmc_id = %s
-                and revision.qmp_id = %s
-          )
         order by bars.bar_time, bars.product_code
         limit %s
     )
@@ -236,10 +231,6 @@ _FUTURES_PARTIAL_BARS_QUERY = admitted_rows_cte(
       on boundary.qmp_id = %s and boundary.product_code = bars.product_code
      and boundary.exchange = bars.exchange and boundary.series_type = bars.series_type
      and boundary.source_key = bars.source_key and bars.bar_time between boundary.start_time and boundary.end_time
-    join audit.future_bar_1m_partial_revision revision on revision.qmc_id = %s and revision.qmp_id = boundary.qmp_id
-    join audit.future_bar_1m_partial_revision_interval interval_row
-      on interval_row.qmc_id = revision.qmc_id and interval_row.product_code = bars.product_code
-     and interval_row.status = 'accepted' and bars.bar_time between interval_row.start_time and interval_row.end_time
     group by bars.product_code, bars.exchange, bars.bar_time, bars.open, bars.high, bars.low, bars.close,
              bars.volume, bars.open_interest, bars.adjustment_offset
     order by bars.bar_time, bars.product_code
@@ -645,10 +636,10 @@ class QuoteMuxPublicReader:
                 _FUTURES_PARTIAL_BARS_QUERY,
                 (
                     qmp_id, qmp_id,
+                    qmc_id, qmp_id, normalized_codes,
                     normalized_codes, page_start, page_end, prior_time, prior_time, prior_code,
-                    qmp_id, qmc_id, qmp_id,
                     limit + 1,
-                    qmp_id, qmc_id,
+                    qmp_id,
                 ),
                 stage="futures_partial_1m",
             )

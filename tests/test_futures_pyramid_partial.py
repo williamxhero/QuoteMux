@@ -83,7 +83,8 @@ def test_partial_bars_page_limits_admitted_keys_before_boundary_aggregation() ->
     assert "pyramid_conflicts" in query and "existing_conflict" in query
     assert "('TA'" in query  # legacy invalid Apex keys remain excluded by the shared relation
     assert query.index("order by bars.bar_time, bars.product_code", page_start) < query.index("limit %s", page_start) < output_start
-    assert query.count("and exists (") >= 2
+    assert "range_agg(tsrange" in query
+    assert query.count("future_bar_1m_partial_revision_interval") == 1
     assert "from page_rows bars" in query
 
 
@@ -124,7 +125,7 @@ def test_single_product_partial_bars_page_uses_exact_coverage_horizon() -> None:
         "2020-01-01 09:01:00", "2020-01-01 09:10:00", qmc, "AP",
         "2020-01-01 09:01:00", "2020-01-01 09:10:00", 3, 3,
     )
-    assert client.calls[2][1][2:5] == (
+    assert client.calls[2][1][5:8] == (
         ["AP"], "2020-01-01 09:01:00", "2020-01-01 09:03:00",
     )
     assert page.rows == admitted[:2]
@@ -154,7 +155,7 @@ def test_partial_bars_page_cursor_never_repeats_or_skips_admitted_rows() -> None
             if stage == "futures_partial_identity":
                 return QueryBatch(("identity",), ((publication, encoded(publication), revision, encoded(revision), 1, 3, "2020-01-01 09:01:00", "2020-01-01 09:02:00"),))
             self.bar_params.append(params)
-            return QueryBatch(("product_code",), admitted if params[5] is None else admitted[2:])
+            return QueryBatch(("product_code",), admitted if params[8] is None else admitted[2:])
 
     client = Client(); reader = QuoteMuxPublicReader(client=client)
     first, cursor = reader.read_futures_1m_partial_page(("AP", "ag"), "2020-01-01 09:01:00", "2020-01-01 09:02:00", qmp_id=qmp, qmc_id=qmc, qmg_id=qmg, limit=2)
@@ -162,9 +163,9 @@ def test_partial_bars_page_cursor_never_repeats_or_skips_admitted_rows() -> None
     assert first.rows + second.rows == admitted
     assert terminal is None
     assert len({(row[3], row[0]) for row in first.rows + second.rows}) == 3
-    assert len(client.bar_params[0]) == 14
-    assert client.bar_params[0][2:12] == (["AP", "ag"], "2020-01-01 09:01:00", "2020-01-01 09:02:00", None, None, None, qmp, qmc, qmp, 3)
-    assert client.bar_params[1][5:8] == ("2020-01-01 09:01:00", "2020-01-01 09:01:00", "ag")
+    assert len(client.bar_params[0]) == 13
+    assert client.bar_params[0][2:12] == (qmc, qmp, ["AP", "ag"], ["AP", "ag"], "2020-01-01 09:01:00", "2020-01-01 09:02:00", None, None, None, 3)
+    assert client.bar_params[1][8:11] == ("2020-01-01 09:01:00", "2020-01-01 09:01:00", "ag")
 
 
 def test_partial_bars_page_rejects_identity_drift_before_the_page_query() -> None:
