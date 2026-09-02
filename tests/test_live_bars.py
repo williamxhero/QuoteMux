@@ -308,6 +308,25 @@ def test_live_bar_retention_cleanup_keeps_the_latest_five_trading_days(monkeypat
     assert "delete from live.stock_bar_provider_attempt" in statements[0]
 
 
+def test_correction_scan_keeps_only_finalized_same_provider_candidates_inside_window(monkeypatch) -> None:
+    import pandas as pd
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "quotemux.live_bars.db_client.query_dataframe",
+        lambda query, params: captured.update(query=query, params=params) or pd.DataFrame([{
+            "market": "SHSE", "code": "600519", "freq": "1m", "interval_start": pd.Timestamp("2026-09-02 13:30:00"), "provider": "mootdx",
+        }]),
+    )
+    now = datetime(2026, 9, 2, 13, 34, tzinfo=SHANGHAI)
+
+    candidates = PostgresCurrentBarStore().list_correction_candidates(now, 300)
+
+    assert [(item.code, item.freq, item.provider) for item in candidates] == [("600519", "1m", "mootdx")]
+    assert "state='finalized'" in captured["query"]
+    assert captured["params"] == (now, 300)
+
+
 def test_recovery_finalizes_overdue_staging_and_then_runs_retention(monkeypatch) -> None:
     observed = datetime(2026, 9, 9, 16, 0, tzinfo=SHANGHAI)
     calls: list[str] = []

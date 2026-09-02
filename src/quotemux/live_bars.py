@@ -76,6 +76,15 @@ class CurrentBarFinalizationCandidate:
 
 
 @dataclass(frozen=True)
+class FinalizedCorrectionCandidate:
+    market: str
+    code: str
+    interval_start: datetime
+    freq: str
+    provider: str
+
+
+@dataclass(frozen=True)
 class CurrentStockBarItem:
     code: str
     market: str
@@ -458,6 +467,21 @@ class PostgresCurrentBarStore:
             )
             for row in rows
         )
+
+    def list_correction_candidates(self, now: datetime, window_seconds: int = 300) -> tuple[FinalizedCorrectionCandidate, ...]:
+        """Select only same-provider finalized Bars that are still within the correction window."""
+        if window_seconds <= 0:
+            return ()
+        frame = db_client.query_dataframe(
+            """
+            select market,btrim(code) as code,freq,interval_start,provider
+            from live.stock_bar_selected
+            where state='finalized' and selected_at >= %s - (%s * interval '1 second')
+            order by interval_start,code
+            """,
+            (_as_shanghai(now), window_seconds),
+        )
+        return tuple(FinalizedCorrectionCandidate(str(row["market"]), str(row["code"]).strip(), _as_shanghai(row["interval_start"]), str(row["freq"]), str(row["provider"])) for _, row in frame.iterrows())
 
     def finalize(
         self,
