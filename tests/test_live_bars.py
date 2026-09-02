@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import nullcontext
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from quotemux.live_bars import (
     CurrentBarNodeAttempt,
@@ -14,6 +17,7 @@ from quotemux.live_bars import (
     PostgresCurrentBarStore,
     CurrentBarFinalizationCandidate,
     CurrentBarFinalizer,
+    EFinancePriceValidator,
     WholeBarFallbackProvider,
 )
 
@@ -267,3 +271,56 @@ def test_severe_efinance_price_mismatch_replaces_the_whole_selected_bar() -> Non
 
     assert [(bar.provider, bar.close) for bar in result.bars] == [("opentdx", 1395.0)]
     assert result.diagnostics[0]["status"] == "severe"
+
+
+def test_efinance_validation_reports_warning_without_replacing_a_whole_bar(monkeypatch) -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+    bar = NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400.0, 1401.0, 1399.0, 1400.5, 1200, 1_680_600.0, "mootdx:volume*1,amount*1")
+
+    class _Registry:
+        @staticmethod
+        def get_handler(package_id, capability):
+            assert (package_id, capability) == ("efinance", "get_current_stock_price_snapshots")
+            return lambda codes, effective_now: [SimpleNamespace(code=codes[0], price=1370.0, source_time=effective_now)]
+
+    monkeypatch.setattr("quotemux.live_bars.get_default_source_package_registry", lambda: _Registry())
+
+    diagnostic = EFinancePriceValidator(warning_ratio=0.01, severe_ratio=0.05).validate((bar,), interval + timedelta(seconds=8))[0]
+
+    assert diagnostic["status"] == "warning"
+    assert diagnostic["difference_ratio"] == pytest.approx(0.0222627737)
+
+
+def test_efinance_validation_does_not_use_a_stale_snapshot_for_source_selection(monkeypatch) -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+    bar = NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400.0, 1401.0, 1399.0, 1400.5, 1200, 1_680_600.0, "mootdx:volume*1,amount*1")
+
+    class _Registry:
+        @staticmethod
+        def get_handler(package_id, capability):
+            assert (package_id, capability) == ("efinance", "get_current_stock_price_snapshots")
+            return lambda codes, effective_now: [SimpleNamespace(code=codes[0], price=1300.0, source_time="2026-09-02T13:20:00+08:00")]
+
+    monkeypatch.setattr("quotemux.live_bars.get_default_source_package_registry", lambda: _Registry())
+
+    diagnostic = EFinancePriceValidator(max_age_seconds=300).validate((bar,), interval + timedelta(seconds=8))[0]
+
+    assert diagnostic["status"] == "stale"
+
+
+def test_efinance_validation_marks_a_malformed_snapshot_unavailable(monkeypatch) -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+    bar = NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400.0, 1401.0, 1399.0, 1400.5, 1200, 1_680_600.0, "mootdx:volume*1,amount*1")
+
+    class _Registry:
+        @staticmethod
+        def get_handler(package_id, capability):
+            assert (package_id, capability) == ("efinance", "get_current_stock_price_snapshots")
+            return lambda codes, effective_now: [SimpleNamespace(code=codes[0], price="not-a-price", source_time=effective_now)]
+
+    monkeypatch.setattr("quotemux.live_bars.get_default_source_package_registry", lambda: _Registry())
+
+    diagnostic = EFinancePriceValidator().validate((bar,), interval + timedelta(seconds=8))[0]
+
+    assert diagnostic["status"] == "unavailable"
+    assert diagnostic["detail"] == "invalid_snapshot_price"

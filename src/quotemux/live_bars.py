@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import json
+import math
 import os
 from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
@@ -169,6 +170,21 @@ def _as_shanghai(value: datetime) -> datetime:
     return localized.replace(microsecond=0)
 
 
+def _positive_env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        return _as_shanghai(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return None
+
+
 class PackageCurrentBarProvider:
     """Adapter from the provider-owned native current-Bar type to QuoteMux."""
 
@@ -206,8 +222,12 @@ class OpenTdxCurrentBarProvider(PackageCurrentBarProvider):
 
 
 class EFinancePriceValidator:
-    def __init__(self, severe_ratio: float | None = None) -> None:
-        self._severe_ratio = severe_ratio if severe_ratio is not None else float(os.getenv("MHK_LIVE_EFINANCE_SEVERE_RATIO", "0.05"))
+    def __init__(self, warning_ratio: float | None = None, severe_ratio: float | None = None, max_age_seconds: float | None = None) -> None:
+        self._warning_ratio = warning_ratio if warning_ratio is not None else _positive_env_float("MHK_LIVE_EFINANCE_WARNING_RATIO", 0.01)
+        self._severe_ratio = severe_ratio if severe_ratio is not None else _positive_env_float("MHK_LIVE_EFINANCE_SEVERE_RATIO", 0.05)
+        self._max_age_seconds = max_age_seconds if max_age_seconds is not None else _positive_env_float("MHK_LIVE_EFINANCE_MAX_AGE_SECONDS", 300)
+        if self._warning_ratio > self._severe_ratio:
+            raise ValueError("eFinance warning ratio cannot exceed severe ratio")
 
     def validate(self, bars: tuple[NativeCurrentStockBar, ...], effective_now: datetime) -> tuple[dict[str, object], ...]:
         if not bars:
@@ -217,15 +237,33 @@ class EFinancePriceValidator:
             snapshots = handler([bar.code for bar in bars], _as_shanghai(effective_now).isoformat())
         except Exception as exc:
             return tuple({"code": bar.code, "validator": "efinance", "status": "unavailable", "detail": str(exc)} for bar in bars)
-        prices = {normalize_stock_code(item.code).zfill(6): float(item.price) for item in snapshots}
+        snapshot_by_code = {normalize_stock_code(item.code).zfill(6): item for item in snapshots}
         diagnostics: list[dict[str, object]] = []
         for bar in bars:
-            price = prices.get(bar.code)
-            if price is None:
+            snapshot = snapshot_by_code.get(bar.code)
+            if snapshot is None:
                 diagnostics.append({"code": bar.code, "validator": "efinance", "status": "unavailable"})
                 continue
+            source_time = str(getattr(snapshot, "source_time", ""))
+            snapshot_time = _parse_timestamp(source_time)
+            if snapshot_time is None:
+                diagnostics.append({"code": bar.code, "validator": "efinance", "status": "unavailable", "detail": "missing_or_invalid_snapshot_time"})
+                continue
+            age_seconds = (_as_shanghai(effective_now) - snapshot_time).total_seconds()
+            if age_seconds > self._max_age_seconds:
+                diagnostics.append({"code": bar.code, "validator": "efinance", "status": "stale", "source_time": snapshot_time.isoformat(), "age_seconds": age_seconds})
+                continue
+            try:
+                price = float(snapshot.price)
+            except (TypeError, ValueError):
+                diagnostics.append({"code": bar.code, "validator": "efinance", "status": "unavailable", "detail": "invalid_snapshot_price"})
+                continue
+            if not math.isfinite(price) or price <= 0:
+                diagnostics.append({"code": bar.code, "validator": "efinance", "status": "unavailable", "detail": "invalid_snapshot_price"})
+                continue
             ratio = abs(bar.close - price) / max(abs(price), 1e-12)
-            diagnostics.append({"code": bar.code, "validator": "efinance", "status": "severe" if ratio >= self._severe_ratio else "ok", "price": price, "difference_ratio": ratio})
+            status = "severe" if ratio >= self._severe_ratio else "warning" if ratio >= self._warning_ratio else "ok"
+            diagnostics.append({"code": bar.code, "validator": "efinance", "status": status, "price": price, "difference_ratio": ratio, "source_time": snapshot_time.isoformat(), "age_seconds": age_seconds})
         return tuple(diagnostics)
 
 
