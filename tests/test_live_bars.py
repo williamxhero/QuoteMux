@@ -207,6 +207,84 @@ def test_finalizer_due_scan_waits_until_the_minute_has_closed_and_grace_has_elap
     assert "interval_start + interval '1 minute' + (%s * interval '1 second') <= %s" in statements[0]
 
 
+def test_live_bar_retention_cleanup_keeps_the_latest_five_trading_days(monkeypatch) -> None:
+    statements: list[str] = []
+
+    class _Cursor:
+        def execute(self, query, params=()):
+            del params
+            statements.append(" ".join(query.split()))
+
+        @staticmethod
+        def fetchone():
+            return {"deleted_attempts": 3, "deleted_observations": 2, "deleted_selected": 1}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _Connection:
+        closed = False
+
+        @staticmethod
+        def transaction():
+            return nullcontext()
+
+        @staticmethod
+        def cursor():
+            return _Cursor()
+
+        @staticmethod
+        def rollback():
+            return None
+
+    monkeypatch.setattr("quotemux.live_bars.db_client.is_db_available", lambda: True)
+    monkeypatch.setattr("quotemux.live_bars.db_client._acquire_connection", _Connection)
+    monkeypatch.setattr("quotemux.live_bars.db_client._release_connection", lambda current: None)
+
+    result = PostgresCurrentBarStore().cleanup_retention(datetime(2026, 9, 9, 16, 0, tzinfo=SHANGHAI))
+
+    assert result == {"deleted_attempts": 3, "deleted_observations": 2, "deleted_selected": 1}
+    assert "offset 4" in statements[0]
+    assert "delete from live.stock_bar_provider_attempt" in statements[0]
+
+
+def test_recovery_finalizes_overdue_staging_and_then_runs_retention(monkeypatch) -> None:
+    observed = datetime(2026, 9, 9, 16, 0, tzinfo=SHANGHAI)
+    calls: list[str] = []
+
+    class _Store:
+        @staticmethod
+        def cleanup_retention(now):
+            assert now == observed
+            calls.append("cleanup")
+            return {"deleted_attempts": 3, "deleted_observations": 2, "deleted_selected": 1}
+
+    class _Finalizer:
+        def __init__(self, provider, store, grace_seconds):
+            assert isinstance(store, _Store)
+            assert grace_seconds == 7
+
+        @staticmethod
+        def finalize_due(now):
+            assert now == observed
+            calls.append("finalize")
+            return {"candidates": 2, "finalized": 1, "deferred": 1, "failed": 0}
+
+    monkeypatch.setattr("quotemux.live_bars.PostgresCurrentBarStore", _Store)
+    monkeypatch.setattr("quotemux.live_bars.CurrentBarFinalizer", _Finalizer)
+
+    from quotemux.live_bars import recover_due_current_stock_bars
+
+    assert recover_due_current_stock_bars(observed) == {
+        "finalizer": {"candidates": 2, "finalized": 1, "deferred": 1, "failed": 0},
+        "retention": {"deleted_attempts": 3, "deleted_observations": 2, "deleted_selected": 1},
+    }
+    assert calls == ["finalize", "cleanup"]
+
+
 def test_postgres_finalization_writes_history_audit_coverage_and_stage_state_together(monkeypatch) -> None:
     statements: list[str] = []
 

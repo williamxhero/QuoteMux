@@ -325,6 +325,45 @@ class PostgresCurrentBarStore:
             return
         self._run_transaction(lambda cursor: self._write_attempts(cursor, attempts, observed_at, interval_start))
 
+    def cleanup_retention(self, now: datetime) -> dict[str, int]:
+        """Idempotently retain selected staging revisions for five completed SSE trading days."""
+
+        def _cleanup(cursor: object) -> dict[str, int]:
+            cursor.execute(
+                """
+                with cutoff as (
+                  select trade_date as cutoff_date
+                  from ref.trade_calendar
+                  where exchange in ('SSE', 'SHSE') and is_open=true and trade_date <= (%s::timestamptz at time zone 'Asia/Shanghai')::date
+                  order by trade_date desc offset 4 limit 1
+                ), deleted_attempts as (
+                  delete from live.stock_bar_provider_attempt attempts using cutoff
+                  where attempts.interval_start::date < cutoff.cutoff_date
+                  returning 1
+                ), deleted_selected as (
+                  delete from live.stock_bar_selected selected using cutoff
+                  where selected.state in ('finalized', 'failed') and selected.interval_start::date < cutoff.cutoff_date
+                  returning 1
+                ), deleted_observations as (
+                  delete from live.stock_bar_observation observations using cutoff
+                  where observations.finalized_at is not null and observations.interval_start::date < cutoff.cutoff_date
+                    and not exists (select 1 from live.stock_bar_selected selected where selected.observation_version=observations.observation_version)
+                  returning 1
+                )
+                select (select count(*) from deleted_attempts)::int as deleted_attempts,
+                       (select count(*) from deleted_observations)::int as deleted_observations,
+                       (select count(*) from deleted_selected)::int as deleted_selected
+                """,
+                (_as_shanghai(now),),
+            )
+            row = cursor.fetchone() or {}
+            return {key: int(row.get(key, 0)) for key in ("deleted_attempts", "deleted_observations", "deleted_selected")}
+
+        result = self._run_transaction(_cleanup)  # type: ignore[arg-type]
+        if not isinstance(result, dict):
+            raise LiveBarPersistenceError("live Bar retention cleanup returned no result")
+        return result
+
     def stage(
         self,
         bar: NativeCurrentStockBar,
@@ -600,3 +639,14 @@ class CurrentBarFinalizer:
 
 def finalize_due_current_stock_bars(now: datetime | None = None, grace_seconds: int = 7) -> dict[str, int]:
     return CurrentBarFinalizer(WholeBarFallbackProvider(), PostgresCurrentBarStore(), grace_seconds).finalize_due(now)
+
+
+def recover_due_current_stock_bars(now: datetime | None = None, grace_seconds: int = 7) -> dict[str, dict[str, int]]:
+    """Startup/scheduled recovery for overdue staging; active intervals are never eligible for finalization."""
+    observed_at = _as_shanghai(now or datetime.now(tz=SHANGHAI))
+    store = PostgresCurrentBarStore()
+    finalizer = CurrentBarFinalizer(WholeBarFallbackProvider(), store, grace_seconds)
+    return {
+        "finalizer": finalizer.finalize_due(observed_at),
+        "retention": store.cleanup_retention(observed_at),
+    }
