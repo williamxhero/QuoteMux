@@ -80,6 +80,34 @@ def test_live_ingestor_stages_selected_native_bar_before_returning_it() -> None:
     assert result.items[0].provider == "mootdx"
 
 
+def test_live_ingestor_keeps_a_zero_volume_bar_only_when_the_provider_supplies_the_exact_interval() -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+
+    class _NoTradeProvider:
+        @staticmethod
+        def fetch(codes, effective_now):
+            assert codes == ("600519",)
+            assert effective_now == interval + timedelta(seconds=8)
+            return ProviderCurrentBarsResult(
+                bars=(NativeCurrentStockBar(
+                    code="600519", interval_start=interval, native_trade_time="2026-09-02 13:30:00",
+                    open=1400.5, high=1400.5, low=1400.5, close=1400.5, volume=0, amount=0.0,
+                    unit_conversion="mootdx:volume*1,amount*1",
+                ),),
+                attempts=(CurrentBarNodeAttempt(code="600519", server="180.153.18.172:80", outcome="ok"),),
+            )
+
+    store = _Store()
+    result = LiveBarIngestor(_NoTradeProvider(), store, clock=lambda: interval + timedelta(seconds=9)).ingest(
+        CurrentBarRequest(codes=("600519",), effective_now=interval + timedelta(seconds=8))
+    )
+
+    assert len(store.events) == 1
+    assert result.errors == ()
+    assert result.items[0].volume == 0
+    assert result.items[0].amount == 0.0
+
+
 def test_postgres_store_commits_observation_selection_and_attempt_in_one_transaction(monkeypatch) -> None:
     statements: list[str] = []
 
