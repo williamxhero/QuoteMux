@@ -108,6 +108,35 @@ def test_live_ingestor_keeps_a_zero_volume_bar_only_when_the_provider_supplies_t
     assert result.items[0].amount == 0.0
 
 
+def test_live_ingestor_stages_a_provider_native_current_30m_bar_before_returning_it() -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+
+    class _NativeThirtyMinuteProvider:
+        @staticmethod
+        def fetch(codes, effective_now, freq):
+            assert codes == ("600519",)
+            assert effective_now == interval + timedelta(minutes=2, seconds=8)
+            assert freq == "30m"
+            return ProviderCurrentBarsResult(
+                bars=(NativeCurrentStockBar(
+                    code="600519", interval_start=interval, native_trade_time="2026-09-02 13:30:00",
+                    open=1400.0, high=1403.0, low=1399.0, close=1402.5, volume=350, amount=490555.0,
+                    unit_conversion="mootdx:volume*1,amount*1", freq="30m",
+                ),),
+                attempts=(CurrentBarNodeAttempt(code="600519", server="180.153.18.172:80", outcome="ok"),),
+            )
+
+    store = _Store()
+    result = LiveBarIngestor(_NativeThirtyMinuteProvider(), store, clock=lambda: interval + timedelta(minutes=2, seconds=9)).ingest(
+        CurrentBarRequest(codes=("600519",), effective_now=interval + timedelta(minutes=2, seconds=8), freq="30m")
+    )
+
+    staged_bar, _observed_at, _attempts = store.events[0]
+    assert staged_bar.freq == "30m"
+    assert result.items[0].to_dict()["freq"] == "30m"
+    assert result.items[0].interval_end == interval + timedelta(minutes=30)
+
+
 def test_postgres_store_commits_observation_selection_and_attempt_in_one_transaction(monkeypatch) -> None:
     statements: list[str] = []
 

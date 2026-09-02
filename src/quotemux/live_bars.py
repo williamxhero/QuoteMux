@@ -26,6 +26,7 @@ class LiveBarPersistenceError(RuntimeError):
 class CurrentBarRequest:
     codes: tuple[str, ...]
     effective_now: datetime
+    freq: str = "1m"
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class NativeCurrentStockBar:
     amount: float
     unit_conversion: str
     provider: str = "mootdx"
+    freq: str = "1m"
 
 
 @dataclass(frozen=True)
@@ -90,13 +92,14 @@ class CurrentStockBarItem:
     source_semantics: str = "native"
     is_final: bool = False
     selection_reason: str = "provider_priority"
+    freq: str = "1m"
 
     def to_dict(self) -> dict[str, object]:
         return {
             "code": self.code,
             "market": self.market,
             "trade_time": self.interval_start.isoformat(),
-            "freq": "1m",
+            "freq": self.freq,
             "open": self.open,
             "high": self.high,
             "low": self.low,
@@ -139,7 +142,7 @@ class LiveIngestResult:
 
 
 class CurrentBarProvider(Protocol):
-    def fetch(self, codes: tuple[str, ...], effective_now: datetime) -> ProviderCurrentBarsResult: ...
+    def fetch(self, codes: tuple[str, ...], effective_now: datetime, freq: str = "1m") -> ProviderCurrentBarsResult: ...
 
 
 class CurrentBarStore(Protocol):
@@ -191,16 +194,16 @@ class PackageCurrentBarProvider:
     def __init__(self, package_id: str) -> None:
         self._package_id = package_id
 
-    def fetch(self, codes: tuple[str, ...], effective_now: datetime) -> ProviderCurrentBarsResult:
+    def fetch(self, codes: tuple[str, ...], effective_now: datetime, freq: str = "1m") -> ProviderCurrentBarsResult:
         handler = get_default_source_package_registry().get_handler(self._package_id, "get_current_stock_bars")
-        raw_result = handler(list(codes), _as_shanghai(effective_now).isoformat())
+        raw_result = handler(list(codes), _as_shanghai(effective_now).isoformat(), freq) if freq != "1m" else handler(list(codes), _as_shanghai(effective_now).isoformat())
         bars = tuple(
             NativeCurrentStockBar(
                 code=normalize_stock_code(raw.code).zfill(6),
                 interval_start=_as_shanghai(raw.interval_start),
                 native_trade_time=str(raw.native_trade_time),
                 open=float(raw.open), high=float(raw.high), low=float(raw.low), close=float(raw.close),
-                volume=int(raw.volume), amount=float(raw.amount), unit_conversion=str(raw.unit_conversion), provider=self._package_id,
+                volume=int(raw.volume), amount=float(raw.amount), unit_conversion=str(raw.unit_conversion), provider=self._package_id, freq=freq,
             )
             for raw in raw_result.bars
         )
@@ -273,13 +276,15 @@ class WholeBarFallbackProvider:
         self._fallback = fallback or OpenTdxCurrentBarProvider()
         self._validator = validator or EFinancePriceValidator()
 
-    def fetch(self, codes: tuple[str, ...], effective_now: datetime) -> ProviderCurrentBarsResult:
-        primary = self._primary.fetch(codes, effective_now)
+    def fetch(self, codes: tuple[str, ...], effective_now: datetime, freq: str = "1m") -> ProviderCurrentBarsResult:
+        primary = self._primary.fetch(codes, effective_now, freq) if freq != "1m" else self._primary.fetch(codes, effective_now)
         diagnostics = self._validator.validate(primary.bars, effective_now)
         severe = {str(item["code"]) for item in diagnostics if item.get("status") == "severe"}
         hit_codes = {bar.code for bar in primary.bars}
         missing = tuple(code for code in codes if code not in hit_codes or code in severe)
         if not missing:
+            return ProviderCurrentBarsResult(primary.bars, primary.attempts, diagnostics)
+        if freq != "1m":
             return ProviderCurrentBarsResult(primary.bars, primary.attempts, diagnostics)
         fallback = self._fallback.fetch(missing, effective_now)
         selected_primary = tuple(bar for bar in primary.bars if bar.code not in severe)
@@ -309,15 +314,15 @@ class PostgresCurrentBarStore:
             db_client._release_connection(connection)
 
     @staticmethod
-    def _write_attempts(cursor: object, attempts: tuple[CurrentBarNodeAttempt, ...], observed_at: datetime, interval_start: datetime) -> None:
+    def _write_attempts(cursor: object, attempts: tuple[CurrentBarNodeAttempt, ...], observed_at: datetime, interval_start: datetime, freq: str = "1m") -> None:
         for attempt in attempts:
             cursor.execute(
                 """
                 insert into live.stock_bar_provider_attempt
                   (provider, market, code, freq, interval_start, observed_at, server, outcome, detail)
-                values (%s, %s, %s, '1m', %s, %s, %s, %s, %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (attempt.provider, stock_market_name(attempt.code), attempt.code, interval_start, observed_at, attempt.server, attempt.outcome, attempt.detail),
+                (attempt.provider, stock_market_name(attempt.code), attempt.code, freq, interval_start, observed_at, attempt.server, attempt.outcome, attempt.detail),
             )
 
     def record_attempts(self, attempts: tuple[CurrentBarNodeAttempt, ...], observed_at: datetime, interval_start: datetime) -> None:
@@ -372,26 +377,26 @@ class PostgresCurrentBarStore:
     ) -> CurrentBarStagingResult:
         canonical = {
             "provider": bar.provider, "market": stock_market_name(bar.code), "code": bar.code,
-            "freq": "1m", "interval_start": bar.interval_start.isoformat(), "native_trade_time": bar.native_trade_time,
+            "freq": bar.freq, "interval_start": bar.interval_start.isoformat(), "native_trade_time": bar.native_trade_time,
             "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
             "volume": bar.volume, "amount": bar.amount, "unit_conversion": bar.unit_conversion,
         }
         observation_hash = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
         def _stage(cursor: object) -> CurrentBarStagingResult:
-            self._write_attempts(cursor, attempts, observed_at, bar.interval_start)
+            self._write_attempts(cursor, attempts, observed_at, bar.interval_start, bar.freq)
             cursor.execute(
                 """
                 insert into live.stock_bar_observation
                   (provider, market, code, freq, interval_start, observed_at, native_trade_time,
                    open, high, low, close, volume, amount, unit_conversion, observation_hash)
-                values (%s, %s, %s, '1m', %s, %s, %s::timestamp,
+                values (%s, %s, %s, %s, %s, %s, %s::timestamp,
                         %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (provider, market, code, freq, interval_start, observation_hash) do update set
                   observed_at = excluded.observed_at
                 returning observation_version
                 """,
-                (bar.provider, stock_market_name(bar.code), bar.code, bar.interval_start, observed_at, bar.native_trade_time,
+                (bar.provider, stock_market_name(bar.code), bar.code, bar.freq, bar.interval_start, observed_at, bar.native_trade_time,
                  bar.open, bar.high, bar.low, bar.close, bar.volume, bar.amount, bar.unit_conversion, observation_hash),
             )
             row = cursor.fetchone()
@@ -399,7 +404,7 @@ class PostgresCurrentBarStore:
                 """
                 insert into live.stock_bar_selected
                   (market, code, freq, interval_start, provider, observation_version, selection_reason, selected_at)
-                values (%s, %s, '1m', %s, %s, %s, %s, %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (market, code, freq, interval_start) do update set
                   provider = excluded.provider,
                   observation_version = excluded.observation_version,
@@ -407,7 +412,7 @@ class PostgresCurrentBarStore:
                   selected_at = excluded.selected_at
                 returning selected_at
                 """,
-                (stock_market_name(bar.code), bar.code, bar.interval_start, bar.provider, row["observation_version"], f"provider_priority:{bar.provider}", observed_at),
+                (stock_market_name(bar.code), bar.code, bar.freq, bar.interval_start, bar.provider, row["observation_version"], f"provider_priority:{bar.provider}", observed_at),
             )
             selected = cursor.fetchone()
             return CurrentBarStagingResult(observation_version=str(row["observation_version"]), selected_at=_as_shanghai(selected["selected_at"]))
@@ -570,11 +575,14 @@ class LiveBarIngestor:
     def ingest(self, request: CurrentBarRequest) -> LiveIngestResult:
         reject_in_strict_public_read("live_bar_ingest")
         effective_now = _as_shanghai(request.effective_now)
-        target_interval = effective_now.replace(second=0, microsecond=0)
+        if request.freq not in {"1m", "30m"}:
+            raise ValueError(f"current Bar frequency is unsupported: {request.freq}")
+        current_minute = effective_now.replace(second=0, microsecond=0)
+        target_interval = current_minute.replace(minute=(current_minute.minute // 30) * 30) if request.freq == "30m" else current_minute
         codes = tuple(dict.fromkeys(normalize_stock_code(code).zfill(6) for code in request.codes if normalize_stock_code(code)))
-        provider_result = self._provider.fetch(codes, effective_now)
+        provider_result = self._provider.fetch(codes, effective_now, request.freq) if request.freq != "1m" else self._provider.fetch(codes, effective_now)
         observed_at = _as_shanghai(self._clock())
-        bars_by_code = {bar.code: bar for bar in provider_result.bars if _as_shanghai(bar.interval_start) == target_interval}
+        bars_by_code = {bar.code: bar for bar in provider_result.bars if bar.freq == request.freq and _as_shanghai(bar.interval_start) == target_interval}
         errors: list[dict[str, str]] = []
         items: list[CurrentStockBarItem] = []
         attempts_by_code: dict[str, tuple[CurrentBarNodeAttempt, ...]] = {
@@ -585,15 +593,15 @@ class LiveBarIngestor:
             attempts = attempts_by_code[code]
             if bar is None:
                 self._store.record_attempts(attempts, observed_at, target_interval)
-                errors.append({"code": code, "message": "no exact current 1m Bar from configured whole-Bar providers"})
+                errors.append({"code": code, "message": f"no exact current {request.freq} Bar from configured whole-Bar providers"})
                 continue
             staged = self._store.stage(bar, observed_at, attempts)
             items.append(
                 CurrentStockBarItem(
                     code=code, market=stock_market_name(code), interval_start=target_interval,
-                    interval_end=target_interval + timedelta(minutes=1), open=bar.open, high=bar.high, low=bar.low,
+                    interval_end=target_interval + timedelta(minutes=30 if request.freq == "30m" else 1), open=bar.open, high=bar.high, low=bar.low,
                     close=bar.close, volume=bar.volume, amount=bar.amount, observed_at=observed_at,
-                    provider=bar.provider, observation_version=staged.observation_version,
+                    provider=bar.provider, observation_version=staged.observation_version, freq=request.freq,
                 )
             )
         return LiveIngestResult(items=tuple(items), attempts=provider_result.attempts, errors=tuple(errors), diagnostics=provider_result.diagnostics)
