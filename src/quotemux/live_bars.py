@@ -389,7 +389,7 @@ class PostgresCurrentBarStore:
                     """
                     select market,btrim(code) as code,interval_start
                     from live.stock_bar_selected
-                    where state='staged' and interval_start + (%s * interval '1 second') <= %s
+                    where state='staged' and interval_start + interval '1 minute' + (%s * interval '1 second') <= %s
                     order by interval_start,code
                     for update skip locked
                     """,

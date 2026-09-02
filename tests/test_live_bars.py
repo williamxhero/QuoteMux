@@ -169,6 +169,44 @@ def test_finalizer_refetches_the_closed_interval_before_atomic_promotion() -> No
     assert result == {"candidates": 1, "finalized": 1, "deferred": 0, "failed": 0}
 
 
+def test_finalizer_due_scan_waits_until_the_minute_has_closed_and_grace_has_elapsed(monkeypatch) -> None:
+    statements: list[str] = []
+
+    class _Cursor:
+        def execute(self, query, params):
+            del params
+            statements.append(" ".join(query.split()))
+
+        @staticmethod
+        def fetchall():
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _Connection:
+        closed = False
+
+        @staticmethod
+        def cursor():
+            return _Cursor()
+
+        @staticmethod
+        def rollback():
+            return None
+
+    monkeypatch.setattr("quotemux.live_bars.db_client.is_db_available", lambda: True)
+    monkeypatch.setattr("quotemux.live_bars.db_client._acquire_connection", _Connection)
+    monkeypatch.setattr("quotemux.live_bars.db_client._release_connection", lambda current: None)
+
+    assert PostgresCurrentBarStore().list_due(datetime(2026, 9, 2, 13, 31, 7, tzinfo=SHANGHAI), 7) == ()
+
+    assert "interval_start + interval '1 minute' + (%s * interval '1 second') <= %s" in statements[0]
+
+
 def test_postgres_finalization_writes_history_audit_coverage_and_stage_state_together(monkeypatch) -> None:
     statements: list[str] = []
 
