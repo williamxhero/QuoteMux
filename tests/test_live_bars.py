@@ -333,6 +333,12 @@ def test_recovery_finalizes_overdue_staging_and_then_runs_retention(monkeypatch)
 
     class _Store:
         @staticmethod
+        def list_correction_candidates(now, window_seconds):
+            assert now == observed and window_seconds == 300
+            calls.append("corrections")
+            return ()
+
+        @staticmethod
         def cleanup_retention(now):
             assert now == observed
             calls.append("cleanup")
@@ -356,9 +362,10 @@ def test_recovery_finalizes_overdue_staging_and_then_runs_retention(monkeypatch)
 
     assert recover_due_current_stock_bars(observed) == {
         "finalizer": {"candidates": 2, "finalized": 1, "deferred": 1, "failed": 0},
+        "corrections": {"candidates": 0, "corrected": 0, "unchanged": 0, "failed": 0},
         "retention": {"deleted_attempts": 3, "deleted_observations": 2, "deleted_selected": 1},
     }
-    assert calls == ["finalize", "cleanup"]
+    assert calls == ["finalize", "corrections", "cleanup"]
 
 
 def test_postgres_finalization_writes_history_audit_coverage_and_stage_state_together(monkeypatch) -> None:

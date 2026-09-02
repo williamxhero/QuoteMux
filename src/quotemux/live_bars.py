@@ -483,6 +483,27 @@ class PostgresCurrentBarStore:
         )
         return tuple(FinalizedCorrectionCandidate(str(row["market"]), str(row["code"]).strip(), _as_shanghai(row["interval_start"]), str(row["freq"]), str(row["provider"])) for _, row in frame.iterrows())
 
+    def correct(self, candidate: FinalizedCorrectionCandidate, bar: NativeCurrentStockBar, observed_at: datetime, attempts: tuple[CurrentBarNodeAttempt, ...]) -> bool:
+        if bar.provider != candidate.provider or bar.freq != candidate.freq or _as_shanghai(bar.interval_start) != candidate.interval_start:
+            return False
+        canonical = {"provider": bar.provider, "market": candidate.market, "code": candidate.code, "freq": candidate.freq, "interval_start": candidate.interval_start.isoformat(), "native_trade_time": bar.native_trade_time, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close, "volume": bar.volume, "amount": bar.amount, "unit_conversion": bar.unit_conversion}
+        observation_hash = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        fact_table = {"1m": "stock_bar_1m", "30m": "stock_bar_30m"}.get(candidate.freq)
+        if fact_table is None:
+            return False
+        def _correct(cursor: object) -> bool:
+            cursor.execute("select selected.provider,observations.observation_hash from live.stock_bar_selected selected join live.stock_bar_observation observations on observations.observation_version=selected.observation_version where selected.market=%s and selected.code=%s and selected.freq=%s and selected.interval_start=%s and selected.state='finalized' for update", (candidate.market, candidate.code, candidate.freq, candidate.interval_start))
+            current = cursor.fetchone()
+            if current is None or str(current["provider"]) != candidate.provider or str(current["observation_hash"]) == observation_hash:
+                return False
+            self._write_attempts(cursor, attempts, observed_at, candidate.interval_start, candidate.freq)
+            cursor.execute("insert into live.stock_bar_observation (provider,market,code,freq,interval_start,observed_at,native_trade_time,open,high,low,close,volume,amount,unit_conversion,observation_hash,finalized_at) values (%s,%s,%s,%s,%s,%s,%s::timestamp,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning observation_version", (bar.provider,candidate.market,candidate.code,candidate.freq,candidate.interval_start,observed_at,bar.native_trade_time,bar.open,bar.high,bar.low,bar.close,bar.volume,bar.amount,bar.unit_conversion,observation_hash,observed_at))
+            revision = cursor.fetchone()
+            cursor.execute(f"insert into fact.{fact_table} (market,code,bar_time,open,high,low,close,volume,amount) values (%s,%s,%s::timestamptz at time zone 'Asia/Shanghai',%s,%s,%s,%s,%s,%s) on conflict (market,code,bar_time) do update set open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,amount=excluded.amount,loaded_at=now()", (candidate.market,candidate.code,candidate.interval_start,bar.open,bar.high,bar.low,bar.close,bar.volume,bar.amount))
+            cursor.execute("update live.stock_bar_selected set observation_version=%s,selection_reason=%s,selected_at=%s,updated_at=now() where market=%s and code=%s and freq=%s and interval_start=%s", (revision["observation_version"], f"provider_correction:{bar.provider}", observed_at,candidate.market,candidate.code,candidate.freq,candidate.interval_start))
+            return True
+        return bool(self._run_transaction(_correct))
+
     def finalize(
         self,
         candidate: CurrentBarFinalizationCandidate,
@@ -674,6 +695,25 @@ class CurrentBarFinalizer:
         return {"candidates": len(candidates), "finalized": finalized, "deferred": deferred, "failed": failed}
 
 
+class CurrentBarCorrector:
+    def __init__(self, store: PostgresCurrentBarStore, window_seconds: int = 300) -> None:
+        self._store = store
+        self._window_seconds = window_seconds
+
+    def correct_due(self, now: datetime) -> dict[str, int]:
+        candidates = self._store.list_correction_candidates(now, self._window_seconds)
+        corrected = unchanged = failed = 0
+        for candidate in candidates:
+            try:
+                provider = PackageCurrentBarProvider(candidate.provider)
+                result = provider.fetch((candidate.code,), candidate.interval_start, candidate.freq) if candidate.freq != "1m" else provider.fetch((candidate.code,), candidate.interval_start)
+                bar = next((item for item in result.bars if item.code == candidate.code and item.provider == candidate.provider and item.freq == candidate.freq and _as_shanghai(item.interval_start) == candidate.interval_start), None)
+                if bar is None or not self._store.correct(candidate, bar, now, result.attempts): unchanged += 1
+                else: corrected += 1
+            except Exception: failed += 1
+        return {"candidates": len(candidates), "corrected": corrected, "unchanged": unchanged, "failed": failed}
+
+
 def finalize_due_current_stock_bars(now: datetime | None = None, grace_seconds: int = 7) -> dict[str, int]:
     return CurrentBarFinalizer(WholeBarFallbackProvider(), PostgresCurrentBarStore(), grace_seconds).finalize_due(now)
 
@@ -685,5 +725,6 @@ def recover_due_current_stock_bars(now: datetime | None = None, grace_seconds: i
     finalizer = CurrentBarFinalizer(WholeBarFallbackProvider(), store, grace_seconds)
     return {
         "finalizer": finalizer.finalize_due(observed_at),
+        "corrections": CurrentBarCorrector(store).correct_due(observed_at),
         "retention": store.cleanup_retention(observed_at),
     }
