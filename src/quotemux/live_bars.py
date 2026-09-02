@@ -499,7 +499,16 @@ class PostgresCurrentBarStore:
             self._write_attempts(cursor, attempts, observed_at, candidate.interval_start, candidate.freq)
             cursor.execute("insert into live.stock_bar_observation (provider,market,code,freq,interval_start,observed_at,native_trade_time,open,high,low,close,volume,amount,unit_conversion,observation_hash,finalized_at) values (%s,%s,%s,%s,%s,%s,%s::timestamp,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning observation_version", (bar.provider,candidate.market,candidate.code,candidate.freq,candidate.interval_start,observed_at,bar.native_trade_time,bar.open,bar.high,bar.low,bar.close,bar.volume,bar.amount,bar.unit_conversion,observation_hash,observed_at))
             revision = cursor.fetchone()
+            journal_state = db_client.discover_migration_range_journals(cursor, fact_table)
+            if journal_state.has_active_journal:
+                db_client.enable_explicit_range_journaling(cursor)
             cursor.execute(f"insert into fact.{fact_table} (market,code,bar_time,open,high,low,close,volume,amount) values (%s,%s,%s::timestamptz at time zone 'Asia/Shanghai',%s,%s,%s,%s,%s,%s) on conflict (market,code,bar_time) do update set open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,amount=excluded.amount,loaded_at=now()", (candidate.market,candidate.code,candidate.interval_start,bar.open,bar.high,bar.low,bar.close,bar.volume,bar.amount))
+            db_client.append_migration_range_journals(cursor, journal_state, [candidate.interval_start.astimezone(SHANGHAI).replace(tzinfo=None)])
+            if candidate.freq == "1m":
+                cursor.execute(
+                    "insert into audit.stock_bar_1m_write_event(source_semantics,min_bar_time,max_bar_time,row_count) values ('quotemux.live_bar_corrector.provider_refetch',%s::timestamptz at time zone 'Asia/Shanghai',%s::timestamptz at time zone 'Asia/Shanghai',1)",
+                    (candidate.interval_start, candidate.interval_start),
+                )
             cursor.execute("update live.stock_bar_selected set observation_version=%s,selection_reason=%s,selected_at=%s,updated_at=now() where market=%s and code=%s and freq=%s and interval_start=%s", (revision["observation_version"], f"provider_correction:{bar.provider}", observed_at,candidate.market,candidate.code,candidate.freq,candidate.interval_start))
             return True
         return bool(self._run_transaction(_correct))

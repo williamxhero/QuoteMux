@@ -16,6 +16,7 @@ from quotemux.live_bars import (
     ProviderCurrentBarsResult,
     PostgresCurrentBarStore,
     CurrentBarFinalizationCandidate,
+    FinalizedCorrectionCandidate,
     CurrentBarFinalizer,
     EFinancePriceValidator,
     WholeBarFallbackProvider,
@@ -325,6 +326,33 @@ def test_correction_scan_keeps_only_finalized_same_provider_candidates_inside_wi
     assert [(item.code, item.freq, item.provider) for item in candidates] == [("600519", "1m", "mootdx")]
     assert "state='finalized'" in captured["query"]
     assert captured["params"] == (now, 300)
+
+
+def test_correction_writes_revised_fact_and_audit(monkeypatch) -> None:
+    statements: list[str] = []
+    class _Cursor:
+        def __init__(self): self.fetches = iter(({"provider": "mootdx", "observation_hash": "old"}, {"observation_version": 45}))
+        def execute(self, query, params=()): del params; statements.append(" ".join(query.split()))
+        def fetchone(self): return next(self.fetches)
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+    class _Connection:
+        closed = False
+        def transaction(self): return nullcontext()
+        def cursor(self): return _Cursor()
+        def rollback(self): return None
+    monkeypatch.setattr("quotemux.live_bars.db_client.is_db_available", lambda: True)
+    monkeypatch.setattr("quotemux.live_bars.db_client._acquire_connection", lambda: _Connection())
+    monkeypatch.setattr("quotemux.live_bars.db_client._release_connection", lambda connection: None)
+    monkeypatch.setattr("quotemux.live_bars.db_client.discover_migration_range_journals", lambda cursor, table: type("Journal", (), {"has_active_journal": False})())
+    monkeypatch.setattr("quotemux.live_bars.db_client.append_migration_range_journals", lambda cursor, state, values: None)
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+    candidate = FinalizedCorrectionCandidate("SHSE", "600519", interval, "1m", "mootdx")
+    bar = NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400, 1403, 1399, 1402, 1500, 2103000, "mootdx:volume*1,amount*1")
+    assert PostgresCurrentBarStore().correct(candidate, bar, interval + timedelta(minutes=1), ()) is True
+    assert any("insert into fact.stock_bar_1m" in item for item in statements)
+    assert any("quotemux.live_bar_corrector.provider_refetch" in item for item in statements)
+    assert any("update live.stock_bar_selected" in item for item in statements)
 
 
 def test_recovery_finalizes_overdue_staging_and_then_runs_retention(monkeypatch) -> None:
