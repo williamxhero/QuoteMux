@@ -10,14 +10,16 @@ from quotemux.live_bars import CurrentBarRequest, ingest_current_stock_bars, rec
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
-        effective_now = datetime.fromisoformat(str(payload["effective_now"]))
         action = str(payload.get("action", "ingest"))
         if action == "recover":
+            raw_now = payload.get("effective_now")
+            effective_now = datetime.fromisoformat(str(raw_now)) if raw_now is not None else None
             result = recover_due_current_stock_bars(effective_now)
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
             return 0
         if action != "ingest":
             raise ValueError("action must be ingest or recover")
+        effective_now = datetime.fromisoformat(str(payload["effective_now"]))
         codes = payload.get("codes", [])
         if not isinstance(codes, list) or not all(isinstance(code, str) for code in codes):
             raise ValueError("codes must be a list of strings")
