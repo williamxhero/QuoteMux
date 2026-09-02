@@ -32,6 +32,7 @@ class CurrentBarNodeAttempt:
     server: str
     outcome: str
     detail: str = ""
+    provider: str = "mootdx"
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class NativeCurrentStockBar:
     volume: int
     amount: float
     unit_conversion: str
+    provider: str = "mootdx"
 
 
 @dataclass(frozen=True)
@@ -84,7 +86,7 @@ class CurrentStockBarItem:
     observation_version: str
     source_semantics: str = "native"
     is_final: bool = False
-    selection_reason: str = "provider_priority:mootdx"
+    selection_reason: str = "provider_priority"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -163,11 +165,14 @@ def _as_shanghai(value: datetime) -> datetime:
     return localized.replace(microsecond=0)
 
 
-class MootdxCurrentBarProvider:
+class PackageCurrentBarProvider:
     """Adapter from the provider-owned native current-Bar type to QuoteMux."""
 
+    def __init__(self, package_id: str) -> None:
+        self._package_id = package_id
+
     def fetch(self, codes: tuple[str, ...], effective_now: datetime) -> ProviderCurrentBarsResult:
-        handler = get_default_source_package_registry().get_handler("mootdx", "get_current_stock_bars")
+        handler = get_default_source_package_registry().get_handler(self._package_id, "get_current_stock_bars")
         raw_result = handler(list(codes), _as_shanghai(effective_now).isoformat())
         bars = tuple(
             NativeCurrentStockBar(
@@ -175,15 +180,40 @@ class MootdxCurrentBarProvider:
                 interval_start=_as_shanghai(raw.interval_start),
                 native_trade_time=str(raw.native_trade_time),
                 open=float(raw.open), high=float(raw.high), low=float(raw.low), close=float(raw.close),
-                volume=int(raw.volume), amount=float(raw.amount), unit_conversion=str(raw.unit_conversion),
+                volume=int(raw.volume), amount=float(raw.amount), unit_conversion=str(raw.unit_conversion), provider=self._package_id,
             )
             for raw in raw_result.bars
         )
         attempts = tuple(
-            CurrentBarNodeAttempt(code=normalize_stock_code(getattr(raw, "code", "")).zfill(6), server=str(raw.server), outcome=str(raw.outcome), detail=str(raw.detail))
+            CurrentBarNodeAttempt(code=normalize_stock_code(getattr(raw, "code", "")).zfill(6), server=str(raw.server), outcome=str(raw.outcome), detail=str(raw.detail), provider=self._package_id)
             for raw in raw_result.attempts
         )
         return ProviderCurrentBarsResult(bars=bars, attempts=attempts)
+
+
+class MootdxCurrentBarProvider(PackageCurrentBarProvider):
+    def __init__(self) -> None:
+        super().__init__("mootdx")
+
+
+class OpenTdxCurrentBarProvider(PackageCurrentBarProvider):
+    def __init__(self) -> None:
+        super().__init__("opentdx")
+
+
+class WholeBarFallbackProvider:
+    def __init__(self, primary: CurrentBarProvider | None = None, fallback: CurrentBarProvider | None = None) -> None:
+        self._primary = primary or MootdxCurrentBarProvider()
+        self._fallback = fallback or OpenTdxCurrentBarProvider()
+
+    def fetch(self, codes: tuple[str, ...], effective_now: datetime) -> ProviderCurrentBarsResult:
+        primary = self._primary.fetch(codes, effective_now)
+        hit_codes = {bar.code for bar in primary.bars}
+        missing = tuple(code for code in codes if code not in hit_codes)
+        if not missing:
+            return primary
+        fallback = self._fallback.fetch(missing, effective_now)
+        return ProviderCurrentBarsResult(bars=primary.bars + fallback.bars, attempts=primary.attempts + fallback.attempts)
 
 
 class PostgresCurrentBarStore:
@@ -215,9 +245,9 @@ class PostgresCurrentBarStore:
                 """
                 insert into live.stock_bar_provider_attempt
                   (provider, market, code, freq, interval_start, observed_at, server, outcome, detail)
-                values ('mootdx', %s, %s, '1m', %s, %s, %s, %s, %s)
+                values (%s, %s, %s, '1m', %s, %s, %s, %s, %s)
                 """,
-                (stock_market_name(attempt.code), attempt.code, interval_start, observed_at, attempt.server, attempt.outcome, attempt.detail),
+                (attempt.provider, stock_market_name(attempt.code), attempt.code, interval_start, observed_at, attempt.server, attempt.outcome, attempt.detail),
             )
 
     def record_attempts(self, attempts: tuple[CurrentBarNodeAttempt, ...], observed_at: datetime, interval_start: datetime) -> None:
@@ -232,7 +262,7 @@ class PostgresCurrentBarStore:
         attempts: tuple[CurrentBarNodeAttempt, ...],
     ) -> CurrentBarStagingResult:
         canonical = {
-            "provider": "mootdx", "market": stock_market_name(bar.code), "code": bar.code,
+            "provider": bar.provider, "market": stock_market_name(bar.code), "code": bar.code,
             "freq": "1m", "interval_start": bar.interval_start.isoformat(), "native_trade_time": bar.native_trade_time,
             "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
             "volume": bar.volume, "amount": bar.amount, "unit_conversion": bar.unit_conversion,
@@ -246,13 +276,13 @@ class PostgresCurrentBarStore:
                 insert into live.stock_bar_observation
                   (provider, market, code, freq, interval_start, observed_at, native_trade_time,
                    open, high, low, close, volume, amount, unit_conversion, observation_hash)
-                values ('mootdx', %s, %s, '1m', %s, %s, %s::timestamp,
+                values (%s, %s, %s, '1m', %s, %s, %s::timestamp,
                         %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (provider, market, code, freq, interval_start, observation_hash) do update set
                   observed_at = excluded.observed_at
                 returning observation_version
                 """,
-                (stock_market_name(bar.code), bar.code, bar.interval_start, observed_at, bar.native_trade_time,
+                (bar.provider, stock_market_name(bar.code), bar.code, bar.interval_start, observed_at, bar.native_trade_time,
                  bar.open, bar.high, bar.low, bar.close, bar.volume, bar.amount, bar.unit_conversion, observation_hash),
             )
             row = cursor.fetchone()
@@ -260,7 +290,7 @@ class PostgresCurrentBarStore:
                 """
                 insert into live.stock_bar_selected
                   (market, code, freq, interval_start, provider, observation_version, selection_reason, selected_at)
-                values (%s, %s, '1m', %s, 'mootdx', %s, 'provider_priority:mootdx', %s)
+                values (%s, %s, '1m', %s, %s, %s, %s, %s)
                 on conflict (market, code, freq, interval_start) do update set
                   provider = excluded.provider,
                   observation_version = excluded.observation_version,
@@ -268,7 +298,7 @@ class PostgresCurrentBarStore:
                   selected_at = excluded.selected_at
                 returning selected_at
                 """,
-                (stock_market_name(bar.code), bar.code, bar.interval_start, row["observation_version"], observed_at),
+                (stock_market_name(bar.code), bar.code, bar.interval_start, bar.provider, row["observation_version"], f"provider_priority:{bar.provider}", observed_at),
             )
             selected = cursor.fetchone()
             return CurrentBarStagingResult(observation_version=str(row["observation_version"]), selected_at=_as_shanghai(selected["selected_at"]))
@@ -322,7 +352,7 @@ class PostgresCurrentBarStore:
         if _as_shanghai(bar.interval_start) != _as_shanghai(candidate.interval_start):
             return False
         canonical = {
-            "provider": "mootdx", "market": candidate.market, "code": candidate.code, "freq": "1m",
+            "provider": bar.provider, "market": candidate.market, "code": candidate.code, "freq": "1m",
             "interval_start": candidate.interval_start.isoformat(), "native_trade_time": bar.native_trade_time,
             "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
             "volume": bar.volume, "amount": bar.amount, "unit_conversion": bar.unit_conversion,
@@ -347,13 +377,13 @@ class PostgresCurrentBarStore:
                 insert into live.stock_bar_observation
                   (provider, market, code, freq, interval_start, observed_at, native_trade_time,
                    open, high, low, close, volume, amount, unit_conversion, observation_hash)
-                values ('mootdx', %s, %s, '1m', %s, %s, %s::timestamp,
+                values (%s, %s, %s, '1m', %s, %s, %s::timestamp,
                         %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (provider, market, code, freq, interval_start, observation_hash) do update set
                   observed_at = excluded.observed_at
                 returning observation_version
                 """,
-                (candidate.market, candidate.code, candidate.interval_start, observed_at, bar.native_trade_time,
+                (bar.provider, candidate.market, candidate.code, candidate.interval_start, observed_at, bar.native_trade_time,
                  bar.open, bar.high, bar.low, bar.close, bar.volume, bar.amount, bar.unit_conversion, observation_hash),
             )
             observation = cursor.fetchone()
@@ -407,11 +437,11 @@ class PostgresCurrentBarStore:
             cursor.execute(
                 """
                 update live.stock_bar_selected
-                set provider='mootdx',observation_version=%s,selection_reason='provider_refetch:mootdx',
+                set provider=%s,observation_version=%s,selection_reason=%s,
                     state='finalized',selected_at=%s,updated_at=now()
                 where market=%s and code=%s and freq='1m' and interval_start=%s
                 """,
-                (observation["observation_version"], observed_at, candidate.market, candidate.code, candidate.interval_start),
+                (bar.provider, observation["observation_version"], f"provider_refetch:{bar.provider}", observed_at, candidate.market, candidate.code, candidate.interval_start),
             )
             cursor.execute(
                 "update live.stock_bar_observation set finalized_at=%s where observation_version=%s",
@@ -446,7 +476,7 @@ class LiveBarIngestor:
             attempts = attempts_by_code[code]
             if bar is None:
                 self._store.record_attempts(attempts, observed_at, target_interval)
-                errors.append({"code": code, "message": "no exact current 1m Bar from mootdx"})
+                errors.append({"code": code, "message": "no exact current 1m Bar from configured whole-Bar providers"})
                 continue
             staged = self._store.stage(bar, observed_at, attempts)
             items.append(
@@ -454,14 +484,14 @@ class LiveBarIngestor:
                     code=code, market=stock_market_name(code), interval_start=target_interval,
                     interval_end=target_interval + timedelta(minutes=1), open=bar.open, high=bar.high, low=bar.low,
                     close=bar.close, volume=bar.volume, amount=bar.amount, observed_at=observed_at,
-                    provider="mootdx", observation_version=staged.observation_version,
+                    provider=bar.provider, observation_version=staged.observation_version,
                 )
             )
         return LiveIngestResult(items=tuple(items), attempts=provider_result.attempts, errors=tuple(errors))
 
 
 def ingest_current_stock_bars(request: CurrentBarRequest) -> LiveIngestResult:
-    provider = MootdxCurrentBarProvider()
+    provider = WholeBarFallbackProvider()
     store = PostgresCurrentBarStore()
     # Request-driven finalization keeps the first release progressing even
     # before the periodic recovery loop is deployed; finalization failures are
@@ -499,4 +529,4 @@ class CurrentBarFinalizer:
 
 
 def finalize_due_current_stock_bars(now: datetime | None = None, grace_seconds: int = 7) -> dict[str, int]:
-    return CurrentBarFinalizer(MootdxCurrentBarProvider(), PostgresCurrentBarStore(), grace_seconds).finalize_due(now)
+    return CurrentBarFinalizer(WholeBarFallbackProvider(), PostgresCurrentBarStore(), grace_seconds).finalize_due(now)

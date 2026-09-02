@@ -14,6 +14,7 @@ from quotemux.live_bars import (
     PostgresCurrentBarStore,
     CurrentBarFinalizationCandidate,
     CurrentBarFinalizer,
+    WholeBarFallbackProvider,
 )
 
 
@@ -218,3 +219,25 @@ def test_postgres_finalization_writes_history_audit_coverage_and_stage_state_tog
     assert any("insert into readmodel.stock_bar_1m_daily_coverage" in statement for statement in statements)
     assert any("insert into audit.stock_bar_1m_write_event" in statement for statement in statements)
     assert any("update live.stock_bar_selected" in statement for statement in statements)
+
+
+def test_whole_bar_fallback_uses_opentdx_only_when_mootdx_has_no_valid_bar() -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+
+    class _Primary:
+        def fetch(self, codes, effective_now):
+            del codes, effective_now
+            return ProviderCurrentBarsResult((), (CurrentBarNodeAttempt("600519", "mootdx", "malformed"),))
+
+    class _Fallback:
+        def fetch(self, codes, effective_now):
+            assert codes == ("600519",)
+            return ProviderCurrentBarsResult(
+                (NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400.0, 1401.0, 1399.0, 1400.5, 1200, 1_680_600.0, "opentdx:volume*1,amount*1", provider="opentdx"),),
+                (CurrentBarNodeAttempt("600519", "opentdx", "ok", provider="opentdx"),),
+            )
+
+    result = WholeBarFallbackProvider(_Primary(), _Fallback()).fetch(("600519",), interval)
+
+    assert [(bar.provider, bar.close) for bar in result.bars] == [("opentdx", 1400.5)]
+    assert [attempt.provider for attempt in result.attempts] == ["mootdx", "opentdx"]
