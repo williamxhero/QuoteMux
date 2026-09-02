@@ -72,6 +72,7 @@ class CurrentBarFinalizationCandidate:
     market: str
     code: str
     interval_start: datetime
+    freq: str = "1m"
 
 
 @dataclass(frozen=True)
@@ -431,9 +432,11 @@ class PostgresCurrentBarStore:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select market,btrim(code) as code,interval_start
+                    select market,btrim(code) as code,freq,interval_start
                     from live.stock_bar_selected
-                    where state='staged' and interval_start + interval '1 minute' + (%s * interval '1 second') <= %s
+                    where state='staged'
+                      and interval_start + (case freq when '30m' then interval '30 minutes' else interval '1 minute' end)
+                          + (%s * interval '1 second') <= %s
                     order by interval_start,code
                     for update skip locked
                     """,
@@ -451,7 +454,7 @@ class PostgresCurrentBarStore:
             db_client._release_connection(connection)
         return tuple(
             CurrentBarFinalizationCandidate(
-                market=str(row["market"]), code=str(row["code"]).strip(), interval_start=_as_shanghai(row["interval_start"]),
+                market=str(row["market"]), code=str(row["code"]).strip(), interval_start=_as_shanghai(row["interval_start"]), freq=str(row["freq"]),
             )
             for row in rows
         )
@@ -463,10 +466,10 @@ class PostgresCurrentBarStore:
         observed_at: datetime,
         attempts: tuple[CurrentBarNodeAttempt, ...],
     ) -> bool:
-        if _as_shanghai(bar.interval_start) != _as_shanghai(candidate.interval_start):
+        if candidate.freq not in {"1m", "30m"} or bar.freq != candidate.freq or _as_shanghai(bar.interval_start) != _as_shanghai(candidate.interval_start):
             return False
         canonical = {
-            "provider": bar.provider, "market": candidate.market, "code": candidate.code, "freq": "1m",
+            "provider": bar.provider, "market": candidate.market, "code": candidate.code, "freq": candidate.freq,
             "interval_start": candidate.interval_start.isoformat(), "native_trade_time": bar.native_trade_time,
             "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
             "volume": bar.volume, "amount": bar.amount, "unit_conversion": bar.unit_conversion,
@@ -477,36 +480,37 @@ class PostgresCurrentBarStore:
             cursor.execute(
                 """
                 select state from live.stock_bar_selected
-                where market=%s and code=%s and freq='1m' and interval_start=%s
+                where market=%s and code=%s and freq=%s and interval_start=%s
                 for update
                 """,
-                (candidate.market, candidate.code, candidate.interval_start),
+                (candidate.market, candidate.code, candidate.freq, candidate.interval_start),
             )
             selected = cursor.fetchone()
             if selected is None or str(selected["state"]) != "staged":
                 return False
-            self._write_attempts(cursor, attempts, observed_at, candidate.interval_start)
+            self._write_attempts(cursor, attempts, observed_at, candidate.interval_start, candidate.freq)
             cursor.execute(
                 """
                 insert into live.stock_bar_observation
                   (provider, market, code, freq, interval_start, observed_at, native_trade_time,
                    open, high, low, close, volume, amount, unit_conversion, observation_hash)
-                values (%s, %s, %s, '1m', %s, %s, %s::timestamp,
+                values (%s, %s, %s, %s, %s, %s, %s::timestamp,
                         %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (provider, market, code, freq, interval_start, observation_hash) do update set
                   observed_at = excluded.observed_at
                 returning observation_version
                 """,
-                (bar.provider, candidate.market, candidate.code, candidate.interval_start, observed_at, bar.native_trade_time,
+                (bar.provider, candidate.market, candidate.code, candidate.freq, candidate.interval_start, observed_at, bar.native_trade_time,
                  bar.open, bar.high, bar.low, bar.close, bar.volume, bar.amount, bar.unit_conversion, observation_hash),
             )
             observation = cursor.fetchone()
-            journal_state = db_client.discover_migration_range_journals(cursor, "stock_bar_1m")
+            fact_table = {"1m": "stock_bar_1m", "30m": "stock_bar_30m"}[candidate.freq]
+            journal_state = db_client.discover_migration_range_journals(cursor, fact_table)
             if journal_state.has_active_journal:
                 db_client.enable_explicit_range_journaling(cursor)
             cursor.execute(
-                """
-                insert into fact.stock_bar_1m (market, code, bar_time, open, high, low, close, volume, amount)
+                f"""
+                insert into fact.{fact_table} (market, code, bar_time, open, high, low, close, volume, amount)
                 values (%s, %s, %s::timestamptz at time zone 'Asia/Shanghai', %s, %s, %s, %s, %s, %s)
                 on conflict (market, code, bar_time) do update set
                   open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
@@ -519,7 +523,8 @@ class PostgresCurrentBarStore:
                 journal_state,
                 [candidate.interval_start.astimezone(SHANGHAI).replace(tzinfo=None)],
             )
-            cursor.execute(
+            if candidate.freq == "1m":
+                cursor.execute(
                 """
                 with refreshed as (
                   select market,code,bar_time::date as trade_date,count(*)::bigint as row_count,
@@ -538,8 +543,8 @@ class PostgresCurrentBarStore:
                   last_bar_time=excluded.last_bar_time,updated_at=excluded.updated_at
                 """,
                 (candidate.market, candidate.code, candidate.interval_start, candidate.interval_start),
-            )
-            cursor.execute(
+                )
+                cursor.execute(
                 """
                 insert into audit.stock_bar_1m_write_event(source_semantics,min_bar_time,max_bar_time,row_count)
                 values ('quotemux.live_bar_finalizer.provider_refetch',
@@ -547,15 +552,15 @@ class PostgresCurrentBarStore:
                         %s::timestamptz at time zone 'Asia/Shanghai', 1)
                 """,
                 (candidate.interval_start, candidate.interval_start),
-            )
+                )
             cursor.execute(
                 """
                 update live.stock_bar_selected
                 set provider=%s,observation_version=%s,selection_reason=%s,
                     state='finalized',selected_at=%s,updated_at=now()
-                where market=%s and code=%s and freq='1m' and interval_start=%s
+                where market=%s and code=%s and freq=%s and interval_start=%s
                 """,
-                (bar.provider, observation["observation_version"], f"provider_refetch:{bar.provider}", observed_at, candidate.market, candidate.code, candidate.interval_start),
+                (bar.provider, observation["observation_version"], f"provider_refetch:{bar.provider}", observed_at, candidate.market, candidate.code, candidate.freq, candidate.interval_start),
             )
             cursor.execute(
                 "update live.stock_bar_observation set finalized_at=%s where observation_version=%s",
@@ -631,7 +636,7 @@ class CurrentBarFinalizer:
         finalized = deferred = failed = 0
         for candidate in candidates:
             try:
-                refetched = self._provider.fetch((candidate.code,), candidate.interval_start)
+                refetched = self._provider.fetch((candidate.code,), candidate.interval_start, candidate.freq) if candidate.freq != "1m" else self._provider.fetch((candidate.code,), candidate.interval_start)
                 bar = next((item for item in refetched.bars if item.code == candidate.code and _as_shanghai(item.interval_start) == candidate.interval_start), None)
                 if bar is None:
                     deferred += 1

@@ -261,7 +261,7 @@ def test_finalizer_due_scan_waits_until_the_minute_has_closed_and_grace_has_elap
 
     assert PostgresCurrentBarStore().list_due(datetime(2026, 9, 2, 13, 31, 7, tzinfo=SHANGHAI), 7) == ()
 
-    assert "interval_start + interval '1 minute' + (%s * interval '1 second') <= %s" in statements[0]
+    assert "case freq when '30m' then interval '30 minutes' else interval '1 minute' end" in statements[0]
 
 
 def test_live_bar_retention_cleanup_keeps_the_latest_five_trading_days(monkeypatch) -> None:

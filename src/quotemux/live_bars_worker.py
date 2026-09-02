@@ -23,7 +23,8 @@ def main() -> int:
         codes = payload.get("codes", [])
         if not isinstance(codes, list) or not all(isinstance(code, str) for code in codes):
             raise ValueError("codes must be a list of strings")
-        result = ingest_current_stock_bars(CurrentBarRequest(codes=tuple(codes), effective_now=effective_now))
+        freq = str(payload.get("freq", "1m"))
+        result = ingest_current_stock_bars(CurrentBarRequest(codes=tuple(codes), effective_now=effective_now, freq=freq))
     except Exception as exc:
         print(f"live-ingest worker failed: {exc}", file=sys.stderr)
         return 1
