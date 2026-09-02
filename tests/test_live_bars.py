@@ -398,6 +398,40 @@ def test_postgres_finalization_writes_history_audit_coverage_and_stage_state_tog
     assert any("update live.stock_bar_selected" in statement for statement in statements)
 
 
+def test_postgres_finalization_writes_native_30m_to_its_own_fact_table(monkeypatch) -> None:
+    statements: list[str] = []
+
+    class _Cursor:
+        def __init__(self): self.fetches = iter(({"state": "staged"}, {"observation_version": 44}))
+        def execute(self, query, params=()):
+            del params; statements.append(" ".join(query.split()))
+        def fetchone(self): return next(self.fetches)
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+
+    class _Connection:
+        closed = False
+        def transaction(self): return nullcontext()
+        def cursor(self): return _Cursor()
+        def rollback(self): return None
+
+    monkeypatch.setattr("quotemux.live_bars.db_client.is_db_available", lambda: True)
+    monkeypatch.setattr("quotemux.live_bars.db_client._acquire_connection", lambda: _Connection())
+    monkeypatch.setattr("quotemux.live_bars.db_client._release_connection", lambda connection: None)
+    monkeypatch.setattr("quotemux.live_bars.db_client.discover_migration_range_journals", lambda cursor, table: type("Journal", (), {"has_active_journal": False})())
+    monkeypatch.setattr("quotemux.live_bars.db_client.append_migration_range_journals", lambda cursor, state, values: None)
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+
+    assert PostgresCurrentBarStore().finalize(
+        CurrentBarFinalizationCandidate("SHSE", "600519", interval, "30m"),
+        NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400, 1403, 1399, 1402.5, 350, 490555, "mootdx:volume*1,amount*1", freq="30m"),
+        interval + timedelta(minutes=30, seconds=7),
+        (CurrentBarNodeAttempt("600519", "mootdx", "ok"),),
+    ) is True
+    assert any("insert into fact.stock_bar_30m" in statement for statement in statements)
+    assert not any("stock_bar_1m_daily_coverage" in statement for statement in statements)
+
+
 def test_whole_bar_fallback_uses_opentdx_only_when_mootdx_has_no_valid_bar() -> None:
     interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
 
