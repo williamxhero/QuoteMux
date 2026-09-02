@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import json
+import os
 from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
 
@@ -54,6 +55,7 @@ class NativeCurrentStockBar:
 class ProviderCurrentBarsResult:
     bars: tuple[NativeCurrentStockBar, ...]
     attempts: tuple[CurrentBarNodeAttempt, ...]
+    diagnostics: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -124,12 +126,14 @@ class LiveIngestResult:
     items: tuple[CurrentStockBarItem, ...]
     attempts: tuple[CurrentBarNodeAttempt, ...]
     errors: tuple[dict[str, str], ...]
+    diagnostics: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
             "items": [item.to_dict() for item in self.items],
             "attempts": [attempt.__dict__ for attempt in self.attempts],
             "errors": list(self.errors),
+            "diagnostics": list(self.diagnostics),
         }
 
 
@@ -201,19 +205,47 @@ class OpenTdxCurrentBarProvider(PackageCurrentBarProvider):
         super().__init__("opentdx")
 
 
+class EFinancePriceValidator:
+    def __init__(self, severe_ratio: float | None = None) -> None:
+        self._severe_ratio = severe_ratio if severe_ratio is not None else float(os.getenv("MHK_LIVE_EFINANCE_SEVERE_RATIO", "0.05"))
+
+    def validate(self, bars: tuple[NativeCurrentStockBar, ...], effective_now: datetime) -> tuple[dict[str, object], ...]:
+        if not bars:
+            return ()
+        try:
+            handler = get_default_source_package_registry().get_handler("efinance", "get_current_stock_price_snapshots")
+            snapshots = handler([bar.code for bar in bars], _as_shanghai(effective_now).isoformat())
+        except Exception as exc:
+            return tuple({"code": bar.code, "validator": "efinance", "status": "unavailable", "detail": str(exc)} for bar in bars)
+        prices = {normalize_stock_code(item.code).zfill(6): float(item.price) for item in snapshots}
+        diagnostics: list[dict[str, object]] = []
+        for bar in bars:
+            price = prices.get(bar.code)
+            if price is None:
+                diagnostics.append({"code": bar.code, "validator": "efinance", "status": "unavailable"})
+                continue
+            ratio = abs(bar.close - price) / max(abs(price), 1e-12)
+            diagnostics.append({"code": bar.code, "validator": "efinance", "status": "severe" if ratio >= self._severe_ratio else "ok", "price": price, "difference_ratio": ratio})
+        return tuple(diagnostics)
+
+
 class WholeBarFallbackProvider:
-    def __init__(self, primary: CurrentBarProvider | None = None, fallback: CurrentBarProvider | None = None) -> None:
+    def __init__(self, primary: CurrentBarProvider | None = None, fallback: CurrentBarProvider | None = None, validator: EFinancePriceValidator | None = None) -> None:
         self._primary = primary or MootdxCurrentBarProvider()
         self._fallback = fallback or OpenTdxCurrentBarProvider()
+        self._validator = validator or EFinancePriceValidator()
 
     def fetch(self, codes: tuple[str, ...], effective_now: datetime) -> ProviderCurrentBarsResult:
         primary = self._primary.fetch(codes, effective_now)
+        diagnostics = self._validator.validate(primary.bars, effective_now)
+        severe = {str(item["code"]) for item in diagnostics if item.get("status") == "severe"}
         hit_codes = {bar.code for bar in primary.bars}
-        missing = tuple(code for code in codes if code not in hit_codes)
+        missing = tuple(code for code in codes if code not in hit_codes or code in severe)
         if not missing:
-            return primary
+            return ProviderCurrentBarsResult(primary.bars, primary.attempts, diagnostics)
         fallback = self._fallback.fetch(missing, effective_now)
-        return ProviderCurrentBarsResult(bars=primary.bars + fallback.bars, attempts=primary.attempts + fallback.attempts)
+        selected_primary = tuple(bar for bar in primary.bars if bar.code not in severe)
+        return ProviderCurrentBarsResult(bars=selected_primary + fallback.bars, attempts=primary.attempts + fallback.attempts, diagnostics=diagnostics)
 
 
 class PostgresCurrentBarStore:
@@ -487,7 +519,7 @@ class LiveBarIngestor:
                     provider=bar.provider, observation_version=staged.observation_version,
                 )
             )
-        return LiveIngestResult(items=tuple(items), attempts=provider_result.attempts, errors=tuple(errors))
+        return LiveIngestResult(items=tuple(items), attempts=provider_result.attempts, errors=tuple(errors), diagnostics=provider_result.diagnostics)
 
 
 def ingest_current_stock_bars(request: CurrentBarRequest) -> LiveIngestResult:

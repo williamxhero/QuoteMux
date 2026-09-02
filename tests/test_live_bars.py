@@ -241,3 +241,29 @@ def test_whole_bar_fallback_uses_opentdx_only_when_mootdx_has_no_valid_bar() -> 
 
     assert [(bar.provider, bar.close) for bar in result.bars] == [("opentdx", 1400.5)]
     assert [attempt.provider for attempt in result.attempts] == ["mootdx", "opentdx"]
+
+
+def test_severe_efinance_price_mismatch_replaces_the_whole_selected_bar() -> None:
+    interval = datetime(2026, 9, 2, 13, 30, tzinfo=SHANGHAI)
+    primary_bar = NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1400.0, 1401.0, 1399.0, 1400.5, 1200, 1_680_600.0, "mootdx:volume*1,amount*1")
+    fallback_bar = NativeCurrentStockBar("600519", interval, "2026-09-02 13:30:00", 1390.0, 1400.0, 1389.0, 1395.0, 1300, 1_813_500.0, "opentdx:volume*1,amount*1", provider="opentdx")
+
+    class _Provider:
+        def __init__(self, result): self.result = result
+        def fetch(self, codes, effective_now):
+            del codes, effective_now
+            return self.result
+
+    class _SevereValidator:
+        def validate(self, bars, effective_now):
+            del bars, effective_now
+            return ({"code": "600519", "validator": "efinance", "status": "severe", "price": 1300.0},)
+
+    result = WholeBarFallbackProvider(
+        _Provider(ProviderCurrentBarsResult((primary_bar,), ())),
+        _Provider(ProviderCurrentBarsResult((fallback_bar,), ())),
+        _SevereValidator(),
+    ).fetch(("600519",), interval)
+
+    assert [(bar.provider, bar.close) for bar in result.bars] == [("opentdx", 1395.0)]
+    assert result.diagnostics[0]["status"] == "severe"
