@@ -206,7 +206,7 @@ def _install_requirements(python_executable: Path, requirements_path: Path) -> N
 
 
 def _install_runtime_requirements(python_executable: Path) -> None:
-    _install_local_project_copy(str(python_executable), _runtime_project_root())
+    _install_local_project_copy(str(python_executable), _runtime_project_root(), resolve_dependencies=True)
     _install_distribution_for_python(str(python_executable))
 
 
@@ -228,7 +228,7 @@ def _install_distribution_for_python(python_executable: str) -> None:
     subprocess.run([python_executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-cache-dir", target], check=True)
 
 
-def _install_local_project_copy(python_executable: str, source_root: Path) -> None:
+def _install_local_project_copy(python_executable: str, source_root: Path, *, resolve_dependencies: bool = False) -> None:
     with tempfile.TemporaryDirectory(prefix="quotemux-package-build-") as temp_root:
         build_root = Path(temp_root) / source_root.name
         shutil.copytree(
@@ -237,11 +237,10 @@ def _install_local_project_copy(python_executable: str, source_root: Path) -> No
             ignore=shutil.ignore_patterns(".git", ".venv", "build", "*.egg-info", "__pycache__"),
         )
         command = [python_executable, "-m", "pip", "install"]
-        # The isolated venv inherits the deployment venv's verified core
-        # dependencies.  Reinstall only the local runtime code; resolving
-        # dependencies again can turn an atomic release into an hours-long
-        # network operation even when its marker already proved compatibility.
-        command.extend(["--upgrade", "--force-reinstall", "--no-deps", str(build_root)])
+        command.extend(["--upgrade", "--force-reinstall"])
+        if not resolve_dependencies:
+            command.append("--no-deps")
+        command.append(str(build_root))
         subprocess.run(command, check=True)
 
 

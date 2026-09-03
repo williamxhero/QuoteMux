@@ -15,6 +15,7 @@ from quotemux.source_packages.environment import (
     DEFAULT_PACKAGE_REPO_SPEC,
     _environment_is_ready,
     _install_local_project_copy,
+    _install_runtime_requirements,
     _package_source_hash,
     _runtime_requirements_hash,
     package_install_target,
@@ -193,3 +194,26 @@ def test_local_project_install_builds_from_temporary_copy(monkeypatch, tmp_path:
     assert commands[0][0:4] == ["python", "-m", "pip", "install"]
     assert "--no-deps" in commands[0]
     assert (source_root / "source_project.egg-info").is_dir()
+
+
+def test_runtime_install_resolves_quotemux_declared_dependencies(monkeypatch, tmp_path: Path) -> None:
+    runtime_root = tmp_path / "quotemux"
+    runtime_root.mkdir()
+    (runtime_root / "pyproject.toml").write_text(
+        "[project]\nname='quotemux'\ndependencies=['pydantic>=2']\n",
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def capture(command: list[str], *, check: bool) -> None:
+        assert check
+        commands.append(command)
+
+    monkeypatch.setattr("quotemux.source_packages.environment._runtime_project_root", lambda: runtime_root)
+    monkeypatch.setattr("quotemux.source_packages.environment._install_distribution_for_python", lambda python: None)
+    monkeypatch.setattr("quotemux.source_packages.environment.subprocess.run", capture)
+
+    _install_runtime_requirements(Path("python"))
+
+    assert commands
+    assert "--no-deps" not in commands[0]
