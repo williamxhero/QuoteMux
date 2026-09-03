@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from contextlib import nullcontext
+import io
+import json
+import sys
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -585,3 +588,18 @@ def test_efinance_validation_marks_a_malformed_snapshot_unavailable(monkeypatch)
 
     assert diagnostic["status"] == "unavailable"
     assert diagnostic["detail"] == "invalid_snapshot_price"
+
+
+def test_worker_recover_flag_does_not_require_shell_encoded_json(monkeypatch, capsys) -> None:
+    from quotemux import live_bars_worker
+
+    monkeypatch.setattr(sys, "argv", ["quotemux.live_bars_worker", "--recover"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{not-json}"))
+    monkeypatch.setattr(
+        live_bars_worker,
+        "recover_due_current_stock_bars",
+        lambda effective_now: {"recovered": True, "effective_now": effective_now},
+    )
+
+    assert live_bars_worker.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"recovered": True, "effective_now": None}

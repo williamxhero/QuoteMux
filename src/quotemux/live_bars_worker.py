@@ -9,7 +9,13 @@ from quotemux.live_bars import CurrentBarRequest, ingest_current_stock_bars, rec
 
 def main() -> int:
     try:
-        payload = json.loads(sys.stdin.read())
+        arguments = sys.argv[1:]
+        if arguments == ["--recover"]:
+            payload: dict[str, object] = {"action": "recover"}
+        elif arguments:
+            raise ValueError("usage: python -m quotemux.live_bars_worker [--recover]")
+        else:
+            payload = json.loads(sys.stdin.read())
         action = str(payload.get("action", "ingest"))
         if action == "recover":
             raw_now = payload.get("effective_now")
