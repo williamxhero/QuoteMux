@@ -274,6 +274,35 @@ class FakeStocks:
             raise RuntimeError("source failed")
         return [object(), object()], ContractReport(contract_name="stocks.quotes.daily").with_store_stats(write=True)
 
+    def get_quotes_query_result_with_report(self, request, *, write_fact_ref=True):
+        self.calls.append(request)
+        if self.broken:
+            raise RuntimeError("source failed")
+        items = [
+            StockQuoteItem(code=code, trade_time=request.start_date, freq="1d", close=1, volume=1, amount=1)
+            for code in request.codes
+        ]
+        return StockQuotesQueryResult(
+            items=items,
+            meta=StockQuotesMeta(
+                total_rows=len(items),
+                returned_rows=len(items),
+                complete=True,
+                truncated=False,
+                codes=[
+                    StockQuoteCodeSummary(
+                        code=code,
+                        row_count=1,
+                        expected_bar_count=1,
+                        actual_bar_count=1,
+                        complete=True,
+                        truncated=False,
+                    )
+                    for code in request.codes
+                ],
+            ),
+        ), ContractReport(contract_name="stocks.quotes.daily").with_store_stats(write=True)
+
 
 class FakeRuntime:
     def __init__(self, broken: bool = False) -> None:
@@ -406,6 +435,7 @@ def test_capture_due_converts_aware_datetime_to_policy_timezone() -> None:
 
 def test_run_capture_success_status(monkeypatch) -> None:
     runtime = FakeRuntime()
+    monkeypatch.setattr(QuoteMuxCaptureJob, "_write_fact_ref_items", lambda self, capability_id, items: 1)
     monkeypatch.setattr(
         capture,
         "build_capture_requests",
@@ -415,9 +445,83 @@ def test_run_capture_success_status(monkeypatch) -> None:
     result = _job(_policy(), runtime=runtime).run_capture("stocks.quotes.daily")
 
     assert result["status"] == CAPTURE_SUCCESS
-    assert result["row_count"] == 2
+    assert result["row_count"] == 1
     assert result["coverage_count"] == 1
     assert len(runtime.stocks.calls) == 1
+
+
+def test_daily_capture_is_partial_when_a_provider_batch_omits_a_requested_code_date(monkeypatch) -> None:
+    complete_item = StockQuoteItem(
+        code="600000",
+        trade_time="2026-09-04",
+        freq="1d",
+        open=10,
+        high=11,
+        low=9,
+        close=10.5,
+        volume=100,
+        amount=1000,
+    )
+
+    class DailyBatchRuntime:
+        def __init__(self) -> None:
+            self.stocks = self
+
+        def get_quotes_query_result_with_report(self, request, *, write_fact_ref=True):
+            assert write_fact_ref is False
+            return StockQuotesQueryResult(
+                items=[complete_item],
+                meta=StockQuotesMeta(
+                    total_rows=1,
+                    returned_rows=1,
+                    complete=False,
+                    truncated=False,
+                    codes=[
+                        StockQuoteCodeSummary(
+                            code="600000",
+                            row_count=1,
+                            expected_bar_count=1,
+                            actual_bar_count=1,
+                            complete=True,
+                            truncated=False,
+                        ),
+                        StockQuoteCodeSummary(
+                            code="600001",
+                            row_count=0,
+                            expected_bar_count=1,
+                            actual_bar_count=0,
+                            missing_count=1,
+                            complete=False,
+                            truncated=False,
+                            missing_trade_dates=["2026-09-04"],
+                        ),
+                    ],
+                ),
+            ), ContractReport(contract_name="stocks.quotes.daily").with_store_stats(write=True)
+
+    monkeypatch.setattr(
+        capture,
+        "build_capture_requests",
+        lambda policy, now: (
+            capture.CaptureRequest(
+                "stocks.quotes.daily",
+                {
+                    "codes": ["600000", "600001"],
+                    "freq": "1d",
+                    "start_date": "2026-09-04",
+                    "end_date": "2026-09-04",
+                },
+            ),
+        ),
+    )
+    monkeypatch.setattr(QuoteMuxCaptureJob, "_write_fact_ref_items", lambda self, capability_id, items: len(items))
+
+    result = _job(_policy(), runtime=DailyBatchRuntime()).run_capture("stocks.quotes.daily")
+
+    assert result["status"] == CAPTURE_PARTIAL
+    assert result["row_count"] == 1
+    assert result["coverage_count"] == 1
+    assert "600001" in str(result["detail_json"])
 
 
 def test_concept_member_capture_is_bounded_and_resumes_from_checkpoint(monkeypatch) -> None:
@@ -561,6 +665,48 @@ def test_cache_write_disabled_does_not_run(monkeypatch) -> None:
     assert result["status"] == CAPTURE_SKIPPED
     assert result["detail_json"]["reason"] == "cache_policy_disabled"
     assert runtime.stocks.calls == []
+
+
+def test_daily_snapshot_runs_when_generic_cache_write_is_disabled(monkeypatch) -> None:
+    class SnapshotRuntime:
+        def __init__(self) -> None:
+            self.stocks = self
+            self.calls: list[object] = []
+
+        def get_daily_snapshot_with_report(self, request):
+            self.calls.append(request)
+            return [object()], ContractReport(contract_name="stocks.quotes.daily_snapshot").with_store_stats(write=True)
+
+    policy = _policy(
+        capability_id="stocks.quotes.daily_snapshot",
+        scope_profile=PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS,
+        window_count=1,
+        batch_size=1,
+    )
+    runtime = SnapshotRuntime()
+    monkeypatch.setattr(
+        capture,
+        "build_capture_requests",
+        lambda policy, now: (
+            capture.CaptureRequest(
+                "stocks.quotes.daily_snapshot",
+                {"trade_date": "2026-04-27", "limit": 10000, "offset": 0},
+            ),
+        ),
+    )
+    job = QuoteMuxCaptureJob(
+        runtime=runtime,
+        policies=MemoryCapturePolicies((policy,)),
+        runs=MemoryCaptureRuns(),
+        locks=FakeLocks(),
+        now_provider=lambda: datetime(2026, 4, 27, 18, 30),
+        cache_store=FakeDisabledCacheStore(),
+    )
+
+    result = job.run_capture("stocks.quotes.daily_snapshot")
+
+    assert result["status"] == CAPTURE_SUCCESS
+    assert len(runtime.calls) == 1
 
 
 def test_capture_runs_when_cache_read_is_disabled_but_write_enabled(monkeypatch) -> None:
@@ -1222,6 +1368,43 @@ def test_recent_trading_days_excludes_current_day_before_market_data_ready(monke
     assert requested_end_dates == ["2026-07-16", "2026-07-17"]
     assert morning_days == ("2026-07-16",)
     assert evening_days == ("2026-07-16", "2026-07-17")
+
+
+def test_daily_capture_requests_include_final_same_day_data_by_1520(monkeypatch) -> None:
+    class _Frame:
+        empty = False
+
+        def __init__(self, records):
+            self.records = records
+
+        def to_dict(self, orient: str):
+            return self.records
+
+    monkeypatch.setattr(
+        capture,
+        "load_trade_calendar_frame",
+        lambda market, start_date, end_date, is_open: _Frame(
+            [
+                {"trade_date": trade_date}
+                for trade_date in ("2026-09-03", "2026-09-04")
+                if start_date <= trade_date <= end_date
+            ]
+        ),
+    )
+    monkeypatch.setattr(capture, "_active_stock_codes", lambda trade_date: ("600000", "000001"))
+    monkeypatch.setattr(
+        capture,
+        "_date_missing_ranges",
+        lambda capability_id, request_identity, expected_dates: ((expected_dates[0], expected_dates[-1]),),
+    )
+
+    requests = capture.build_capture_requests(
+        _policy(window_count=2, batch_size=100),
+        datetime(2026, 9, 4, 15, 20),
+    )
+
+    assert requests
+    assert requests[0].request_identity["end_date"] == "2026-09-04"
 
 
 def test_catalog_capture_requests_authoritative_full_refresh() -> None:

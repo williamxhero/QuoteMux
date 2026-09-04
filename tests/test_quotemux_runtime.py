@@ -3195,7 +3195,7 @@ def test_daily_snapshot_coverage_rejects_partial_snapshot(monkeypatch) -> None:
         _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 
-def test_daily_snapshot_coverage_allows_small_upstream_gap(monkeypatch) -> None:
+def test_daily_snapshot_coverage_rejects_even_one_upstream_gap(monkeypatch) -> None:
     active_frame = pd.DataFrame.from_records([{"code": f"{index:06d}"} for index in range(100)])
     monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
     items = [
@@ -3211,7 +3211,8 @@ def test_daily_snapshot_coverage_allows_small_upstream_gap(monkeypatch) -> None:
         for index in range(99)
     ]
 
-    _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
+    with pytest.raises(RuntimeError, match="trade_date=2026-07-02"):
+        _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 
 def test_daily_snapshot_coverage_does_not_accept_synthetic_suspension_rows(monkeypatch) -> None:

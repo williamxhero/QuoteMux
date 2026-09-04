@@ -38,7 +38,7 @@ CAPTURE_SUCCESS = "success"
 CAPTURE_PARTIAL = "partial"
 CAPTURE_FAILED = "failed"
 CAPTURE_SKIPPED = "skipped"
-CAPTURE_MARKET_DATA_READY_TIME = time(16, 0)
+CAPTURE_MARKET_DATA_READY_TIME = time(15, 5)
 
 CADENCE_DAILY = "daily"
 CADENCE_WEEKLY = "weekly"
@@ -2546,9 +2546,32 @@ class QuoteMuxCaptureJob:
             )
         if request.capability_id == "stocks.quotes.intraday":
             return self._run_intraday_capture_batch(request)
+        if request.capability_id == "stocks.quotes.daily":
+            return self._run_daily_capture_batch(request)
         items, report = self._run_runtime_request(request)
         normalized_items = tuple(self._normalize_runtime_items(items))
         return _CaptureBatchResult(normalized_items, int(getattr(report, "store_write_count", 0)))
+
+    def _run_daily_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
+        result, _report = self._runtime.stocks.get_quotes_query_result_with_report(
+            StockQuotesRequest(**request.request_identity),
+            write_fact_ref=False,
+        )
+        incomplete_summaries = tuple(summary for summary in result.meta.codes if not summary.complete)
+        incomplete_codes = {summary.code for summary in incomplete_summaries}
+        complete_items = tuple(item for item in result.items if item.code not in incomplete_codes)
+        write_count = self._write_fact_ref_items(request.capability_id, complete_items)
+        if incomplete_summaries == ():
+            return _CaptureBatchResult(complete_items, write_count)
+        samples = ",".join(
+            f"{summary.code}:{','.join(summary.missing_trade_dates[:3])}"
+            for summary in incomplete_summaries[:10]
+        )
+        issue = (
+            "股票日线 provider batch 覆盖不完整: "
+            f"incomplete_codes={len(incomplete_summaries)} sample={samples}"
+        )
+        return _CaptureBatchResult(complete_items, write_count, (issue,))
 
     def _run_back_adjusted_repair_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
         if self._back_adjusted_repair_evidence is None or self._dataset_version_guard is None:
@@ -2699,9 +2722,9 @@ class QuoteMuxCaptureJob:
     def _precheck_skip(self, policy: CapturePolicy, planned_time: datetime) -> CaptureRun | None:
         if not policy.enabled:
             return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "capture_policy_disabled"})
-        # Catalog has its own immutable snapshot store; generic cache policy does
-        # not govern its publication and must not turn a repair into a skip.
-        if policy.capability_id != "futures.contracts.catalog":
+        # These capabilities write through dedicated fact/ref stores; generic
+        # response-cache policy does not govern their durable capture writes.
+        if policy.capability_id not in {"futures.contracts.catalog", "stocks.quotes.daily_snapshot"}:
             cache_policy = self._cache_store.get_policy(policy.capability_id)
             if cache_policy is None or not cache_policy.write_enabled:
                 return self._create_finished_run(policy, planned_time, CAPTURE_SKIPPED, 0, 0, "", {"reason": "cache_policy_disabled"})

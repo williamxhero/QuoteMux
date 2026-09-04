@@ -755,14 +755,12 @@ def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit
     if not active_frame.empty:
         active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
         expected_codes = set(active_codes[: offset + limit])
-        expected_count = len(expected_codes)
-        expected_min = expected_count if expected_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD else int(expected_count * 0.9)
         actual_codes = {
             normalize_stock_code(item.code).zfill(6)
             for item in items
             if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)
         }
-        if len(actual_codes & expected_codes) >= expected_min:
+        if expected_codes.issubset(actual_codes):
             return []
     missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset, active_frame)
     if missing_codes != []:
@@ -782,9 +780,9 @@ def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem]
         raise RuntimeError(f"股票日线快照为全市场占位数据：trade_date={trade_date}")
     active_codes = {normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")}
     actual_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
-    expected_count = min(len(active_codes), offset + limit)
-    expected_min = expected_count if expected_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD else int(expected_count * 0.9)
-    if len(actual_codes) < expected_min:
+    expected_codes = set(sorted(active_codes)[: offset + limit])
+    expected_min = len(expected_codes)
+    if len(actual_codes & expected_codes) < expected_min:
         raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected_min={expected_min} actual={len(actual_codes)}")
 
 
