@@ -1027,6 +1027,7 @@ class QuoteMuxStocks:
             raise ValueError("offset 不能小于 0")
         local_items = get_local_stock_daily_snapshot_full(actual_trade_date)
         base_items = _drop_daily_snapshot_placeholders(actual_trade_date, local_items)
+        fact_ref_writer = get_fact_ref_writer("stocks.quotes.daily_snapshot")
         items, report = execute_capability_query(
             CapabilityQuerySpec(
                 capability_id="stocks.quotes.daily_snapshot",
@@ -1039,10 +1040,24 @@ class QuoteMuxStocks:
                 source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
                 base_items=base_items,
                 base_source_name="fact.stock_daily_1d",
-                fact_ref_writer=get_fact_ref_writer("stocks.quotes.daily_snapshot"),
+                fact_ref_writer=None,
             )
         )
         _assert_daily_snapshot_coverage(actual_trade_date, items, request.limit, request.offset)
+        if fact_ref_writer is not None:
+            base_by_key = {
+                (item.code, item.trade_time, item.freq): item.model_dump()
+                for item in base_items
+            }
+            provider_items = [
+                item
+                for item in items
+                if base_by_key.get((item.code, item.trade_time, item.freq)) != item.model_dump()
+            ]
+            if provider_items:
+                if not fact_ref_writer(provider_items):
+                    raise RuntimeError("fact ref 写入失败: stocks.quotes.daily_snapshot")
+                report = report.with_store_stats(write=True)
         filtered_items = _apply_snapshot_filters(items, request.skip_suspended, request.skip_st)
         return filtered_items[request.offset: request.offset + request.limit], report
     def get_daily_local_window(self, request: StockDailyLocalWindowRequest) -> list[StockQuoteItem]:

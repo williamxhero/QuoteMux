@@ -3215,6 +3215,47 @@ def test_daily_snapshot_coverage_rejects_even_one_upstream_gap(monkeypatch) -> N
         _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 
+def test_daily_snapshot_does_not_write_fact_before_exact_coverage_passes(monkeypatch) -> None:
+    active_codes = [f"{index:06d}" for index in range(100)]
+    fetched_items = [
+        StockQuoteItem(
+            code=code,
+            trade_time="2026-07-02",
+            freq="1d",
+            open=1.0,
+            high=1.0,
+            low=1.0,
+            close=1.0,
+            pre_close=1.0,
+            pct_chg=0.0,
+            volume=1.0,
+            amount=1.0,
+        )
+        for code in active_codes[:-1]
+    ]
+    fact_ref_items: list[StockQuoteItem] = []
+    monkeypatch.setattr("quotemux.stocks.get_local_stock_daily_snapshot_full", lambda trade_date: [])
+    monkeypatch.setattr(
+        "quotemux.stocks.load_stock_active_codes_frame",
+        lambda trade_date: pd.DataFrame.from_records([{"code": code} for code in active_codes]),
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks._source_package_call",
+        _source_call_stub({("efinance", "get_stock_daily_snapshot_full"): fetched_items}),
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks.get_fact_ref_writer",
+        lambda capability_id: lambda items: fact_ref_items.extend(items) is None or True,
+    )
+
+    with pytest.raises(RuntimeError, match="trade_date=2026-07-02"):
+        QuoteMux().stocks.get_daily_snapshot_with_report(
+            StockDailySnapshotRequest(trade_date="2026-07-02")
+        )
+
+    assert fact_ref_items == []
+
+
 def test_daily_snapshot_coverage_does_not_accept_synthetic_suspension_rows(monkeypatch) -> None:
     active_frame = pd.DataFrame.from_records([{"code": "000001"}, {"code": "000002"}])
     monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
