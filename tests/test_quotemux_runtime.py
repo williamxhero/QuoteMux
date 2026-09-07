@@ -1207,6 +1207,33 @@ def test_stock_catalog_writer_keeps_board_type_compatible(monkeypatch) -> None:
     assert captured["params"] == [("BJSE", "920028", "新恒泰", "塑料", "beijing", "2026-03-20", "", "浙江", "beijing")]
 
 
+def test_stock_catalog_writer_classifies_blank_b_share_and_bjse_boards(monkeypatch) -> None:
+    from quotemux import fact_ref_writes
+
+    captured: dict[str, object] = {}
+
+    def fake_execute_many(query: str, params: list[tuple[object, ...]]) -> bool:
+        captured["params"] = params
+        return True
+
+    monkeypatch.setattr(fact_ref_writes, "_existing_columns", lambda table_schema, table_name: {"board_type"} if table_schema == "ref" and table_name == "stock" else set())
+    monkeypatch.setattr(fact_ref_writes, "execute_many", fake_execute_many)
+
+    assert fact_ref_writes._upsert_stock_catalog(
+        [
+            StockBasicInfo(code="900901", name="云赛Ｂ股", exchange="SHSE", market="", list_status="listed", list_date="", delist_date="", industry="", area=""),
+            StockBasicInfo(code="200017", name="深中华B", exchange="SZSE", market="", list_status="listed", list_date="", delist_date="", industry="", area=""),
+            StockBasicInfo(code="834683", name="爹地宝贝", exchange="BJSE", market="", list_status="listed", list_date="", delist_date="", industry="", area=""),
+        ]
+    )
+
+    assert captured["params"] == [
+        ("SHSE", "900901", "云赛Ｂ股", "", "B股", "", "", "", "B股"),
+        ("SZSE", "200017", "深中华B", "", "B股", "", "", "", "B股"),
+        ("BJSE", "834683", "爹地宝贝", "", "北交所", "", "", "", "北交所"),
+    ]
+
+
 def test_local_index_quotes_preserve_daily_pre_close(monkeypatch) -> None:
     monkeypatch.setattr(
         "quotemux.local_store.load_index_daily_frame",

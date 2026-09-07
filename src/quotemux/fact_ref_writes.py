@@ -830,7 +830,7 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         if code == "":
             continue
         market = _exchange_to_ref(item.exchange or item.market or _stock_market(code))
-        listing_board = item.listing_board or item.market
+        listing_board = item.listing_board or item.market or _stock_catalog_listing_board(code, market)
         params.append((market, code, item.name, item.industry, listing_board, format_date_value(item.list_date), _stock_status_to_delisted_date(item), item.area))
     board_type_column_sql = ", board_type" if has_board_type else ""
     board_type_value_sql = ", %s" if has_board_type else ""
@@ -852,6 +852,26 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         """,
         params,
     )
+
+
+def _stock_catalog_listing_board(code: str, market: str) -> str:
+    """Classify catalog entries where an upstream source omits the board value.
+
+    B-share prefixes and the Beijing exchange are exchange-defined identifiers,
+    not an inferred market-data attribute.  Keeping this narrow fallback at the
+    reference-table boundary ensures every catalog provider yields a usable
+    canonical board type when its raw field is empty.
+    """
+
+    normalized_code = normalize_stock_code(code).zfill(6)
+    normalized_market = market.strip().upper()
+    if normalized_market == "BJSE":
+        return "北交所"
+    if (normalized_market == "SHSE" and normalized_code.startswith("900")) or (
+        normalized_market == "SZSE" and normalized_code.startswith("200")
+    ):
+        return "B股"
+    return ""
 
 
 def _upsert_stock_name_history(items: Sequence[NameHistoryItem]) -> bool:
