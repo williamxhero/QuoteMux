@@ -811,7 +811,7 @@ def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderSte
         "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: fetch_snapshot(instance.package_id, missing_codes, request_trade_date),
         "get_stock_quotes": lambda instance: lambda missing_codes, request_trade_date: _source_package_call(instance.package_id, "get_stock_quotes", missing_codes, "1d", request_trade_date, "", "", "", "", None, "none"),
     }
-    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "akshare", "mootdx"))
+    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "akshare", "mootdx", "opentdx"))
 
 
 def _indicator_codes_from_params(code: str, codes: str) -> list[str]:

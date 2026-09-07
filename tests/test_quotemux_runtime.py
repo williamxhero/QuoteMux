@@ -266,6 +266,39 @@ def test_daily_snapshot_with_report_fills_missing_codes_from_b3() -> None:
     assert report.source_hit_counts["efinance"] == 1
 
 
+def test_daily_snapshot_with_report_fills_tushare_gap_from_opentdx(monkeypatch) -> None:
+    runtime = QuoteMux(QuoteMuxSettings(enabled_sources=("tushare", "efinance", "akshare", "mootdx", "opentdx")))
+    fact_ref_items: list[StockQuoteItem] = []
+    tushare_item = StockQuoteItem(
+        code="600000", trade_time="2026-04-03", freq="1d", open=10.0, high=11.0, low=9.5,
+        close=10.5, pre_close=10.0, pct_chg=5.0, volume=1000.0, amount=1000000.0, adjust="none",
+    )
+    opentdx_item = StockQuoteItem(
+        code="000001", trade_time="2026-04-03", freq="1d", open=9.0, high=10.0, low=8.5,
+        close=9.5, pre_close=9.0, pct_chg=5.56, volume=1000.0, amount=1000000.0, adjust="none",
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks.load_stock_active_codes_frame",
+        lambda trade_date: pd.DataFrame([{"code": "600000"}, {"code": "000001"}]),
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks._source_package_call",
+        _source_call_stub(
+            {
+                ("tushare", "get_stock_daily_snapshot_full"): [tushare_item],
+                ("opentdx", "get_stock_quotes"): [opentdx_item],
+            }
+        ),
+    )
+    monkeypatch.setattr("quotemux.stocks.get_fact_ref_writer", lambda _: lambda items: fact_ref_items.extend(items) is None or True)
+
+    items, report = runtime.stocks.get_daily_snapshot_with_report(StockDailySnapshotRequest(trade_date="2026-04-03"))
+
+    assert [item.code for item in items] == ["000001", "600000"]
+    assert fact_ref_items == items
+    assert report.source_hit_counts["opentdx"] == 1
+
+
 def test_daily_snapshot_partial_gap_prefers_market_snapshot(monkeypatch) -> None:
     runtime = QuoteMux()
     calls: list[tuple[str, str, tuple[object, ...]]] = []
