@@ -1437,11 +1437,16 @@ def _index_quote_requests(policy: CapturePolicy, capability_id: str, now: dateti
 
 def _daily_snapshot_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
-    return tuple(
-        CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
-        for trade_date in trading_days
-        if _stock_daily_fact_missing(trade_date)
-    )
+    if trading_days == ():
+        return ()
+    # This capability gates daily close readiness, so it must be exact for the
+    # newest completed trading day.  Historical gaps remain visible to health
+    # and repair workflows; replaying them here would make today's readiness
+    # task fail for unrelated backlog.
+    trade_date = trading_days[-1]
+    if not _stock_daily_fact_missing(trade_date):
+        return ()
+    return (CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0}),)
 
 
 def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:

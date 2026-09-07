@@ -644,7 +644,7 @@ def test_second_phase_profiles_build_requests(monkeypatch) -> None:
     index_members = capture.build_capture_requests(_policy(capability_id="indexes.members", scope_profile=PROFILE_INDEXES_RECENT_TRADING_DAYS, window_count=1), now)
     concept_members = capture.build_capture_requests(_policy(capability_id="concepts.members", scope_profile=PROFILE_CONCEPTS_RECENT_TRADING_DAYS, window_count=1), now)
 
-    assert [item.request_identity["trade_date"] for item in snapshot] == ["2026-04-24", "2026-04-27"]
+    assert [item.request_identity["trade_date"] for item in snapshot] == ["2026-04-27"]
     assert calendar[0].request_identity["start_date"] == "2026-01-01"
     assert calendar[0].request_identity["end_date"] == "2027-12-31"
     assert [item.request_identity for item in concept_quotes] == [
@@ -740,6 +740,14 @@ def test_daily_snapshot_only_builds_missing_trade_dates(monkeypatch) -> None:
     requests = capture.build_capture_requests(_policy(capability_id="stocks.quotes.daily_snapshot", scope_profile=PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS, window_count=3), datetime(2026, 4, 27, 18, 30))
 
     assert [item.request_identity["trade_date"] for item in requests] == ["2026-04-27"]
+
+
+def test_daily_snapshot_checks_only_latest_trading_date(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_recent_trading_days", lambda _window_count, _now: ("2026-04-23", "2026-04-24", "2026-04-27"))
+    monkeypatch.setattr(capture, "_stock_daily_fact_missing", lambda trade_date: trade_date != "2026-04-27")
+    policy = _policy(capability_id="stocks.quotes.daily_snapshot", scope_profile=PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS, window_count=3)
+
+    assert capture._daily_snapshot_requests(policy, "stocks.quotes.daily_snapshot", datetime(2026, 4, 27, 18, 30)) == ()
 
 
 def test_daily_snapshot_requires_every_active_stock(monkeypatch) -> None:
