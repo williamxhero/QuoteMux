@@ -335,6 +335,20 @@ def test_daily_snapshot_requests_large_gap_use_full_snapshot(monkeypatch) -> Non
     assert _build_snapshot_requests("2026-04-03", local_items) == [([], "2026-04-03")]
 
 
+def test_daily_snapshot_requests_single_missing_active_code(monkeypatch) -> None:
+    active_frame = pd.DataFrame([{"code": f"{index:06d}"} for index in range(1, 122)])
+    local_items = [
+        StockQuoteItem(code=f"{index:06d}", trade_time="2026-04-03", freq="1d", close=10.5, pre_close=10.0, pct_chg=5.0, amount=1000000.0, adjust="none")
+        for index in range(1, 121)
+    ]
+
+    monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
+
+    assert _build_snapshot_requests("2026-04-03", local_items) == [(["000121"], "2026-04-03")]
+    with pytest.raises(RuntimeError, match="expected=121 actual=120"):
+        _assert_daily_snapshot_coverage("2026-04-03", local_items, 10000, 0)
+
+
 def test_limit_order_candidates_use_close_and_limit_prices() -> None:
     quotes = [
         StockQuoteItem(code="600001", trade_time="2026-04-03", freq="1d", close=11.0),
@@ -3228,7 +3242,7 @@ def test_daily_snapshot_coverage_rejects_partial_snapshot(monkeypatch) -> None:
         _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 
-def test_daily_snapshot_coverage_allows_small_upstream_gap(monkeypatch) -> None:
+def test_daily_snapshot_coverage_rejects_small_upstream_gap(monkeypatch) -> None:
     active_frame = pd.DataFrame.from_records([{"code": f"{index:06d}"} for index in range(100)])
     monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
     items = [
@@ -3244,7 +3258,8 @@ def test_daily_snapshot_coverage_allows_small_upstream_gap(monkeypatch) -> None:
         for index in range(99)
     ]
 
-    _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
+    with pytest.raises(RuntimeError, match="expected=100 actual=99"):
+        _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 
 def test_daily_snapshot_coverage_does_not_accept_synthetic_suspension_rows(monkeypatch) -> None:
