@@ -1266,6 +1266,12 @@ def _recent_stock_daily_count(trade_date: str) -> int:
 
 def _stock_daily_fact_missing(trade_date: str) -> bool:
     actual_count = _complete_stock_daily_count(trade_date)
+    expected_codes = _active_stock_codes(trade_date)
+    if expected_codes != ():
+        # A market-wide snapshot is a strict active-universe contract.  The
+        # historical 90%-of-recent-peak heuristic can silently accept a small
+        # but real provider gap, which then makes the scheduler stop retrying.
+        return actual_count != len(expected_codes)
     expected_count = _recent_stock_daily_count(trade_date)
     return not _daily_count_complete(actual_count, expected_count)
 

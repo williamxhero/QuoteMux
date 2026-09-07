@@ -11,6 +11,7 @@ from quotemux.models import ConceptAliasGroupItem
 from platform_models import ConceptQuoteItem, FutureContractCatalogItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult
 from quotemux.store import capture
 from quotemux.capabilities import is_independently_configurable_capability_id, list_capability_ids
+from quotemux.capabilities.inventory import _infer_source_order
 from quotemux.store.capture import (
     CADENCE_DAILY,
     CADENCE_MONTHLY,
@@ -739,6 +740,20 @@ def test_daily_snapshot_only_builds_missing_trade_dates(monkeypatch) -> None:
     requests = capture.build_capture_requests(_policy(capability_id="stocks.quotes.daily_snapshot", scope_profile=PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS, window_count=3), datetime(2026, 4, 27, 18, 30))
 
     assert [item.request_identity["trade_date"] for item in requests] == ["2026-04-27"]
+
+
+def test_daily_snapshot_requires_every_active_stock(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_complete_stock_daily_count", lambda _trade_date: 2)
+    monkeypatch.setattr(capture, "_active_stock_codes", lambda _trade_date: ("000001", "000002", "000003"))
+
+    assert capture._stock_daily_fact_missing("2026-04-27") is True
+
+    monkeypatch.setattr(capture, "_complete_stock_daily_count", lambda _trade_date: 3)
+    assert capture._stock_daily_fact_missing("2026-04-27") is False
+
+
+def test_daily_snapshot_default_source_order_includes_opentdx() -> None:
+    assert _infer_source_order("stocks.quotes.daily_snapshot")[-1] == "opentdx"
 
 
 def test_report_period_requests_only_build_missing_periods(monkeypatch) -> None:

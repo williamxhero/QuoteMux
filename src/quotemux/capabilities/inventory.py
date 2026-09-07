@@ -356,7 +356,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "indexes.quotes.daily":
         return ("tushare", "akshare", "mootdx", "opentdx")
     if capability_id == "stocks.quotes.daily_snapshot":
-        return ("tushare", "efinance", "akshare", "mootdx")
+        return ("tushare", "efinance", "akshare", "mootdx", "opentdx")
     if capability_id in {"indexes.members"}:
         return ("tushare", "efinance", "mootdx", "akshare")
     if capability_id.startswith("markets.calendar."):
