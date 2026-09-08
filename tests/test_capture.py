@@ -824,6 +824,25 @@ def test_concept_money_flow_requests_only_build_missing_ranges(monkeypatch) -> N
     assert [item.request_identity["end_date"] for item in requests] == ["2026-04-27"]
 
 
+def test_concept_money_flow_snapshot_capture_uses_canonical_concept_scope(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_recent_trading_days", lambda _window_count, _now: ("2026-04-24", "2026-04-27"))
+    monkeypatch.setattr(capture, "_single_date_missing", lambda *_args: True)
+
+    requests = capture.build_capture_requests(
+        _policy(
+            capability_id="concepts.indicators.money_flow.snapshot",
+            scope_profile=capture.PROFILE_MARKET_RECENT_TRADING_DAYS,
+            window_count=2,
+        ),
+        datetime(2026, 4, 27, 18, 30),
+    )
+
+    assert [item.request_identity for item in requests] == [
+        {"trade_date": "2026-04-24", "scope": "concept", "limit": 10000, "offset": 0},
+        {"trade_date": "2026-04-27", "scope": "concept", "limit": 10000, "offset": 0},
+    ]
+
+
 def test_stock_money_flow_batch_requests_only_build_missing_trade_dates(monkeypatch) -> None:
     class _Frame:
         empty = False

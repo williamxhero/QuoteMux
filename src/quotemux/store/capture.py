@@ -1611,10 +1611,11 @@ def _market_recent_trading_day_requests(policy: CapturePolicy, capability_id: st
     start_date, end_date = _date_window(policy, now)
     recent_days = _recent_trading_days(policy.window_count, now)
     if capability_id == "concepts.indicators.money_flow.snapshot":
+        request_scope = {"scope": "concept", "limit": 10000, "offset": 0}
         return tuple(
-            CaptureRequest(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0})
+            CaptureRequest(capability_id, {"trade_date": trade_date, **request_scope})
             for trade_date in recent_days
-            if _single_date_missing(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0})
+            if _single_date_missing(capability_id, {"trade_date": trade_date, **request_scope})
         )
     identities = {
         "markets.indicators.main_capital_flow": {"trade_date": "", "start_date": start_date, "end_date": end_date},
