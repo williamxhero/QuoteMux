@@ -361,7 +361,9 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "view")
     if capability_id == "stocks.indicators.risk_flags":
         return ("flag_type", "status")
-    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot"}:
+    if capability_id == "concepts.indicators.money_flow.snapshot":
+        return ("scope",)
+    if capability_id == "concepts.indicators.money_flow":
         return ("concept_id", "scope")
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_type")
