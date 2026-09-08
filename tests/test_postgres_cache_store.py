@@ -172,6 +172,26 @@ def test_concept_money_flow_snapshot_scope_reads_every_concept() -> None:
     assert {item["concept_id"] for item in result.items} == {"C1", "C2"}
 
 
+def test_concept_money_flow_snapshot_read_is_limited_to_requested_trade_date() -> None:
+    store = _store(_policy_for("concepts.indicators.money_flow.snapshot"))
+    for trade_date in ("2026-09-07", "2026-09-08"):
+        request = {"trade_date": trade_date, "scope": "concept", "limit": 10000, "offset": 0}
+        store.write(
+            "concepts.indicators.money_flow.snapshot",
+            request,
+            [ConceptMoneyFlowItem(concept_id="C1", trade_date=trade_date, scope="concept", net_inflow=1.0)],
+            ContractReport(contract_name="concepts.indicators.money_flow.snapshot"),
+        )
+
+    result = store.read(
+        "concepts.indicators.money_flow.snapshot",
+        {"trade_date": "2026-09-08", "scope": "concept", "limit": 10000, "offset": 0},
+    )
+
+    assert result.hit
+    assert [item["trade_date"] for item in result.items] == ["2026-09-08"]
+
+
 class _Snapshot:
     profile_id = "profile-default"
     version = "v1"

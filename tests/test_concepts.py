@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import quotemux  # noqa: F401
-from platform_models import BoardMemberItem as PlatformBoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, ConceptAliasGroupItem, ConceptAliasGroupMemberItem
+from platform_models import BoardMemberItem as PlatformBoardMemberItem, BoardMoneyFlowItem, BoardQuoteItem, ConceptAliasGroupItem, ConceptAliasGroupMemberItem, ConceptMoneyFlowItem
 from quotemux.concept_runtime import QuoteMuxConceptRuntime
 from quotemux.config_runtime.models import SourceInstanceConfig
 from quotemux.concepts import ConceptIdRegistry, ConceptProviderSource, _assign_concept_ids, _concept_name_start_date, _group_signature, _typed_sources, build_concept_alias_asset
@@ -114,6 +114,23 @@ def test_concept_money_flow_provider_call_uses_timeout_wrapper(monkeypatch) -> N
         ("concepts.indicators.money_flow.snapshot", "akshare", "get_concept_daily_money_flow_snapshot"),
         ("concepts.indicators.money_flow", "akshare", "get_concept_money_flow"),
     ]
+
+
+def test_market_money_flow_uses_persisted_snapshot_without_provider_call(monkeypatch) -> None:
+    runtime = QuoteMuxConceptRuntime(QuoteMuxSettings(enabled_sources=("akshare",)))
+    cached = [ConceptMoneyFlowItem(concept_id="C1", trade_date="2026-09-08", scope="concept", net_inflow=1.0)]
+    monkeypatch.setattr(
+        "quotemux.concept_runtime.load_store_result",
+        lambda *args: (cached, type("Read", (), {"hit": True})()),
+    )
+    monkeypatch.setattr(
+        "quotemux.concept_runtime._timed_source_package_call",
+        lambda *args: (_ for _ in ()).throw(AssertionError("provider must not run on a persisted snapshot hit")),
+    )
+
+    items = runtime.get_market_money_flow("2026-09-08", "concept", 100, 0)
+
+    assert items == cached
 
 
 def test_concept_alias_asset_uses_crawler_provider_members() -> None:
