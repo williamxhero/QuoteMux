@@ -120,7 +120,7 @@ def test_canonical_minute_time_key_skips_reparsing(monkeypatch) -> None:
     assert stocks._quote_time_key(item) == "2026-08-21 09:31:00"
 
 
-def test_daily_snapshot_accepts_small_gap_after_large_market_coverage(monkeypatch) -> None:
+def test_daily_snapshot_refetches_any_missing_active_code(monkeypatch) -> None:
     active = pd.DataFrame([{"code": f"{index:06d}"} for index in range(100)])
     local_items = [
         StockQuoteItem(
@@ -136,7 +136,7 @@ def test_daily_snapshot_accepts_small_gap_after_large_market_coverage(monkeypatc
     ]
     monkeypatch.setattr(stocks, "load_stock_active_codes_frame", lambda _trade_date: active)
 
-    assert stocks._build_snapshot_requests("2026-08-21", local_items) == []
+    assert stocks._build_snapshot_requests("2026-08-21", local_items) == [(["000099"], "2026-08-21")]
 
 
 def test_futures_coverage_reads_maintained_summary_without_fact_aggregate(monkeypatch) -> None:
