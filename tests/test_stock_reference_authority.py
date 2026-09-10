@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
-
-from quotemux import fact_ref_writes
+from quotemux.models import StockBasicInfo
+from quotemux.settings import QuoteMuxSettings
 from quotemux.stock_reference_authority import (
     STOCK_REFERENCE_AUTHORITY_SCHEMA_SQL,
+    StockAuthorityInputError,
     StockReferenceMigrationError,
     apply_stock_reference_authority_migration,
+    freeze_stock_authority_input,
+    latest_completed_trading_day,
+    prepare_stock_authority_input,
 )
 
+from quotemux import fact_ref_writes
+from quotemux import stock_reference_authority as authority
 
 LEGACY_COLUMNS = {
     "market",
@@ -132,6 +140,45 @@ class DailyConnection:
         self.rollbacks += 1
 
 
+class AuthorityCursor:
+    def __init__(self, connection: AuthorityConnection) -> None:
+        self.connection = connection
+
+    def __enter__(self) -> AuthorityCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str, params: object = None) -> None:
+        normalized = " ".join(query.split())
+        self.connection.calls.append(("one", normalized, params))
+
+    def executemany(self, query: str, params: list[tuple[object, ...]]) -> None:
+        normalized = " ".join(query.split())
+        self.connection.calls.append(("many", normalized, params))
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.connection.existing_input
+
+
+class AuthorityConnection:
+    def __init__(self, existing_input: tuple[object, ...] | None = None) -> None:
+        self.existing_input = existing_input
+        self.calls: list[tuple[str, str, object]] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self, **_kwargs: object) -> AuthorityCursor:
+        return AuthorityCursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
 def test_expand_migration_is_repeatable_and_keeps_legacy_inserts_compatible() -> None:
     connection = FakeConnection()
 
@@ -155,7 +202,9 @@ def test_expand_migration_is_repeatable_and_keeps_legacy_inserts_compatible() ->
 
 
 def test_expand_migration_rolls_back_all_statements_after_failure() -> None:
-    connection = FakeConnection(fail_on="create table if not exists audit.stock_authority_input_item")
+    connection = FakeConnection(
+        fail_on="create table if not exists audit.stock_authority_input_item"
+    )
 
     with pytest.raises(RuntimeError, match="injected migration failure"):
         apply_stock_reference_authority_migration(lambda: connection)
@@ -254,3 +303,209 @@ def test_daily_writer_rolls_back_reference_and_fact_on_failure(monkeypatch) -> N
     assert result is False
     assert connection.commits == 0
     assert connection.rollbacks == 1
+
+
+def _stock(
+    code: str,
+    name: str,
+    status: str,
+    *,
+    exchange: str = "",
+    delist_date: str = "",
+) -> StockBasicInfo:
+    return StockBasicInfo(
+        code=code,
+        name=name,
+        exchange=exchange,
+        market="",
+        list_status=status,
+        list_date="2020-01-01",
+        delist_date=delist_date,
+    )
+
+
+def _complete_shards() -> dict[str, list[StockBasicInfo]]:
+    return {
+        "listed": [_stock("600000", " 浦发银行\u3000", "listed", exchange="SSE")],
+        "pending": [_stock("301699", "新股样例", "pending", exchange="SZSE")],
+        "delisted": [
+            _stock(
+                "920268",
+                "北交样例",
+                "delisted",
+                exchange="BSE",
+                delist_date="2026-09-01",
+            )
+        ],
+    }
+
+
+def test_latest_completed_day_is_calendar_and_shanghai_session_aware() -> None:
+    open_dates = [date(2026, 9, 4), date(2026, 9, 8), date(2026, 9, 9)]
+
+    saturday = datetime(2026, 9, 5, 4, tzinfo=UTC)
+    before_close = datetime(2026, 9, 9, 6, tzinfo=UTC)
+    after_close = datetime(2026, 9, 9, 8, tzinfo=UTC)
+
+    assert latest_completed_trading_day(saturday, open_dates) == date(2026, 9, 4)
+    assert latest_completed_trading_day(before_close, open_dates) == date(2026, 9, 8)
+    assert latest_completed_trading_day(after_close, open_dates) == date(2026, 9, 9)
+
+
+def test_authority_input_requires_all_shards_and_fresh_source() -> None:
+    refreshed_at = datetime(2026, 9, 9, 9, tzinfo=UTC)
+    shards = _complete_shards()
+    shards["pending"] = []
+
+    with pytest.raises(StockAuthorityInputError, match="empty required shards"):
+        prepare_stock_authority_input(
+            shards,
+            source_refreshed_at_utc=refreshed_at,
+            fresh_through=date(2026, 9, 9),
+        )
+
+    with pytest.raises(StockAuthorityInputError, match="is stale"):
+        prepare_stock_authority_input(
+            _complete_shards(),
+            source_refreshed_at_utc=datetime(2026, 9, 8, 9, tzinfo=UTC),
+            fresh_through=date(2026, 9, 9),
+        )
+
+
+def test_authority_input_trims_only_name_edges_and_rejects_invalid_names() -> None:
+    refreshed_at = datetime(2026, 9, 9, 9, tzinfo=UTC)
+    result = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=refreshed_at,
+        fresh_through=date(2026, 9, 9),
+    )
+
+    assert next(item.name for item in result.items if item.code == "600000") == "浦发银行"
+
+    blank = _complete_shards()
+    blank["listed"] = [_stock("600000", "\u3000\t", "listed", exchange="SSE")]
+    with pytest.raises(StockAuthorityInputError, match="name is blank"):
+        prepare_stock_authority_input(
+            blank,
+            source_refreshed_at_utc=refreshed_at,
+            fresh_through=date(2026, 9, 9),
+        )
+
+    invalid_type = _complete_shards()
+    invalid_type["listed"] = [
+        SimpleNamespace(
+            code="600000",
+            name=123,
+            exchange="SSE",
+            market="",
+            list_status="listed",
+            list_date="2020-01-01",
+            delist_date="",
+            industry="",
+            listing_board="",
+            area="",
+        )
+    ]
+    with pytest.raises(StockAuthorityInputError, match="name must be text"):
+        prepare_stock_authority_input(
+            invalid_type,
+            source_refreshed_at_utc=refreshed_at,
+            fresh_through=date(2026, 9, 9),
+        )
+
+
+def test_authority_input_rejects_cross_shard_code_conflicts() -> None:
+    shards = _complete_shards()
+    shards["delisted"] = [
+        _stock("600000", "旧名", "delisted", exchange="SSE", delist_date="2020-01-01")
+    ]
+
+    with pytest.raises(StockAuthorityInputError, match="conflicting stock authority identity"):
+        prepare_stock_authority_input(
+            shards,
+            source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+            fresh_through=date(2026, 9, 9),
+        )
+
+
+def test_authority_input_does_not_normalize_nonstandard_provider_codes() -> None:
+    shards = _complete_shards()
+    shards["listed"] = [_stock("T600000", "异常代码", "listed", exchange="SSE")]
+
+    with pytest.raises(StockAuthorityInputError, match="invalid stock authority code"):
+        prepare_stock_authority_input(
+            shards,
+            source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+            fresh_through=date(2026, 9, 9),
+        )
+
+
+def test_authority_input_hash_and_freeze_are_deterministic(monkeypatch) -> None:
+    refreshed_at = datetime(2026, 9, 9, 9, tzinfo=UTC)
+    first = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=refreshed_at,
+        fresh_through=date(2026, 9, 9),
+    )
+    second = prepare_stock_authority_input(
+        {key: list(reversed(value)) for key, value in _complete_shards().items()},
+        source_refreshed_at_utc=refreshed_at,
+        fresh_through=date(2026, 9, 9),
+    )
+    assert first.content_sha256 == second.content_sha256
+    assert first.input_id == second.input_id
+
+    connection = AuthorityConnection()
+    monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
+    frozen = freeze_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=refreshed_at,
+        fresh_through=date(2026, 9, 9),
+        connection_factory=lambda: connection,
+    )
+
+    assert frozen.input_id == first.input_id
+    assert connection.commits == 1
+    assert any("request_status" in call[1] for call in connection.calls)
+    item_call = next(call for call in connection.calls if call[0] == "many")
+    assert len(item_call[2]) == 3
+
+
+def test_invalid_authority_input_is_audited_without_items(monkeypatch) -> None:
+    connection = AuthorityConnection()
+    monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
+    shards = _complete_shards()
+    shards["delisted"] = []
+
+    with pytest.raises(StockAuthorityInputError, match="empty required shards"):
+        freeze_stock_authority_input(
+            shards,
+            source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+            fresh_through=date(2026, 9, 9),
+            connection_factory=lambda: connection,
+        )
+
+    assert connection.commits == 1
+    assert not any(call[0] == "many" for call in connection.calls)
+    rejected_call = next(call for call in connection.calls if "'rejected'" in call[1])
+    assert "on conflict (input_id) do nothing" in rejected_call[1]
+
+
+def test_tushare_authority_fetch_uses_three_explicit_status_shards(monkeypatch) -> None:
+    from quotemux import stocks
+
+    calls: list[tuple[object, ...]] = []
+
+    def fake_source_call(package_id: str, handler_name: str, *args: object):
+        calls.append((package_id, handler_name, *args))
+        status = str(args[3])
+        return _complete_shards()[status]
+
+    monkeypatch.setattr(stocks, "_source_package_call", fake_source_call)
+
+    result = stocks._fetch_tushare_authority_shards(QuoteMuxSettings(enabled_sources=("tushare",)))
+
+    assert tuple(result) == ("listed", "pending", "delisted")
+    assert [call[5] for call in calls] == ["listed", "pending", "delisted"]
+    assert all(call[0] == "tushare" for call in calls)
+    assert all(call[-1] is True for call in calls)

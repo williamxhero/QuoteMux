@@ -17,6 +17,10 @@ from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
 from quotemux.source_packages.registry import get_default_source_package_registry
+from quotemux.stock_reference_authority import (
+    REQUIRED_AUTHORITY_SHARDS,
+    StockAuthorityInputError,
+)
 from quotemux.store import load_store_result, store_result
 from quotemux.store.postgres import get_postgres_cache_store
 from quotemux.settings import QuoteMuxSettings
@@ -117,6 +121,47 @@ def _source_package_call(package_id: str, handler_name: str, *args: object) -> o
 def _source_package_singleton(package_id: str, handler_name: str, *args: object) -> list[object]:
     item = _source_package_call(package_id, handler_name, *args)
     return [item] if item is not None else []
+
+
+def _fetch_tushare_authority_shards(
+    settings: QuoteMuxSettings,
+) -> dict[str, list[StockBasicInfo]]:
+    instances = tuple(
+        instance
+        for instance in settings.get_contract_source_instances("stocks.catalog", ("tushare",))
+        if instance.package_id == "tushare"
+    )
+    if instances == ():
+        raise StockAuthorityInputError("stocks.catalog has no configured Tushare authority instance")
+    authority_instance = instances[0]
+    shards: dict[str, list[StockBasicInfo]] = {}
+    for status in REQUIRED_AUTHORITY_SHARDS:
+        try:
+            result = _source_package_call(
+                authority_instance.package_id,
+                "get_stock_catalog",
+                [],
+                "",
+                "",
+                status,
+                True,
+                10_000,
+                0,
+                True,
+            )
+        except Exception as exc:
+            counts = {name: len(items) for name, items in shards.items()}
+            raise StockAuthorityInputError(
+                f"Tushare authority shard request failed: {status}: {exc}",
+                shard_counts=counts,
+            ) from exc
+        if not isinstance(result, (list, tuple)):
+            raise StockAuthorityInputError(
+                f"Tushare authority shard returned an invalid payload: {status}",
+                shard_counts={name: len(items) for name, items in shards.items()},
+            )
+        shards[status] = list(result)
+    return shards
 
 
 def _fallback_quote_freq(freq: str) -> str:
