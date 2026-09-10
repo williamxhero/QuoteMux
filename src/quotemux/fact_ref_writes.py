@@ -380,6 +380,7 @@ _STOCK_LISTED_DATE_REPAIR_SQL = """
     from first_daily
     where stock_ref.market = first_daily.market
       and stock_ref.code = first_daily.code
+      and stock_ref.identity_status = 'provisional'
       and stock_ref.listed_date is null
 """
 

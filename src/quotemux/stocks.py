@@ -16,6 +16,7 @@ from quotemux.local_store import get_local_stock_catalog, get_local_stock_hl_sig
 from quotemux.query_engine import CapabilityQuerySpec, execute_capability_query
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailyLocalWindowRequest, StockDailySnapshotRequest, StockQuotesRequest
+from quotemux.provider_timeout.runtime import run_provider_request
 from quotemux.source_packages.registry import get_default_source_package_registry
 from quotemux.stock_reference_authority import (
     REQUIRED_AUTHORITY_SHARDS,
@@ -142,17 +143,33 @@ def _fetch_tushare_authority_shards(
     shards: dict[str, list[StockBasicInfo]] = {}
     for status in REQUIRED_AUTHORITY_SHARDS:
         try:
-            result = _source_package_call(
+            def fetch_shard(current_status: str = status) -> list[StockBasicInfo]:
+                result = _source_package_call(
+                    authority_instance.package_id,
+                    "get_stock_catalog",
+                    [],
+                    "",
+                    "",
+                    current_status,
+                    True,
+                    10_000,
+                    0,
+                    True,
+                )
+                if not isinstance(result, (list, tuple)):
+                    raise TypeError(
+                        f"Tushare authority shard returned an invalid payload: {current_status}"
+                    )
+                return list(result)
+
+            result = run_provider_request(
+                "stocks.catalog",
                 authority_instance.package_id,
+                authority_instance.instance_id,
                 "get_stock_catalog",
-                [],
-                "",
-                "",
-                status,
-                True,
-                10_000,
-                0,
-                True,
+                authority_instance,
+                fetch_shard,
+                None,
             )
         except Exception as exc:
             counts = {name: len(items) for name, items in shards.items()}
@@ -160,11 +177,6 @@ def _fetch_tushare_authority_shards(
                 f"Tushare authority shard request failed: {status}: {exc}",
                 shard_counts=counts,
             ) from exc
-        if not isinstance(result, (list, tuple)):
-            raise StockAuthorityInputError(
-                f"Tushare authority shard returned an invalid payload: {status}",
-                shard_counts={name: len(items) for name, items in shards.items()},
-            )
         shards[status] = list(result)
     return shards
 
@@ -1383,34 +1395,17 @@ class QuoteMuxStocks:
             if reconciliation.candidate_count > 0 and items == []:
                 raise RuntimeError("authoritative stock catalog committed but could not be read")
             return items[: ensure_limit(limit)]
-        store_identity = {"codes": list(codes), "name": name, "exchange": exchange, "list_status": list_status, "include_delisted": include_delisted}
-        handlers = {
-            "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset, refresh),
-        }
-        
-        def build_request(current_items: list[StockBasicInfo]) -> list[tuple[()]]:
-            if codes:
-                return [()] if len(current_items) < len(set(codes)) else []
-            if not name and not exchange and list_status in {"", "L", "listed"}:
-                return [()] if len(current_items) < 4000 else []
-            return [()] if current_items == [] else []
-
-        items, _ = execute_capability_query(
-            CapabilityQuerySpec(
-                capability_id="stocks.catalog",
-                store_identity=store_identity,
-                model_type=StockBasicInfo,
-                key_fields=("code",),
-                sort_fields=("code",),
-                request_builder=build_request,
-                provider_steps=lambda: SourceInstanceExecutor(self._settings).build_steps("stocks.catalog", handlers, ("tushare",)),
-                source_order=self._settings.get_contract_source_order("stocks.catalog", ("tushare",)),
-                base_items=[] if refresh else get_local_stock_catalog(codes, name, exchange, list_status, include_delisted),
-                base_source_name="ref.stock",
-                fact_ref_writer=None,
+        items = [
+            item
+            for item in get_local_stock_catalog(
+                codes,
+                name,
+                exchange,
+                list_status,
+                include_delisted,
             )
-        )
-        items = [item for item in items if _is_standard_stock_code(item.code)]
+            if _is_standard_stock_code(item.code)
+        ]
         return items[offset: offset + ensure_limit(limit)]
 
     def get_archive(self, trade_date: str, code: str, name: str, industry: str, area: str, limit: int, offset: int) -> list[StockArchiveItem]:

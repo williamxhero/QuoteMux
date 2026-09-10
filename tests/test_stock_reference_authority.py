@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
@@ -301,6 +302,8 @@ def test_expand_migration_constrains_provenance_and_audit_permissions() -> None:
     assert "identity_source = 'tushare_catalog'" in schema_text
     assert "authority_provider = 'tushare'" in schema_text
     assert "authority_input_id ~ '^[0-9a-f]{64}$'" in schema_text
+    assert "constraint stock_authority_input_fk" in schema_text
+    assert "references audit.stock_authority_input(input_id)" in schema_text
     assert "stock authority audit records are immutable" in schema_text
     assert schema_text.count("revoke insert, update, delete, truncate") == 3
 
@@ -349,6 +352,7 @@ def test_daily_writer_commits_facts_and_generic_provisional_references_together(
     assert provisional_call[2] == [("SZSE", "301699"), ("BJSE", "920268")]
     assert "insert into fact.stock_daily_1d" in fact_call[1]
     assert "update ref.stock stock_ref" in listed_date_call[1]
+    assert "stock_ref.identity_status = 'provisional'" in listed_date_call[1]
     assert "update fact.stock_daily_1d target" in metrics_call[1]
 
 
@@ -523,6 +527,14 @@ def test_authority_input_hash_and_freeze_are_deterministic(monkeypatch) -> None:
     assert first.content_sha256 == second.content_sha256
     assert first.input_id == second.input_id
 
+    later_refresh = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=datetime(2026, 9, 9, 10, tzinfo=UTC),
+        fresh_through=date(2026, 9, 9),
+    )
+    assert later_refresh.content_sha256 == first.content_sha256
+    assert later_refresh.input_id != first.input_id
+
     connection = AuthorityConnection()
     monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
     frozen = freeze_stock_authority_input(
@@ -537,6 +549,27 @@ def test_authority_input_hash_and_freeze_are_deterministic(monkeypatch) -> None:
     assert any("request_status" in call[1] for call in connection.calls)
     item_call = next(call for call in connection.calls if call[0] == "many")
     assert len(item_call[2]) == 3
+
+
+def test_reconciliation_rejects_tampered_frozen_input(monkeypatch) -> None:
+    authority_input = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+        fresh_through=date(2026, 9, 9),
+    )
+    tampered_item = replace(authority_input.items[0], name="篡改名称")
+    tampered_input = replace(
+        authority_input,
+        items=(tampered_item, *authority_input.items[1:]),
+    )
+    monkeypatch.setattr(
+        authority,
+        "ensure_stock_reference_authority_schema",
+        lambda: pytest.fail("tampered input must fail before database access"),
+    )
+
+    with pytest.raises(StockAuthorityInputError, match="integrity check failed"):
+        reconcile_stock_authority_input(tampered_input)
 
 
 def test_invalid_authority_input_is_audited_without_items(monkeypatch) -> None:
@@ -570,6 +603,23 @@ def test_tushare_authority_fetch_uses_three_explicit_status_shards(monkeypatch) 
         return _complete_shards()[status]
 
     monkeypatch.setattr(stocks, "_source_package_call", fake_source_call)
+
+    def fake_provider_request(
+        _capability_id: str,
+        _provider: str,
+        _source_instance_id: str,
+        _handler: str,
+        _source_instance: object,
+        fetcher,
+        _remaining: object,
+    ):
+        return fetcher()
+
+    monkeypatch.setattr(
+        stocks,
+        "run_provider_request",
+        fake_provider_request,
+    )
 
     result = stocks._fetch_tushare_authority_shards(QuoteMuxSettings(enabled_sources=("tushare",)))
 
@@ -687,6 +737,7 @@ def test_reconciliation_promotes_updates_and_retains_missing_authority(monkeypat
 
     assert result.status == "committed"
     assert result.existing_count == 5
+    assert result.provisional_count == 1
     assert result.inserted_count == 0
     assert result.promoted_count == 2
     assert result.renamed_count == 1
@@ -760,6 +811,7 @@ def test_reconciliation_same_run_key_is_idempotent(monkeypatch) -> None:
         authority_input.content_sha256,
         first.candidate_count,
         first.existing_count,
+        first.provisional_count,
         first.inserted_count,
         first.promoted_count,
         first.renamed_count,
@@ -777,6 +829,7 @@ def test_reconciliation_same_run_key_is_idempotent(monkeypatch) -> None:
     )
 
     assert replay.status == "idempotent"
+    assert replay.provisional_count == first.provisional_count
     assert replay.normalized_output_sha256 == first.normalized_output_sha256
     assert replay.audit_content_sha256 == first.audit_content_sha256
     assert replay_connection.commits == 0

@@ -201,11 +201,16 @@ def test_postgres_authority_lifecycle_is_atomic_and_replay_safe(monkeypatch) -> 
         )
 
         assert first.status == "committed"
+        assert first.provisional_count == 1
         assert replay.status == "idempotent"
+        assert replay.provisional_count == first.provisional_count
         assert replay.normalized_output_sha256 == first.normalized_output_sha256
         assert replay.audit_content_sha256 == first.audit_content_sha256
         assert connection.execute(
             "select count(*) from audit.stock_reference_reconciliation"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "select provisional_count from audit.stock_reference_reconciliation"
         ).fetchone() == (1,)
         assert connection.execute(
             """
@@ -268,3 +273,31 @@ def test_postgres_authority_lifecycle_is_atomic_and_replay_safe(monkeypatch) -> 
         assert connection.execute(
             "select identity_status, identity_source from ref.stock where code = '600001'"
         ).fetchone() == ("provisional", "legacy")
+
+        connection.execute(
+            """
+            insert into ref.stock (
+                market, code, name, identity_status, identity_source,
+                authority_provider, authority_input_id, authority_verified_at
+            )
+            values (
+                'SHSE', '600010', '已验证名称', 'authoritative', 'tushare_catalog',
+                'tushare', %s, %s
+            )
+            """,
+            (frozen.input_id, refreshed_at),
+        )
+        connection.commit()
+        assert fact_ref_writes._write_stock_daily_transaction(
+            [_daily_params("SHSE", "600010")],
+            ["600010"],
+            set(),
+            (),
+            connection_factory=lambda: connection,
+        )
+        assert connection.execute(
+            """
+            select name, listed_date, identity_status, authority_input_id
+            from ref.stock where code = '600010'
+            """
+        ).fetchone() == ("已验证名称", None, "authoritative", frozen.input_id)

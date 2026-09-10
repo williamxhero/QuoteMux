@@ -160,6 +160,7 @@ STOCK_REFERENCE_AUTHORITY_SCHEMA_SQL = (
         fresh_through date not null,
         candidate_count integer not null,
         existing_count integer not null,
+        provisional_count integer not null,
         inserted_count integer not null,
         promoted_count integer not null,
         renamed_count integer not null,
@@ -181,9 +182,39 @@ STOCK_REFERENCE_AUTHORITY_SCHEMA_SQL = (
         constraint stock_reference_reconciliation_count_check check (
             candidate_count >= 0 and existing_count >= 0 and inserted_count >= 0
             and promoted_count >= 0 and renamed_count >= 0 and missing_count >= 0
-            and conflict_count >= 0
+            and conflict_count >= 0 and provisional_count >= 0
         )
     )
+    """,
+    """
+    alter table audit.stock_reference_reconciliation
+    add column if not exists provisional_count integer not null default 0
+    """,
+    """
+    do $$ begin
+      if not exists (
+        select 1 from pg_constraint
+        where conname = 'stock_reference_reconciliation_provisional_count_check'
+          and conrelid = 'audit.stock_reference_reconciliation'::regclass
+      ) then
+        alter table audit.stock_reference_reconciliation
+        add constraint stock_reference_reconciliation_provisional_count_check
+        check (provisional_count >= 0);
+      end if;
+    end $$
+    """,
+    """
+    do $$ begin
+      if not exists (
+        select 1 from pg_constraint
+        where conname = 'stock_authority_input_fk'
+          and conrelid = 'ref.stock'::regclass
+      ) then
+        alter table ref.stock add constraint stock_authority_input_fk
+        foreign key (authority_input_id)
+        references audit.stock_authority_input(input_id);
+      end if;
+    end $$
     """,
     """
     create or replace function audit.reject_stock_authority_audit_mutation()
@@ -281,6 +312,7 @@ class StockReferenceReconciliationResult:
     input_id: str
     candidate_count: int
     existing_count: int
+    provisional_count: int
     inserted_count: int
     promoted_count: int
     renamed_count: int
@@ -488,6 +520,7 @@ def prepare_stock_authority_input(
             "provider": AUTHORITY_PROVIDER,
             "content_sha256": content_sha256,
             "fresh_through": fresh_through.isoformat(),
+            "source_refreshed_at_utc": source_refreshed_at_utc.astimezone(UTC).isoformat(),
         }
     )
     return StockAuthorityInput(
@@ -501,11 +534,32 @@ def prepare_stock_authority_input(
     )
 
 
+def _validate_stock_authority_input_integrity(authority_input: StockAuthorityInput) -> None:
+    content_sha256 = _canonical_hash([item.to_payload() for item in authority_input.items])
+    input_id = _canonical_hash(
+        {
+            "provider": authority_input.provider,
+            "content_sha256": content_sha256,
+            "fresh_through": authority_input.fresh_through.isoformat(),
+            "source_refreshed_at_utc": authority_input.source_refreshed_at_utc.astimezone(
+                UTC
+            ).isoformat(),
+        }
+    )
+    if (
+        authority_input.provider != AUTHORITY_PROVIDER
+        or content_sha256 != authority_input.content_sha256
+        or input_id != authority_input.input_id
+    ):
+        raise StockAuthorityInputError("stock authority input integrity check failed")
+
+
 def _persist_stock_authority_input(
     authority_input: StockAuthorityInput,
     *,
     connection_factory: Callable[[], Any] | None = None,
 ) -> str:
+    _validate_stock_authority_input_integrity(authority_input)
     ensure_stock_reference_authority_schema()
     factory = connection_factory or _acquire_connection
     connection = factory()
@@ -732,13 +786,14 @@ def _existing_reconciliation_result(
         input_id=existing_input_id,
         candidate_count=int(_row_value(row, "candidate_count", 2) or 0),
         existing_count=int(_row_value(row, "existing_count", 3) or 0),
-        inserted_count=int(_row_value(row, "inserted_count", 4) or 0),
-        promoted_count=int(_row_value(row, "promoted_count", 5) or 0),
-        renamed_count=int(_row_value(row, "renamed_count", 6) or 0),
-        missing_count=int(_row_value(row, "missing_count", 7) or 0),
-        conflict_count=int(_row_value(row, "conflict_count", 8) or 0),
-        normalized_output_sha256=str(_row_value(row, "normalized_output_sha256", 9) or ""),
-        audit_content_sha256=str(_row_value(row, "audit_content_sha256", 10) or ""),
+        provisional_count=int(_row_value(row, "provisional_count", 4) or 0),
+        inserted_count=int(_row_value(row, "inserted_count", 5) or 0),
+        promoted_count=int(_row_value(row, "promoted_count", 6) or 0),
+        renamed_count=int(_row_value(row, "renamed_count", 7) or 0),
+        missing_count=int(_row_value(row, "missing_count", 8) or 0),
+        conflict_count=int(_row_value(row, "conflict_count", 9) or 0),
+        normalized_output_sha256=str(_row_value(row, "normalized_output_sha256", 10) or ""),
+        audit_content_sha256=str(_row_value(row, "audit_content_sha256", 11) or ""),
     )
 
 
@@ -750,6 +805,7 @@ def reconcile_stock_authority_input(
 ) -> StockReferenceReconciliationResult:
     """Promote one frozen Tushare input and its audit in a single transaction."""
 
+    _validate_stock_authority_input_integrity(authority_input)
     ensure_stock_reference_authority_schema()
     actual_run_key = run_key.strip() or f"tushare:{authority_input.input_id}"
     factory = connection_factory or _acquire_connection
@@ -760,8 +816,9 @@ def reconcile_stock_authority_input(
             cursor.execute(
                 """
                 select input_id, input_sha256, candidate_count, existing_count,
-                       inserted_count, promoted_count, renamed_count, missing_count,
-                       conflict_count, normalized_output_sha256, audit_content_sha256
+                       provisional_count, inserted_count, promoted_count, renamed_count,
+                       missing_count, conflict_count, normalized_output_sha256,
+                       audit_content_sha256
                 from audit.stock_reference_reconciliation
                 where run_key = %s
                 """,
@@ -834,6 +891,10 @@ def reconcile_stock_authority_input(
                 payload["identity_status"] == IDENTITY_AUTHORITATIVE and key not in incoming_by_key
                 for key, payload in existing_by_key.items()
             )
+            provisional_count = sum(
+                payload["identity_status"] == IDENTITY_PROVISIONAL and key not in incoming_by_key
+                for key, payload in existing_by_key.items()
+            )
 
             cursor.executemany(
                 """
@@ -894,6 +955,7 @@ def reconcile_stock_authority_input(
                 "fresh_through": authority_input.fresh_through.isoformat(),
                 "candidate_count": len(authority_input.items),
                 "existing_count": len(existing_rows),
+                "provisional_count": provisional_count,
                 "inserted_count": inserted_count,
                 "promoted_count": promoted_count,
                 "renamed_count": renamed_count,
@@ -906,12 +968,12 @@ def reconcile_stock_authority_input(
                 """
                 insert into audit.stock_reference_reconciliation (
                     run_key, input_id, provider, input_sha256, fresh_through,
-                    candidate_count, existing_count, inserted_count, promoted_count,
-                    renamed_count, missing_count, conflict_count, transaction_result,
-                    normalized_output_sha256, audit_content_sha256
+                    candidate_count, existing_count, provisional_count, inserted_count,
+                    promoted_count, renamed_count, missing_count, conflict_count,
+                    transaction_result, normalized_output_sha256, audit_content_sha256
                 )
                 values (%s, %s, 'tushare', %s, %s, %s, %s, %s, %s, %s,
-                        %s, 0, 'committed', %s, %s)
+                        %s, %s, 0, 'committed', %s, %s)
                 """,
                 (
                     actual_run_key,
@@ -920,6 +982,7 @@ def reconcile_stock_authority_input(
                     authority_input.fresh_through,
                     len(authority_input.items),
                     len(existing_rows),
+                    provisional_count,
                     inserted_count,
                     promoted_count,
                     renamed_count,
@@ -935,6 +998,7 @@ def reconcile_stock_authority_input(
             input_id=authority_input.input_id,
             candidate_count=len(authority_input.items),
             existing_count=len(existing_rows),
+            provisional_count=provisional_count,
             inserted_count=inserted_count,
             promoted_count=promoted_count,
             renamed_count=renamed_count,

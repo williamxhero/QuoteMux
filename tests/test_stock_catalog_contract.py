@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from quotemux.models import StockBasicInfo
-from quotemux.reports import ContractReport
 from quotemux.settings import QuoteMuxSettings
 from quotemux.stock_reference_authority import StockReferenceReconciliationResult
 from quotemux.stocks import QuoteMuxStocks
@@ -22,8 +21,14 @@ def _stock(code: str, status: str) -> StockBasicInfo:
 def test_stock_catalog_exposes_only_standard_six_digit_codes(monkeypatch) -> None:
     items = [_stock("600018", "L"), _stock("000003", "D"), _stock("T600018", "D")]
     monkeypatch.setattr(
-        "quotemux.stocks.execute_capability_query",
-        lambda spec: (items, ContractReport(contract_name="stocks.catalog")),
+        "quotemux.stocks.get_local_stock_catalog",
+        lambda *args: items,
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks._source_package_call",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("public catalog must not call providers")
+        ),
     )
 
     result = QuoteMuxStocks(QuoteMuxSettings()).get_catalog([], "", "", "", True, 200, 0)
@@ -38,6 +43,7 @@ def test_full_refresh_publishes_only_reconciled_local_catalog(monkeypatch) -> No
         input_id="a" * 64,
         candidate_count=2,
         existing_count=2,
+        provisional_count=0,
         inserted_count=0,
         promoted_count=2,
         renamed_count=0,
