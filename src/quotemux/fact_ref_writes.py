@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel
 
 from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardQuoteItem, ConceptCatalogItem, ConceptMemberHistoryItem, ConceptMemberItem, ConceptQuoteItem, EtfCatalogItem, EtfDailyQuoteItem, IndexCatalogItem, IndexQuoteItem, NameHistoryItem, StockBasicInfo, StockQuoteItem, TradingCalendarItem
 from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
-from quotemux.infra.db.client import execute_many, execute_many_with_migration_journal, execute_sql, query_dataframe
+from quotemux.infra.db.client import _acquire_connection, _release_connection, execute_many, execute_many_with_migration_journal, execute_sql, query_dataframe
+from quotemux.stock_reference_authority import ensure_stock_reference_authority_schema
 from quotemux.strict_read import reject_in_strict_public_read
 
 
@@ -213,10 +214,29 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             item.is_st,
             *optional_values,
         ))
+    if params == []:
+        return True
+    return _write_stock_daily_transaction(
+        params,
+        list(dict.fromkeys(daily_codes)),
+        existing_columns,
+        optional_columns,
+    )
+
+
+def _write_stock_daily_transaction(
+    params: list[tuple[object, ...]],
+    daily_codes: list[str],
+    existing_columns: set[str],
+    optional_columns: tuple[str, ...],
+    *,
+    connection_factory: Callable[[], object] | None = None,
+) -> bool:
+    """Commit provisional references and their daily facts as one unit."""
+
     optional_column_sql = "".join(f", {column_name}" for column_name in optional_columns)
     optional_placeholder_sql = "".join(", %s" for _ in optional_columns)
-    upsert_ok = execute_many(
-        f"""
+    fact_upsert_sql = f"""
         insert into fact.stock_daily_1d (market, code, trade_date, open, high, low, close, volume, amount, is_suspended, is_st{optional_column_sql})
         values (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s{optional_placeholder_sql})
         on conflict (market, code, trade_date) do update set
@@ -229,13 +249,43 @@ def _upsert_stock_daily(items: Sequence[StockQuoteItem]) -> bool:
             is_suspended = excluded.is_suspended,
             is_st = excluded.is_st{_optional_update_assignments(existing_columns, optional_columns)},
             loaded_at = now()
-        """,
-        params,
+    """
+    unique_references = list(
+        dict.fromkeys((_stock_market(code), code) for code in daily_codes)
     )
-    if not upsert_ok:
+    try:
+        ensure_stock_reference_authority_schema()
+        factory = connection_factory or _acquire_connection
+        connection = factory()
+    except Exception as exc:
+        print(f"stock daily authority preflight failed: {exc}")
         return False
-    unique_codes = list(dict.fromkeys(daily_codes))
-    return _repair_stock_daily_reference_rows(unique_codes) and _repair_stock_listed_dates_from_daily(unique_codes) and _repair_stock_daily_metrics(unique_codes)
+    owns_connection = connection_factory is None
+    try:
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                insert into ref.stock (
+                    market, code, name, industry, listing_board, listed_date,
+                    delisted_date, area, board_type, identity_status, identity_source
+                )
+                values (%s, %s, '', '', '', null, null, '', '', 'provisional', 'stock_daily_1d')
+                on conflict (market, code) do nothing
+                """,
+                unique_references,
+            )
+            cursor.executemany(fact_upsert_sql, params)
+            cursor.execute(_STOCK_LISTED_DATE_REPAIR_SQL, (daily_codes,))
+            cursor.execute(_STOCK_DAILY_METRICS_REPAIR_SQL, (daily_codes,))
+        connection.commit()
+        return True
+    except Exception as exc:
+        connection.rollback()
+        print(f"stock daily transaction failed: {exc}")
+        return False
+    finally:
+        if owns_connection:
+            _release_connection(connection)
 
 
 def _upsert_stock_adj_factors(items: Sequence[object]) -> bool:
@@ -314,112 +364,74 @@ def _upsert_stock_money_flow_snapshot(items: Sequence[object]) -> bool:
     )
 
 
-def _repair_stock_daily_reference_rows(codes: Sequence[str]) -> bool:
-    if not codes:
-        return True
-    return execute_sql(
-        """
-        with target_codes as (
-            select unnest(%s::text[]) as code
-        ),
-        first_daily as (
-            select day_rows.market, day_rows.code, min(day_rows.trade_date) as listed_date
-            from fact.stock_daily_1d day_rows
-            join target_codes target on target.code = day_rows.code
-            group by day_rows.market, day_rows.code
-        )
-        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area, board_type)
-        select
-            first_daily.market,
-            first_daily.code,
-            '',
-            '',
-            case
-                when first_daily.market = 'BJSE' or left(first_daily.code, 1) in ('4', '8') or left(first_daily.code, 3) = '920' then 'beijing'
-                when first_daily.market = 'SHSE' and left(first_daily.code, 3) in ('688', '689') then 'star_market'
-                when first_daily.market = 'SZSE' and left(first_daily.code, 3) in ('300', '301') then 'chi_next'
-                else 'main_board'
-            end,
-            first_daily.listed_date,
-            null,
-            '',
-            case
-                when first_daily.market = 'BJSE' or left(first_daily.code, 1) in ('4', '8') or left(first_daily.code, 3) = '920' then 'beijing'
-                when first_daily.market = 'SHSE' and left(first_daily.code, 3) in ('688', '689') then 'star_market'
-                when first_daily.market = 'SZSE' and left(first_daily.code, 3) in ('300', '301') then 'chi_next'
-                else 'main_board'
-            end
-        from first_daily
-        where not exists (
-            select 1
-            from ref.stock stock_ref
-            where stock_ref.market = first_daily.market
-              and stock_ref.code = first_daily.code
-        )
-        on conflict (market, code) do nothing
-        """,
-        (list(codes),),
+_STOCK_LISTED_DATE_REPAIR_SQL = """
+    with target_codes as (
+        select unnest(%s::text[]) as code
+    ),
+    first_daily as (
+        select day_rows.market, day_rows.code, min(day_rows.trade_date) as listed_date
+        from fact.stock_daily_1d day_rows
+        join target_codes target on target.code = day_rows.code
+        group by day_rows.market, day_rows.code
     )
+    update ref.stock stock_ref
+    set listed_date = first_daily.listed_date,
+        updated_at = now()
+    from first_daily
+    where stock_ref.market = first_daily.market
+      and stock_ref.code = first_daily.code
+      and stock_ref.identity_status = 'provisional'
+      and stock_ref.listed_date is null
+"""
 
 
 def _repair_stock_listed_dates_from_daily(codes: Sequence[str]) -> bool:
     if not codes:
         return True
-    return execute_sql(
-        """
-        with target_codes as (
-            select unnest(%s::text[]) as code
-        ),
-        first_daily as (
-            select day_rows.market, day_rows.code, min(day_rows.trade_date) as listed_date
-            from fact.stock_daily_1d day_rows
-            join target_codes target on target.code = day_rows.code
-            group by day_rows.market, day_rows.code
-        )
-        update ref.stock stock_ref
-        set listed_date = first_daily.listed_date,
-            updated_at = now()
-        from first_daily
-        where stock_ref.market = first_daily.market
-          and stock_ref.code = first_daily.code
-          and stock_ref.listed_date is null
-        """,
-        (list(codes),),
+    return execute_sql(_STOCK_LISTED_DATE_REPAIR_SQL, (list(codes),))
+
+
+_STOCK_DAILY_METRICS_REPAIR_SQL = """
+    with target_codes as (
+        select unnest(%s::text[]) as code
+    ),
+    metric_rows as (
+        select
+            daily_rows.market,
+            daily_rows.code,
+            daily_rows.trade_date,
+            daily_rows.close,
+            lag(daily_rows.close) over (
+                partition by daily_rows.market, daily_rows.code order by daily_rows.trade_date
+            ) as previous_close
+        from fact.stock_daily_1d daily_rows
+        join target_codes target on target.code = daily_rows.code
     )
+    update fact.stock_daily_1d target
+    set pre_close = coalesce(target.pre_close, metric_rows.previous_close, metric_rows.close),
+        change = coalesce(
+            target.change,
+            metric_rows.close - coalesce(metric_rows.previous_close, metric_rows.close)
+        ),
+        pct_chg = coalesce(
+            target.pct_chg,
+            (metric_rows.close - coalesce(metric_rows.previous_close, metric_rows.close))
+            / nullif(coalesce(metric_rows.previous_close, metric_rows.close), 0) * 100
+        ),
+        loaded_at = now()
+    from metric_rows
+    where target.market = metric_rows.market
+      and target.code = metric_rows.code
+      and target.trade_date = metric_rows.trade_date
+      and metric_rows.close is not null
+      and (target.pre_close is null or target.change is null or target.pct_chg is null)
+"""
 
 
 def _repair_stock_daily_metrics(codes: Sequence[str]) -> bool:
     if not codes:
         return True
-    return execute_sql(
-        """
-        with target_codes as (
-            select unnest(%s::text[]) as code
-        ),
-        metric_rows as (
-            select
-                daily_rows.market,
-                daily_rows.code,
-                daily_rows.trade_date,
-                daily_rows.close,
-                lag(daily_rows.close) over (partition by daily_rows.market, daily_rows.code order by daily_rows.trade_date) as previous_close
-            from fact.stock_daily_1d daily_rows
-            join target_codes target on target.code = daily_rows.code
-        )
-        update fact.stock_daily_1d target
-        set pre_close = coalesce(target.pre_close, metric_rows.previous_close, metric_rows.close),
-            change = coalesce(target.change, metric_rows.close - coalesce(metric_rows.previous_close, metric_rows.close)),
-            pct_chg = coalesce(target.pct_chg, (metric_rows.close - coalesce(metric_rows.previous_close, metric_rows.close)) / nullif(coalesce(metric_rows.previous_close, metric_rows.close), 0) * 100),
-            loaded_at = now()
-        from metric_rows
-        where target.market = metric_rows.market
-          and target.code = metric_rows.code
-          and target.trade_date = metric_rows.trade_date
-          and metric_rows.close is not null
-          and (target.pre_close is null or target.change is null or target.pct_chg is null)
-        """,
-        (list(codes),),
-    )
+    return execute_sql(_STOCK_DAILY_METRICS_REPAIR_SQL, (list(codes),))
 
 
 def _complete_stock_1m_items(items: Sequence[StockQuoteItem]) -> list[StockQuoteItem]:
@@ -825,6 +837,7 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
     params: list[tuple[object, ...]] = []
     existing_columns = _existing_columns("ref", "stock")
     has_board_type = "board_type" in existing_columns
+    has_authority_lifecycle = {"identity_status", "identity_source"} <= existing_columns
     for item in items:
         code = normalize_stock_code(item.code).zfill(6)
         if code == "":
@@ -835,20 +848,35 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
     board_type_column_sql = ", board_type" if has_board_type else ""
     board_type_value_sql = ", %s" if has_board_type else ""
     update_board_type_sql = ",\n            board_type = excluded.board_type" if has_board_type else ""
+    authority_column_sql = ", identity_status, identity_source" if has_authority_lifecycle else ""
+    authority_value_sql = ", 'provisional', 'catalog_partial'" if has_authority_lifecycle else ""
+    authority_update_sql = (
+        ",\n            identity_source = case "
+        "when ref.stock.identity_source = 'legacy' then 'catalog_partial' "
+        "else ref.stock.identity_source end"
+        if has_authority_lifecycle
+        else ""
+    )
+    provisional_only_sql = (
+        "\n        where ref.stock.identity_status = 'provisional'"
+        if has_authority_lifecycle
+        else ""
+    )
     if has_board_type:
         params = [(*item, item[4]) for item in params]
     return execute_many(
         f"""
-        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area{board_type_column_sql})
-        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s{board_type_value_sql})
+        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area{board_type_column_sql}{authority_column_sql})
+        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s{board_type_value_sql}{authority_value_sql})
         on conflict (market, code) do update set
             name = excluded.name,
             industry = excluded.industry,
             listing_board = excluded.listing_board,
             listed_date = excluded.listed_date,
             delisted_date = excluded.delisted_date,
-            area = excluded.area{update_board_type_sql},
+            area = excluded.area{update_board_type_sql}{authority_update_sql},
             updated_at = now()
+        {provisional_only_sql}
         """,
         params,
     )

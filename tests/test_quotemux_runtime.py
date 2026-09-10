@@ -1062,20 +1062,24 @@ def test_fact_ref_stock_intraday_rejects_day_with_missing_ohlc(monkeypatch) -> N
 def test_stock_daily_writer_repairs_missing_listed_date(monkeypatch) -> None:
     from quotemux import fact_ref_writes
 
-    execute_many_calls: list[tuple[str, list[tuple[object, ...]]]] = []
-    execute_sql_calls: list[tuple[str, tuple[object, ...]]] = []
+    captured: dict[str, object] = {}
 
-    def fake_execute_many(query: str, params: list[tuple[object, ...]]) -> bool:
-        execute_many_calls.append((query, params))
-        return True
-
-    def fake_execute_sql(query: str, params: tuple[object, ...] = ()) -> bool:
-        execute_sql_calls.append((query, params))
+    def fake_transaction(
+        params: list[tuple[object, ...]],
+        codes: list[str],
+        existing_columns: set[str],
+        optional_columns: tuple[str, ...],
+    ) -> bool:
+        captured.update(
+            params=params,
+            codes=codes,
+            existing_columns=existing_columns,
+            optional_columns=optional_columns,
+        )
         return True
 
     monkeypatch.setattr(fact_ref_writes, "_existing_columns", lambda table_schema, table_name: set())
-    monkeypatch.setattr(fact_ref_writes, "execute_many", fake_execute_many)
-    monkeypatch.setattr(fact_ref_writes, "execute_sql", fake_execute_sql)
+    monkeypatch.setattr(fact_ref_writes, "_write_stock_daily_transaction", fake_transaction)
 
     assert fact_ref_writes._upsert_stock_daily(
         [
@@ -1084,11 +1088,10 @@ def test_stock_daily_writer_repairs_missing_listed_date(monkeypatch) -> None:
         ]
     )
 
-    assert "insert into fact.stock_daily_1d" in execute_many_calls[0][0]
-    assert "insert into ref.stock" in execute_sql_calls[0][0]
-    assert "update ref.stock stock_ref" in execute_sql_calls[1][0]
-    assert "update fact.stock_daily_1d target" in execute_sql_calls[2][0]
-    assert [call[1] for call in execute_sql_calls] == [(["001248"],), (["001248"],), (["001248"],)]
+    assert captured["codes"] == ["001248"]
+    assert captured["existing_columns"] == set()
+    assert captured["optional_columns"] == ()
+    assert len(captured["params"]) == 2
 
 
 def test_stock_daily_metrics_repair_uses_first_day_fallback(monkeypatch) -> None:
@@ -1205,6 +1208,41 @@ def test_stock_catalog_writer_keeps_board_type_compatible(monkeypatch) -> None:
 
     assert "board_type" in str(captured["query"])
     assert captured["params"] == [("BJSE", "920028", "新恒泰", "塑料", "beijing", "2026-03-20", "", "浙江", "beijing")]
+
+
+def test_partial_stock_catalog_writer_cannot_change_authoritative_rows(monkeypatch) -> None:
+    from quotemux import fact_ref_writes
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        fact_ref_writes,
+        "_existing_columns",
+        lambda table_schema, table_name: {"identity_status", "identity_source"},
+    )
+    monkeypatch.setattr(
+        fact_ref_writes,
+        "execute_many",
+        lambda query, params: captured.update(query=query, params=params) or True,
+    )
+
+    assert fact_ref_writes._upsert_stock_catalog(
+        [
+            StockBasicInfo(
+                code="600000",
+                name="不可信局部名称",
+                exchange="SHSE",
+                market="main_board",
+                list_status="listed",
+                list_date="1999-11-10",
+                delist_date="",
+            )
+        ]
+    )
+
+    query_text = str(captured["query"])
+    assert "'provisional', 'catalog_partial'" in query_text
+    assert "where ref.stock.identity_status = 'provisional'" in query_text
 
 
 def test_stock_catalog_writer_classifies_blank_b_share_and_bjse_boards(monkeypatch) -> None:
