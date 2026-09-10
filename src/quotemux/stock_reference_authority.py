@@ -274,6 +274,22 @@ class StockAuthorityInput:
     items: tuple[NormalizedStockAuthorityItem, ...]
 
 
+@dataclass(frozen=True)
+class StockReferenceReconciliationResult:
+    status: str
+    run_key: str
+    input_id: str
+    candidate_count: int
+    existing_count: int
+    inserted_count: int
+    promoted_count: int
+    renamed_count: int
+    missing_count: int
+    conflict_count: int
+    normalized_output_sha256: str
+    audit_content_sha256: str
+
+
 def _canonical_hash(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -658,6 +674,281 @@ def freeze_stock_authority_input(
         connection_factory=connection_factory,
     )
     return authority_input
+
+
+_REFERENCE_HASH_FIELDS = (
+    "market",
+    "code",
+    "name",
+    "industry",
+    "listing_board",
+    "listed_date",
+    "delisted_date",
+    "area",
+    "identity_status",
+    "identity_source",
+    "authority_provider",
+    "authority_input_id",
+    "authority_verified_at",
+)
+
+
+def _reference_payload(row: object) -> dict[str, str]:
+    payload: dict[str, str] = {}
+    for index, field_name in enumerate(_REFERENCE_HASH_FIELDS):
+        value = _row_value(row, field_name, index)
+        if isinstance(value, datetime):
+            payload[field_name] = value.astimezone(UTC).isoformat()
+        elif isinstance(value, date):
+            payload[field_name] = value.isoformat()
+        else:
+            payload[field_name] = "" if value is None else str(value)
+    return payload
+
+
+def _reference_set_hash(rows: Sequence[object]) -> str:
+    payloads = sorted(
+        (_reference_payload(row) for row in rows),
+        key=lambda payload: (payload["market"], payload["code"]),
+    )
+    return _canonical_hash(payloads)
+
+
+def _existing_reconciliation_result(
+    row: object,
+    authority_input: StockAuthorityInput,
+    run_key: str,
+) -> StockReferenceReconciliationResult:
+    existing_input_id = str(_row_value(row, "input_id", 0))
+    existing_input_sha256 = str(_row_value(row, "input_sha256", 1))
+    if (
+        existing_input_id != authority_input.input_id
+        or existing_input_sha256 != authority_input.content_sha256
+    ):
+        raise StockAuthorityInputError(f"reconciliation run key conflict: {run_key}")
+    return StockReferenceReconciliationResult(
+        status="idempotent",
+        run_key=run_key,
+        input_id=existing_input_id,
+        candidate_count=int(_row_value(row, "candidate_count", 2) or 0),
+        existing_count=int(_row_value(row, "existing_count", 3) or 0),
+        inserted_count=int(_row_value(row, "inserted_count", 4) or 0),
+        promoted_count=int(_row_value(row, "promoted_count", 5) or 0),
+        renamed_count=int(_row_value(row, "renamed_count", 6) or 0),
+        missing_count=int(_row_value(row, "missing_count", 7) or 0),
+        conflict_count=int(_row_value(row, "conflict_count", 8) or 0),
+        normalized_output_sha256=str(_row_value(row, "normalized_output_sha256", 9) or ""),
+        audit_content_sha256=str(_row_value(row, "audit_content_sha256", 10) or ""),
+    )
+
+
+def reconcile_stock_authority_input(
+    authority_input: StockAuthorityInput,
+    *,
+    run_key: str = "",
+    connection_factory: Callable[[], Any] | None = None,
+) -> StockReferenceReconciliationResult:
+    """Promote one frozen Tushare input and its audit in a single transaction."""
+
+    ensure_stock_reference_authority_schema()
+    actual_run_key = run_key.strip() or f"tushare:{authority_input.input_id}"
+    factory = connection_factory or _acquire_connection
+    connection = factory()
+    owns_connection = connection_factory is None
+    try:
+        with connection.cursor(row_factory=tuple_row) as cursor:
+            cursor.execute(
+                """
+                select input_id, input_sha256, candidate_count, existing_count,
+                       inserted_count, promoted_count, renamed_count, missing_count,
+                       conflict_count, normalized_output_sha256, audit_content_sha256
+                from audit.stock_reference_reconciliation
+                where run_key = %s
+                """,
+                (actual_run_key,),
+            )
+            prior_run = cursor.fetchone()
+            if prior_run is not None:
+                result = _existing_reconciliation_result(
+                    prior_run,
+                    authority_input,
+                    actual_run_key,
+                )
+                connection.rollback()
+                return result
+
+            cursor.execute(
+                """
+                select provider, content_sha256, request_status
+                from audit.stock_authority_input
+                where input_id = %s
+                """,
+                (authority_input.input_id,),
+            )
+            persisted_input = cursor.fetchone()
+            expected_input = (
+                authority_input.provider,
+                authority_input.content_sha256,
+                "accepted",
+            )
+            actual_input = (
+                str(_row_value(persisted_input, "provider", 0)),
+                str(_row_value(persisted_input, "content_sha256", 1)),
+                str(_row_value(persisted_input, "request_status", 2)),
+            )
+            if persisted_input is None or actual_input != expected_input:
+                raise StockAuthorityInputError(
+                    f"authority input is not frozen and accepted: {authority_input.input_id}"
+                )
+
+            cursor.execute(
+                """
+                select market, code, name, industry, listing_board,
+                       listed_date, delisted_date, area, identity_status,
+                       identity_source, authority_provider, authority_input_id,
+                       authority_verified_at
+                from ref.stock
+                order by market, code
+                for update
+                """
+            )
+            existing_rows = cursor.fetchall()
+            existing_by_key = {
+                (payload["market"], payload["code"]): payload
+                for payload in (_reference_payload(row) for row in existing_rows)
+            }
+            incoming_by_key = {(item.market, item.code): item for item in authority_input.items}
+            inserted_count = sum(key not in existing_by_key for key in incoming_by_key)
+            promoted_count = sum(
+                key in existing_by_key
+                and existing_by_key[key]["identity_status"] == IDENTITY_PROVISIONAL
+                for key in incoming_by_key
+            )
+            renamed_count = sum(
+                key in existing_by_key
+                and existing_by_key[key]["identity_status"] == IDENTITY_AUTHORITATIVE
+                and existing_by_key[key]["name"] != item.name
+                for key, item in incoming_by_key.items()
+            )
+            missing_count = sum(
+                payload["identity_status"] == IDENTITY_AUTHORITATIVE and key not in incoming_by_key
+                for key, payload in existing_by_key.items()
+            )
+
+            cursor.executemany(
+                """
+                insert into ref.stock (
+                    market, code, name, industry, listing_board, listed_date,
+                    delisted_date, area, identity_status, identity_source,
+                    authority_provider, authority_input_id, authority_verified_at
+                )
+                values (%s, %s, %s, %s, %s, nullif(%s, '')::date,
+                        nullif(%s, '')::date, %s, 'authoritative', 'tushare_catalog',
+                        'tushare', %s, %s)
+                on conflict (market, code) do update set
+                    name = excluded.name,
+                    industry = excluded.industry,
+                    listing_board = excluded.listing_board,
+                    listed_date = excluded.listed_date,
+                    delisted_date = excluded.delisted_date,
+                    area = excluded.area,
+                    identity_status = excluded.identity_status,
+                    identity_source = excluded.identity_source,
+                    authority_provider = excluded.authority_provider,
+                    authority_input_id = excluded.authority_input_id,
+                    authority_verified_at = excluded.authority_verified_at,
+                    updated_at = now()
+                """,
+                [
+                    (
+                        item.market,
+                        item.code,
+                        item.name,
+                        item.industry,
+                        item.listing_board,
+                        item.listed_date,
+                        item.delisted_date,
+                        item.area,
+                        authority_input.input_id,
+                        authority_input.source_refreshed_at_utc,
+                    )
+                    for item in authority_input.items
+                ],
+            )
+            cursor.execute(
+                """
+                select market, code, name, industry, listing_board,
+                       listed_date, delisted_date, area, identity_status,
+                       identity_source, authority_provider, authority_input_id,
+                       authority_verified_at
+                from ref.stock
+                where identity_status = 'authoritative'
+                order by market, code
+                """
+            )
+            normalized_output_sha256 = _reference_set_hash(cursor.fetchall())
+            audit_payload = {
+                "run_key": actual_run_key,
+                "input_id": authority_input.input_id,
+                "input_sha256": authority_input.content_sha256,
+                "fresh_through": authority_input.fresh_through.isoformat(),
+                "candidate_count": len(authority_input.items),
+                "existing_count": len(existing_rows),
+                "inserted_count": inserted_count,
+                "promoted_count": promoted_count,
+                "renamed_count": renamed_count,
+                "missing_count": missing_count,
+                "conflict_count": 0,
+                "normalized_output_sha256": normalized_output_sha256,
+            }
+            audit_content_sha256 = _canonical_hash(audit_payload)
+            cursor.execute(
+                """
+                insert into audit.stock_reference_reconciliation (
+                    run_key, input_id, provider, input_sha256, fresh_through,
+                    candidate_count, existing_count, inserted_count, promoted_count,
+                    renamed_count, missing_count, conflict_count, transaction_result,
+                    normalized_output_sha256, audit_content_sha256
+                )
+                values (%s, %s, 'tushare', %s, %s, %s, %s, %s, %s, %s,
+                        %s, 0, 'committed', %s, %s)
+                """,
+                (
+                    actual_run_key,
+                    authority_input.input_id,
+                    authority_input.content_sha256,
+                    authority_input.fresh_through,
+                    len(authority_input.items),
+                    len(existing_rows),
+                    inserted_count,
+                    promoted_count,
+                    renamed_count,
+                    missing_count,
+                    normalized_output_sha256,
+                    audit_content_sha256,
+                ),
+            )
+        connection.commit()
+        return StockReferenceReconciliationResult(
+            status="committed",
+            run_key=actual_run_key,
+            input_id=authority_input.input_id,
+            candidate_count=len(authority_input.items),
+            existing_count=len(existing_rows),
+            inserted_count=inserted_count,
+            promoted_count=promoted_count,
+            renamed_count=renamed_count,
+            missing_count=missing_count,
+            conflict_count=0,
+            normalized_output_sha256=normalized_output_sha256,
+            audit_content_sha256=audit_content_sha256,
+        )
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        if owns_connection:
+            _release_connection(connection)
 
 
 def _row_value(row: object, key: str, index: int) -> object:

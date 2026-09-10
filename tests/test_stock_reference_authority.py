@@ -15,6 +15,7 @@ from quotemux.stock_reference_authority import (
     freeze_stock_authority_input,
     latest_completed_trading_day,
     prepare_stock_authority_input,
+    reconcile_stock_authority_input,
 )
 
 from quotemux import fact_ref_writes
@@ -171,6 +172,73 @@ class AuthorityConnection:
 
     def cursor(self, **_kwargs: object) -> AuthorityCursor:
         return AuthorityCursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+class ReconciliationCursor:
+    def __init__(self, connection: ReconciliationConnection) -> None:
+        self.connection = connection
+        self.query = ""
+
+    def __enter__(self) -> ReconciliationCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str, params: object = None) -> None:
+        self.query = " ".join(query.split())
+        self.connection.calls.append(("one", self.query, params))
+        if self.connection.fail_on and self.connection.fail_on in self.query:
+            raise RuntimeError("injected reconciliation failure")
+
+    def executemany(self, query: str, params: list[tuple[object, ...]]) -> None:
+        self.query = " ".join(query.split())
+        self.connection.calls.append(("many", self.query, params))
+        if self.connection.fail_on and self.connection.fail_on in self.query:
+            raise RuntimeError("injected reconciliation failure")
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        if "from audit.stock_reference_reconciliation" in self.query:
+            return self.connection.prior_run
+        if "from audit.stock_authority_input" in self.query:
+            return self.connection.accepted_input
+        return None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        if "where identity_status = 'authoritative'" in self.query:
+            return self.connection.output_rows
+        if "from ref.stock" in self.query and "for update" in self.query:
+            return self.connection.existing_rows
+        return []
+
+
+class ReconciliationConnection:
+    def __init__(
+        self,
+        *,
+        accepted_input: tuple[object, ...],
+        existing_rows: list[tuple[object, ...]],
+        output_rows: list[tuple[object, ...]],
+        prior_run: tuple[object, ...] | None = None,
+        fail_on: str = "",
+    ) -> None:
+        self.accepted_input = accepted_input
+        self.existing_rows = existing_rows
+        self.output_rows = output_rows
+        self.prior_run = prior_run
+        self.fail_on = fail_on
+        self.calls: list[tuple[str, str, object]] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self, **_kwargs: object) -> ReconciliationCursor:
+        return ReconciliationCursor(self)
 
     def commit(self) -> None:
         self.commits += 1
@@ -509,3 +577,208 @@ def test_tushare_authority_fetch_uses_three_explicit_status_shards(monkeypatch) 
     assert [call[5] for call in calls] == ["listed", "pending", "delisted"]
     assert all(call[0] == "tushare" for call in calls)
     assert all(call[-1] is True for call in calls)
+
+
+def _reference_row(
+    market: str,
+    code: str,
+    name: str,
+    identity_status: str,
+    *,
+    identity_source: str = "stock_daily_1d",
+    input_id: str = "",
+    verified_at: datetime | None = None,
+    delisted_date: str = "",
+) -> tuple[object, ...]:
+    return (
+        market,
+        code,
+        name,
+        "",
+        "",
+        date(2020, 1, 1),
+        date.fromisoformat(delisted_date) if delisted_date else None,
+        "",
+        identity_status,
+        identity_source,
+        "tushare" if identity_status == "authoritative" else None,
+        input_id or ("a" * 64 if identity_status == "authoritative" else None),
+        verified_at
+        or (datetime(2026, 9, 8, 9, tzinfo=UTC) if identity_status == "authoritative" else None),
+    )
+
+
+def _reconciliation_connection(
+    authority_input,
+    *,
+    prior_run: tuple[object, ...] | None = None,
+    fail_on: str = "",
+) -> ReconciliationConnection:
+    existing_rows = [
+        _reference_row("SZSE", "301699", "", "provisional"),
+        _reference_row("BJSE", "920268", "", "provisional"),
+        _reference_row(
+            "SHSE",
+            "600000",
+            "浦发旧名",
+            "authoritative",
+            identity_source="tushare_catalog",
+        ),
+        _reference_row(
+            "SZSE",
+            "000001",
+            "平安银行",
+            "authoritative",
+            identity_source="tushare_catalog",
+        ),
+        _reference_row("SHSE", "601999", "历史非空名", "provisional", identity_source="legacy"),
+    ]
+    updated_by_code = {item.code: item for item in authority_input.items}
+    output_rows = [
+        _reference_row(
+            "SZSE",
+            "000001",
+            "平安银行",
+            "authoritative",
+            identity_source="tushare_catalog",
+        )
+    ]
+    for code in ("301699", "600000", "920268"):
+        item = updated_by_code[code]
+        output_rows.append(
+            _reference_row(
+                item.market,
+                item.code,
+                item.name,
+                "authoritative",
+                identity_source="tushare_catalog",
+                input_id=authority_input.input_id,
+                verified_at=authority_input.source_refreshed_at_utc,
+                delisted_date=item.delisted_date,
+            )
+        )
+    return ReconciliationConnection(
+        accepted_input=(
+            authority_input.provider,
+            authority_input.content_sha256,
+            "accepted",
+        ),
+        existing_rows=existing_rows,
+        output_rows=output_rows,
+        prior_run=prior_run,
+        fail_on=fail_on,
+    )
+
+
+def test_reconciliation_promotes_updates_and_retains_missing_authority(monkeypatch) -> None:
+    authority_input = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+        fresh_through=date(2026, 9, 9),
+    )
+    connection = _reconciliation_connection(authority_input)
+    monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
+
+    result = reconcile_stock_authority_input(
+        authority_input,
+        run_key="catalog-2026-09-09",
+        connection_factory=lambda: connection,
+    )
+
+    assert result.status == "committed"
+    assert result.existing_count == 5
+    assert result.inserted_count == 0
+    assert result.promoted_count == 2
+    assert result.renamed_count == 1
+    assert result.missing_count == 1
+    assert result.conflict_count == 0
+    assert len(result.normalized_output_sha256) == 64
+    assert len(result.audit_content_sha256) == 64
+    assert connection.commits == 1
+    assert connection.rollbacks == 0
+
+    upsert_call = next(
+        call
+        for call in connection.calls
+        if call[0] == "many" and "insert into ref.stock" in call[1]
+    )
+    assert "identity_status = excluded.identity_status" in upsert_call[1]
+    params_by_code = {str(params[1]): params for params in upsert_call[2]}
+    assert params_by_code["301699"][2] == "新股样例"
+    assert params_by_code["920268"][2] == "北交样例"
+    assert params_by_code["920268"][6] == "2026-09-01"
+    assert all(params[8] == authority_input.input_id for params in upsert_call[2])
+    audit_call = next(
+        call
+        for call in connection.calls
+        if "insert into audit.stock_reference_reconciliation" in call[1]
+    )
+    assert audit_call[2][-2:] == (
+        result.normalized_output_sha256,
+        result.audit_content_sha256,
+    )
+
+
+def test_reconciliation_rolls_back_reference_and_audit_together(monkeypatch) -> None:
+    authority_input = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+        fresh_through=date(2026, 9, 9),
+    )
+    connection = _reconciliation_connection(
+        authority_input,
+        fail_on="insert into audit.stock_reference_reconciliation",
+    )
+    monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
+
+    with pytest.raises(RuntimeError, match="injected reconciliation failure"):
+        reconcile_stock_authority_input(
+            authority_input,
+            run_key="failed-run",
+            connection_factory=lambda: connection,
+        )
+
+    assert connection.commits == 0
+    assert connection.rollbacks == 1
+
+
+def test_reconciliation_same_run_key_is_idempotent(monkeypatch) -> None:
+    authority_input = prepare_stock_authority_input(
+        _complete_shards(),
+        source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
+        fresh_through=date(2026, 9, 9),
+    )
+    monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
+    first_connection = _reconciliation_connection(authority_input)
+    first = reconcile_stock_authority_input(
+        authority_input,
+        run_key="stable-run",
+        connection_factory=lambda: first_connection,
+    )
+    prior_run = (
+        authority_input.input_id,
+        authority_input.content_sha256,
+        first.candidate_count,
+        first.existing_count,
+        first.inserted_count,
+        first.promoted_count,
+        first.renamed_count,
+        first.missing_count,
+        first.conflict_count,
+        first.normalized_output_sha256,
+        first.audit_content_sha256,
+    )
+    replay_connection = _reconciliation_connection(authority_input, prior_run=prior_run)
+
+    replay = reconcile_stock_authority_input(
+        authority_input,
+        run_key="stable-run",
+        connection_factory=lambda: replay_connection,
+    )
+
+    assert replay.status == "idempotent"
+    assert replay.normalized_output_sha256 == first.normalized_output_sha256
+    assert replay.audit_content_sha256 == first.audit_content_sha256
+    assert replay_connection.commits == 0
+    assert replay_connection.rollbacks == 1
+    assert not any(call[0] == "many" for call in replay_connection.calls)

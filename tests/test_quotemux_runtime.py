@@ -1210,6 +1210,41 @@ def test_stock_catalog_writer_keeps_board_type_compatible(monkeypatch) -> None:
     assert captured["params"] == [("BJSE", "920028", "新恒泰", "塑料", "beijing", "2026-03-20", "", "浙江", "beijing")]
 
 
+def test_partial_stock_catalog_writer_cannot_change_authoritative_rows(monkeypatch) -> None:
+    from quotemux import fact_ref_writes
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        fact_ref_writes,
+        "_existing_columns",
+        lambda table_schema, table_name: {"identity_status", "identity_source"},
+    )
+    monkeypatch.setattr(
+        fact_ref_writes,
+        "execute_many",
+        lambda query, params: captured.update(query=query, params=params) or True,
+    )
+
+    assert fact_ref_writes._upsert_stock_catalog(
+        [
+            StockBasicInfo(
+                code="600000",
+                name="不可信局部名称",
+                exchange="SHSE",
+                market="main_board",
+                list_status="listed",
+                list_date="1999-11-10",
+                delist_date="",
+            )
+        ]
+    )
+
+    query_text = str(captured["query"])
+    assert "'provisional', 'catalog_partial'" in query_text
+    assert "where ref.stock.identity_status = 'provisional'" in query_text
+
+
 def test_stock_catalog_writer_classifies_blank_b_share_and_bjse_boards(monkeypatch) -> None:
     from quotemux import fact_ref_writes
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import os
 
 from platform_models import AdjFactorItem, AuditItem, AuctionItem, BSECodeMappingItem, CcassHoldingDetailItem, CcassHoldingItem, ChipDistributionItem, ChipPerformanceItem, CorporateActionCoverage, DisclosureDateItem, DividendItem, DividendPage, ExpressItem, ForecastItem, HKConnectHoldingItem, HKConnectTargetItem, HLSignalItem, LimitOrderAmountItem, MainBusinessItem, ManagementRewardItem, NameHistoryItem, NineTurnItem, PledgeDetailItem, PledgeStatItem, RepurchaseItem, ResearchReportItem, RightsIssueItem, RightsIssuePage, ShareChangeItem, ShareholderChangeItem, ShareholderCountItem, ShareholderTop10Item, StockAHComparisonItem, StockArchiveItem, StockBasicInfo, StockDailyBasicItem, StockDailyMarketValueItem, StockDailyValuationItem, StockFinanceIndicatorItem, StockFinancialPitRawItem, StockFinancialStatementItem, StockManagerItem, StockMarginItem, StockMoneyFlowItem, StockPremarketItem, StockProfileItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult, StockRiskFlagItem, StockStrategyFactorItem, SurveyItem, TechnicalFactorItem, UnlockScheduleItem
@@ -20,6 +20,11 @@ from quotemux.source_packages.registry import get_default_source_package_registr
 from quotemux.stock_reference_authority import (
     REQUIRED_AUTHORITY_SHARDS,
     StockAuthorityInputError,
+    StockReferenceReconciliationResult,
+    freeze_stock_authority_input,
+    load_latest_completed_trading_day,
+    reconcile_stock_authority_input,
+    record_rejected_stock_authority_input,
 )
 from quotemux.store import load_store_result, store_result
 from quotemux.store.postgres import get_postgres_cache_store
@@ -162,6 +167,43 @@ def _fetch_tushare_authority_shards(
             )
         shards[status] = list(result)
     return shards
+
+
+def _refresh_tushare_authoritative_catalog(
+    settings: QuoteMuxSettings,
+) -> StockReferenceReconciliationResult:
+    try:
+        shards = _fetch_tushare_authority_shards(settings)
+    except StockAuthorityInputError as exc:
+        failed_at = datetime.now(UTC)
+        record_rejected_stock_authority_input(
+            exc,
+            source_refreshed_at_utc=failed_at,
+            fresh_through=None,
+        )
+        raise
+
+    refreshed_at = datetime.now(UTC)
+    shard_counts = {name: len(items) for name, items in shards.items()}
+    try:
+        fresh_through = load_latest_completed_trading_day(refreshed_at)
+    except Exception as exc:
+        authority_error = StockAuthorityInputError(
+            f"authoritative trading calendar unavailable: {exc}",
+            shard_counts=shard_counts,
+        )
+        record_rejected_stock_authority_input(
+            authority_error,
+            source_refreshed_at_utc=refreshed_at,
+            fresh_through=None,
+        )
+        raise authority_error from exc
+    authority_input = freeze_stock_authority_input(
+        shards,
+        source_refreshed_at_utc=refreshed_at,
+        fresh_through=fresh_through,
+    )
+    return reconcile_stock_authority_input(authority_input)
 
 
 def _fallback_quote_freq(freq: str) -> str:
@@ -1321,6 +1363,26 @@ class QuoteMuxStocks:
         if data_version != "":
             items = [item for item in get_local_stock_catalog(codes, name, exchange, list_status, include_delisted) if _is_standard_stock_code(item.code)]
             return items[offset: offset + ensure_limit(limit)]
+        is_authority_refresh = (
+            refresh
+            and not codes
+            and not name
+            and not exchange
+            and not list_status
+            and include_delisted
+            and ensure_limit(limit) >= 4000
+            and offset == 0
+        )
+        if is_authority_refresh:
+            reconciliation = _refresh_tushare_authoritative_catalog(self._settings)
+            items = [
+                item
+                for item in get_local_stock_catalog([], "", "", "", True)
+                if _is_standard_stock_code(item.code)
+            ]
+            if reconciliation.candidate_count > 0 and items == []:
+                raise RuntimeError("authoritative stock catalog committed but could not be read")
+            return items[: ensure_limit(limit)]
         store_identity = {"codes": list(codes), "name": name, "exchange": exchange, "list_status": list_status, "include_delisted": include_delisted}
         handlers = {
             "get_stock_catalog": lambda instance: lambda: _source_package_call(instance.package_id, "get_stock_catalog", codes, name, exchange, list_status, include_delisted, ensure_limit(limit), offset, refresh),
@@ -1332,8 +1394,6 @@ class QuoteMuxStocks:
             if not name and not exchange and list_status in {"", "L", "listed"}:
                 return [()] if len(current_items) < 4000 else []
             return [()] if current_items == [] else []
-
-        is_full_snapshot = not codes and not name and not exchange and ensure_limit(limit) >= 4000
 
         items, _ = execute_capability_query(
             CapabilityQuerySpec(
@@ -1347,7 +1407,7 @@ class QuoteMuxStocks:
                 source_order=self._settings.get_contract_source_order("stocks.catalog", ("tushare",)),
                 base_items=[] if refresh else get_local_stock_catalog(codes, name, exchange, list_status, include_delisted),
                 base_source_name="ref.stock",
-                fact_ref_writer=get_fact_ref_writer("stocks.catalog") if is_full_snapshot else None,
+                fact_ref_writer=None,
             )
         )
         items = [item for item in items if _is_standard_stock_code(item.code)]

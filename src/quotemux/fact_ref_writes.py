@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel
 
@@ -836,6 +836,7 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
     params: list[tuple[object, ...]] = []
     existing_columns = _existing_columns("ref", "stock")
     has_board_type = "board_type" in existing_columns
+    has_authority_lifecycle = {"identity_status", "identity_source"} <= existing_columns
     for item in items:
         code = normalize_stock_code(item.code).zfill(6)
         if code == "":
@@ -846,20 +847,35 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
     board_type_column_sql = ", board_type" if has_board_type else ""
     board_type_value_sql = ", %s" if has_board_type else ""
     update_board_type_sql = ",\n            board_type = excluded.board_type" if has_board_type else ""
+    authority_column_sql = ", identity_status, identity_source" if has_authority_lifecycle else ""
+    authority_value_sql = ", 'provisional', 'catalog_partial'" if has_authority_lifecycle else ""
+    authority_update_sql = (
+        ",\n            identity_source = case "
+        "when ref.stock.identity_source = 'legacy' then 'catalog_partial' "
+        "else ref.stock.identity_source end"
+        if has_authority_lifecycle
+        else ""
+    )
+    provisional_only_sql = (
+        "\n        where ref.stock.identity_status = 'provisional'"
+        if has_authority_lifecycle
+        else ""
+    )
     if has_board_type:
         params = [(*item, item[4]) for item in params]
     return execute_many(
         f"""
-        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area{board_type_column_sql})
-        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s{board_type_value_sql})
+        insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area{board_type_column_sql}{authority_column_sql})
+        values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s{board_type_value_sql}{authority_value_sql})
         on conflict (market, code) do update set
             name = excluded.name,
             industry = excluded.industry,
             listing_board = excluded.listing_board,
             listed_date = excluded.listed_date,
             delisted_date = excluded.delisted_date,
-            area = excluded.area{update_board_type_sql},
+            area = excluded.area{update_board_type_sql}{authority_update_sql},
             updated_at = now()
+        {provisional_only_sql}
         """,
         params,
     )
