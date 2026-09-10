@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import threading
 from typing import Any
 
 from psycopg.rows import tuple_row
@@ -25,18 +26,35 @@ _LEGACY_STOCK_COLUMNS = {
 }
 _AUTHORITY_STOCK_COLUMNS = {
     "identity_status",
+    "identity_source",
     "authority_provider",
     "authority_input_id",
     "authority_verified_at",
 }
+_MIGRATION_LOCK = threading.Lock()
+_MIGRATION_READY = False
 
 
 STOCK_REFERENCE_AUTHORITY_SCHEMA_SQL = (
     "create schema if not exists audit",
     "alter table ref.stock add column if not exists identity_status text not null default 'provisional'",
+    "alter table ref.stock add column if not exists identity_source text not null default 'legacy'",
     "alter table ref.stock add column if not exists authority_provider text",
     "alter table ref.stock add column if not exists authority_input_id text",
     "alter table ref.stock add column if not exists authority_verified_at timestamp with time zone",
+    """
+    do $$ begin
+      if not exists (
+        select 1 from pg_constraint
+        where conname = 'stock_identity_source_check'
+          and conrelid = 'ref.stock'::regclass
+      ) then
+        alter table ref.stock add constraint stock_identity_source_check check (
+          identity_source in ('legacy', 'stock_daily_1d', 'catalog_partial', 'tushare_catalog')
+        );
+      end if;
+    end $$
+    """,
     """
     do $$ begin
       if not exists (
@@ -53,6 +71,7 @@ STOCK_REFERENCE_AUTHORITY_SCHEMA_SQL = (
           )
           or (
             identity_status = 'authoritative'
+            and identity_source = 'tushare_catalog'
             and authority_provider = 'tushare'
             and authority_input_id ~ '^[0-9a-f]{64}$'
             and authority_verified_at is not null
@@ -263,3 +282,16 @@ def apply_stock_reference_authority_migration(
     finally:
         if owns_connection:
             _release_connection(connection)
+
+
+def ensure_stock_reference_authority_schema() -> None:
+    """Apply the expand migration once per process before an authority-aware write."""
+
+    global _MIGRATION_READY
+    if _MIGRATION_READY:
+        return
+    with _MIGRATION_LOCK:
+        if _MIGRATION_READY:
+            return
+        apply_stock_reference_authority_migration()
+        _MIGRATION_READY = True
