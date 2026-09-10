@@ -781,9 +781,10 @@ def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem]
     active_codes = {normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")}
     actual_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
     expected_codes = set(sorted(active_codes)[: offset + limit])
-    expected_min = len(expected_codes)
-    if len(actual_codes & expected_codes) < expected_min:
-        raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected_min={expected_min} actual={len(actual_codes)}")
+    expected_count = len(expected_codes)
+    actual_count = len(actual_codes & expected_codes)
+    if actual_count != expected_count:
+        raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected={expected_count} actual={actual_count}")
 
 
 def _build_steps(freq: str, request_freq: str, request_count: int | None, actual_adjust: str, settings: QuoteMuxSettings) -> tuple[ProviderStep[StockQuoteItem], ...]:
@@ -809,7 +810,7 @@ def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderSte
         "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: fetch_snapshot(instance.package_id, missing_codes, request_trade_date),
         "get_stock_quotes": lambda instance: lambda missing_codes, request_trade_date: _source_package_call(instance.package_id, "get_stock_quotes", missing_codes, "1d", request_trade_date, "", "", "", "", None, "none"),
     }
-    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "akshare", "mootdx"))
+    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "akshare", "mootdx", "opentdx"))
 
 
 def _indicator_codes_from_params(code: str, codes: str) -> list[str]:

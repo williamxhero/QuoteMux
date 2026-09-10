@@ -123,6 +123,19 @@ def test_strict_boundary_allows_local_database_reads_without_provider_or_availab
         assert cache_db.query_dataframe("select * from capability_cache_rows").equals(cache_frame)
 
 
+def test_strict_boundary_does_not_initialize_cache_schema_or_write_read_audit(monkeypatch) -> None:
+    from quotemux.store import postgres, runtime as store_runtime
+    from quotemux.strict_read import strict_public_read_boundary
+
+    monkeypatch.setattr(postgres, "execute_sql", lambda *_args, **_kwargs: pytest.fail("schema or audit write must not run"))
+    monkeypatch.setattr(store_runtime, "get_config_runtime", lambda: pytest.fail("provider audit must not run"))
+
+    with strict_public_read_boundary():
+        assert postgres._ensure_schema() is True
+        postgres.CacheAuditRepository().write("stocks.catalog", "cache_hit", "", None, None, {})
+        store_runtime._record_store_event("stocks.catalog", "store_hit", {})
+
+
 def test_strict_boundary_allows_local_stream_reads(monkeypatch) -> None:
     from quotemux.infra.db import client as fact_db
     from quotemux.strict_read import strict_public_read_boundary

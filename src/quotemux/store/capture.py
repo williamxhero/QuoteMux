@@ -1266,6 +1266,12 @@ def _recent_stock_daily_count(trade_date: str) -> int:
 
 def _stock_daily_fact_missing(trade_date: str) -> bool:
     actual_count = _complete_stock_daily_count(trade_date)
+    expected_codes = _active_stock_codes(trade_date)
+    if expected_codes != ():
+        # A market-wide snapshot is a strict active-universe contract.  The
+        # historical 90%-of-recent-peak heuristic can silently accept a small
+        # but real provider gap, which then makes the scheduler stop retrying.
+        return actual_count != len(expected_codes)
     expected_count = _recent_stock_daily_count(trade_date)
     return not _daily_count_complete(actual_count, expected_count)
 
@@ -1431,11 +1437,16 @@ def _index_quote_requests(policy: CapturePolicy, capability_id: str, now: dateti
 
 def _daily_snapshot_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
-    return tuple(
-        CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0})
-        for trade_date in trading_days
-        if _stock_daily_fact_missing(trade_date)
-    )
+    if trading_days == ():
+        return ()
+    # This capability gates daily close readiness, so it must be exact for the
+    # newest completed trading day.  Historical gaps remain visible to health
+    # and repair workflows; replaying them here would make today's readiness
+    # task fail for unrelated backlog.
+    trade_date = trading_days[-1]
+    if not _stock_daily_fact_missing(trade_date):
+        return ()
+    return (CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0}),)
 
 
 def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -1600,10 +1611,11 @@ def _market_recent_trading_day_requests(policy: CapturePolicy, capability_id: st
     start_date, end_date = _date_window(policy, now)
     recent_days = _recent_trading_days(policy.window_count, now)
     if capability_id == "concepts.indicators.money_flow.snapshot":
+        request_scope = {"scope": "concept", "limit": 10000, "offset": 0}
         return tuple(
-            CaptureRequest(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0})
+            CaptureRequest(capability_id, {"trade_date": trade_date, **request_scope})
             for trade_date in recent_days
-            if _single_date_missing(capability_id, {"trade_date": trade_date, "scope": "", "limit": 10000, "offset": 0})
+            if _single_date_missing(capability_id, {"trade_date": trade_date, **request_scope})
         )
     identities = {
         "markets.indicators.main_capital_flow": {"trade_date": "", "start_date": start_date, "end_date": end_date},

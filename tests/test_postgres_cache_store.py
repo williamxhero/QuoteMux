@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, time
 
 import quotemux
-from platform_models import AdjFactorItem, ConnectQuotaItem, HKConnectTargetItem, IndexQuoteItem, MainBusinessItem, NewsEventItem, RankingBrokerPickItem, StockFinancialStatementItem, StockQuoteItem, TradingCalendarItem
+from platform_models import AdjFactorItem, ConceptMoneyFlowItem, ConnectQuotaItem, HKConnectTargetItem, IndexQuoteItem, MainBusinessItem, NewsEventItem, RankingBrokerPickItem, StockFinancialStatementItem, StockQuoteItem, TradingCalendarItem
 
 from quotemux.reports import ContractReport
 from quotemux.requests.stocks import StockDailySnapshotRequest, StockQuotesRequest
@@ -148,6 +148,48 @@ def test_empty_scope_value_matches_all_payloads() -> None:
 
     assert result.hit
     assert {item["code"] for item in result.items} == {"000001", "600000"}
+
+
+def test_concept_money_flow_snapshot_scope_reads_every_concept() -> None:
+    policy = _policy_for("concepts.indicators.money_flow.snapshot")
+    assert policy.request_scope_fields == ("scope",)
+    store = _store(policy)
+
+    request = {"trade_date": "2026-09-08", "scope": "concept", "limit": 10000, "offset": 0}
+    store.write(
+        "concepts.indicators.money_flow.snapshot",
+        request,
+        [
+            ConceptMoneyFlowItem(concept_id="C1", trade_date="2026-09-08", scope="concept", inflow=2.0, outflow=1.0, net_inflow=1.0),
+            ConceptMoneyFlowItem(concept_id="C2", trade_date="2026-09-08", scope="concept", inflow=4.0, outflow=3.0, net_inflow=1.0),
+        ],
+        ContractReport(contract_name="concepts.indicators.money_flow.snapshot"),
+    )
+
+    result = store.read("concepts.indicators.money_flow.snapshot", request)
+
+    assert result.hit
+    assert {item["concept_id"] for item in result.items} == {"C1", "C2"}
+
+
+def test_concept_money_flow_snapshot_read_is_limited_to_requested_trade_date() -> None:
+    store = _store(_policy_for("concepts.indicators.money_flow.snapshot"))
+    for trade_date in ("2026-09-07", "2026-09-08"):
+        request = {"trade_date": trade_date, "scope": "concept", "limit": 10000, "offset": 0}
+        store.write(
+            "concepts.indicators.money_flow.snapshot",
+            request,
+            [ConceptMoneyFlowItem(concept_id="C1", trade_date=trade_date, scope="concept", net_inflow=1.0)],
+            ContractReport(contract_name="concepts.indicators.money_flow.snapshot"),
+        )
+
+    result = store.read(
+        "concepts.indicators.money_flow.snapshot",
+        {"trade_date": "2026-09-08", "scope": "concept", "limit": 10000, "offset": 0},
+    )
+
+    assert result.hit
+    assert [item["trade_date"] for item in result.items] == ["2026-09-08"]
 
 
 class _Snapshot:

@@ -11,6 +11,7 @@ from quotemux.models import ConceptAliasGroupItem
 from platform_models import ConceptQuoteItem, FutureContractCatalogItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult
 from quotemux.store import capture
 from quotemux.capabilities import is_independently_configurable_capability_id, list_capability_ids
+from quotemux.capabilities.inventory import _infer_source_order
 from quotemux.store.capture import (
     CADENCE_DAILY,
     CADENCE_MONTHLY,
@@ -789,7 +790,7 @@ def test_second_phase_profiles_build_requests(monkeypatch) -> None:
     index_members = capture.build_capture_requests(_policy(capability_id="indexes.members", scope_profile=PROFILE_INDEXES_RECENT_TRADING_DAYS, window_count=1), now)
     concept_members = capture.build_capture_requests(_policy(capability_id="concepts.members", scope_profile=PROFILE_CONCEPTS_RECENT_TRADING_DAYS, window_count=1), now)
 
-    assert [item.request_identity["trade_date"] for item in snapshot] == ["2026-04-24", "2026-04-27"]
+    assert [item.request_identity["trade_date"] for item in snapshot] == ["2026-04-27"]
     assert calendar[0].request_identity["start_date"] == "2026-01-01"
     assert calendar[0].request_identity["end_date"] == "2027-12-31"
     assert [item.request_identity for item in concept_quotes] == [
@@ -887,6 +888,28 @@ def test_daily_snapshot_only_builds_missing_trade_dates(monkeypatch) -> None:
     assert [item.request_identity["trade_date"] for item in requests] == ["2026-04-27"]
 
 
+def test_daily_snapshot_checks_only_latest_trading_date(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_recent_trading_days", lambda _window_count, _now: ("2026-04-23", "2026-04-24", "2026-04-27"))
+    monkeypatch.setattr(capture, "_stock_daily_fact_missing", lambda trade_date: trade_date != "2026-04-27")
+    policy = _policy(capability_id="stocks.quotes.daily_snapshot", scope_profile=PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS, window_count=3)
+
+    assert capture._daily_snapshot_requests(policy, "stocks.quotes.daily_snapshot", datetime(2026, 4, 27, 18, 30)) == ()
+
+
+def test_daily_snapshot_requires_every_active_stock(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_complete_stock_daily_count", lambda _trade_date: 2)
+    monkeypatch.setattr(capture, "_active_stock_codes", lambda _trade_date: ("000001", "000002", "000003"))
+
+    assert capture._stock_daily_fact_missing("2026-04-27") is True
+
+    monkeypatch.setattr(capture, "_complete_stock_daily_count", lambda _trade_date: 3)
+    assert capture._stock_daily_fact_missing("2026-04-27") is False
+
+
+def test_daily_snapshot_default_source_order_includes_opentdx() -> None:
+    assert _infer_source_order("stocks.quotes.daily_snapshot")[-1] == "opentdx"
+
+
 def test_report_period_requests_only_build_missing_periods(monkeypatch) -> None:
     class _Frame:
         empty = False
@@ -945,6 +968,25 @@ def test_concept_money_flow_requests_only_build_missing_ranges(monkeypatch) -> N
 
     assert [item.request_identity["start_date"] for item in requests] == ["2026-04-27"]
     assert [item.request_identity["end_date"] for item in requests] == ["2026-04-27"]
+
+
+def test_concept_money_flow_snapshot_capture_uses_canonical_concept_scope(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_recent_trading_days", lambda _window_count, _now: ("2026-04-24", "2026-04-27"))
+    monkeypatch.setattr(capture, "_single_date_missing", lambda *_args: True)
+
+    requests = capture.build_capture_requests(
+        _policy(
+            capability_id="concepts.indicators.money_flow.snapshot",
+            scope_profile=capture.PROFILE_MARKET_RECENT_TRADING_DAYS,
+            window_count=2,
+        ),
+        datetime(2026, 4, 27, 18, 30),
+    )
+
+    assert [item.request_identity for item in requests] == [
+        {"trade_date": "2026-04-24", "scope": "concept", "limit": 10000, "offset": 0},
+        {"trade_date": "2026-04-27", "scope": "concept", "limit": 10000, "offset": 0},
+    ]
 
 
 def test_stock_money_flow_batch_requests_only_build_missing_trade_dates(monkeypatch) -> None:

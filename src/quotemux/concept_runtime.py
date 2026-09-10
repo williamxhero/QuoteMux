@@ -713,6 +713,13 @@ class QuoteMuxConceptRuntime:
         actual_trade_date = format_date_value(trade_date)
         if actual_trade_date == "":
             return []
+        store_items, store_read = load_store_result(
+            "concepts.indicators.money_flow.snapshot",
+            {"trade_date": actual_trade_date, "scope": scope, "limit": limit, "offset": offset},
+            ConceptMoneyFlowItem,
+        )
+        if store_read.hit:
+            return sorted(store_items, key=lambda item: item.concept_id)[offset: offset + ensure_limit(limit)]
         items: list[ConceptMoneyFlowItem] = []
         source_order = self._source_order("concepts.indicators.money_flow.snapshot", CONCEPT_MONEY_FLOW_SNAPSHOT_SOURCE_ORDER)
         for provider in source_order:

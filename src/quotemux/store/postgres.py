@@ -13,7 +13,7 @@ from quotemux.reports import ContractReport
 from quotemux.store.cache_db import execute_many, execute_sql, query_dataframe
 from quotemux.store.default_update_policy import cache_enabled_from_ttl_days, get_capability_update_policy_default, ttl_seconds_from_days
 from quotemux.store.payload_store import CachePayloadRef, get_payload, put_payload
-from quotemux.strict_read import reject_in_strict_public_read
+from quotemux.strict_read import is_strict_public_read, reject_in_strict_public_read
 
 
 CACHE_HIT = "hit"
@@ -361,7 +361,9 @@ def _request_scope_fields_for_capability(capability_id: str) -> tuple[str, ...]:
         return ("code", "view")
     if capability_id == "stocks.indicators.risk_flags":
         return ("flag_type", "status")
-    if capability_id in {"concepts.indicators.money_flow", "concepts.indicators.money_flow.snapshot"}:
+    if capability_id == "concepts.indicators.money_flow.snapshot":
+        return ("scope",)
+    if capability_id == "concepts.indicators.money_flow":
         return ("concept_id", "scope")
     if capability_id.startswith("stocks.finance.statements"):
         return ("code", "report_type")
@@ -638,6 +640,8 @@ def _is_empty_dataframe(frame: pd.DataFrame) -> bool:
 
 def _ensure_schema() -> bool:
     global _SCHEMA_FAILED, _SCHEMA_READY
+    if is_strict_public_read():
+        return True
     if _SCHEMA_READY:
         return True
     if _SCHEMA_FAILED:
@@ -790,6 +794,8 @@ class CacheAuditRepository:
         time_end: datetime | None,
         detail: dict[str, object],
     ) -> None:
+        if is_strict_public_read():
+            return
         if not _ensure_schema():
             return
         execute_sql(
@@ -1292,7 +1298,7 @@ class UnifiedPostgresCacheStore:
         seen: set[str] = set()
         never_expires = _policy_ignores_ttl(policy)
         for scope, coverage in coverages:
-            if policy.coverage_mode == "snapshot":
+            if policy.coverage_mode == "snapshot" and policy.capability_id != "concepts.indicators.money_flow.snapshot":
                 start, end = datetime.min, datetime.max
             else:
                 start, end = _coverage_read_range(policy, coverage, scope)

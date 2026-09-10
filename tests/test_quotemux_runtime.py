@@ -266,6 +266,39 @@ def test_daily_snapshot_with_report_fills_missing_codes_from_b3() -> None:
     assert report.source_hit_counts["efinance"] == 1
 
 
+def test_daily_snapshot_with_report_fills_tushare_gap_from_opentdx(monkeypatch) -> None:
+    runtime = QuoteMux(QuoteMuxSettings(enabled_sources=("tushare", "efinance", "akshare", "mootdx", "opentdx")))
+    fact_ref_items: list[StockQuoteItem] = []
+    tushare_item = StockQuoteItem(
+        code="600000", trade_time="2026-04-03", freq="1d", open=10.0, high=11.0, low=9.5,
+        close=10.5, pre_close=10.0, pct_chg=5.0, volume=1000.0, amount=1000000.0, adjust="none",
+    )
+    opentdx_item = StockQuoteItem(
+        code="000001", trade_time="2026-04-03", freq="1d", open=9.0, high=10.0, low=8.5,
+        close=9.5, pre_close=9.0, pct_chg=5.56, volume=1000.0, amount=1000000.0, adjust="none",
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks.load_stock_active_codes_frame",
+        lambda trade_date: pd.DataFrame([{"code": "600000"}, {"code": "000001"}]),
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks._source_package_call",
+        _source_call_stub(
+            {
+                ("tushare", "get_stock_daily_snapshot_full"): [tushare_item],
+                ("opentdx", "get_stock_quotes"): [opentdx_item],
+            }
+        ),
+    )
+    monkeypatch.setattr("quotemux.stocks.get_fact_ref_writer", lambda _: lambda items: fact_ref_items.extend(items) is None or True)
+
+    items, report = runtime.stocks.get_daily_snapshot_with_report(StockDailySnapshotRequest(trade_date="2026-04-03"))
+
+    assert [item.code for item in items] == ["000001", "600000"]
+    assert fact_ref_items == items
+    assert report.source_hit_counts["opentdx"] == 1
+
+
 def test_daily_snapshot_partial_gap_prefers_market_snapshot(monkeypatch) -> None:
     runtime = QuoteMux()
     calls: list[tuple[str, str, tuple[object, ...]]] = []
@@ -300,6 +333,20 @@ def test_daily_snapshot_requests_large_gap_use_full_snapshot(monkeypatch) -> Non
     monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
 
     assert _build_snapshot_requests("2026-04-03", local_items) == [([], "2026-04-03")]
+
+
+def test_daily_snapshot_requests_single_missing_active_code(monkeypatch) -> None:
+    active_frame = pd.DataFrame([{"code": f"{index:06d}"} for index in range(1, 122)])
+    local_items = [
+        StockQuoteItem(code=f"{index:06d}", trade_time="2026-04-03", freq="1d", close=10.5, pre_close=10.0, pct_chg=5.0, amount=1000000.0, adjust="none")
+        for index in range(1, 121)
+    ]
+
+    monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
+
+    assert _build_snapshot_requests("2026-04-03", local_items) == [(["000121"], "2026-04-03")]
+    with pytest.raises(RuntimeError, match="expected=121 actual=120"):
+        _assert_daily_snapshot_coverage("2026-04-03", local_items, 10000, 0)
 
 
 def test_limit_order_candidates_use_close_and_limit_prices() -> None:
@@ -1158,6 +1205,33 @@ def test_stock_catalog_writer_keeps_board_type_compatible(monkeypatch) -> None:
 
     assert "board_type" in str(captured["query"])
     assert captured["params"] == [("BJSE", "920028", "新恒泰", "塑料", "beijing", "2026-03-20", "", "浙江", "beijing")]
+
+
+def test_stock_catalog_writer_classifies_blank_b_share_and_bjse_boards(monkeypatch) -> None:
+    from quotemux import fact_ref_writes
+
+    captured: dict[str, object] = {}
+
+    def fake_execute_many(query: str, params: list[tuple[object, ...]]) -> bool:
+        captured["params"] = params
+        return True
+
+    monkeypatch.setattr(fact_ref_writes, "_existing_columns", lambda table_schema, table_name: {"board_type"} if table_schema == "ref" and table_name == "stock" else set())
+    monkeypatch.setattr(fact_ref_writes, "execute_many", fake_execute_many)
+
+    assert fact_ref_writes._upsert_stock_catalog(
+        [
+            StockBasicInfo(code="900901", name="云赛Ｂ股", exchange="SHSE", market="", list_status="listed", list_date="", delist_date="", industry="", area=""),
+            StockBasicInfo(code="200017", name="深中华B", exchange="SZSE", market="", list_status="listed", list_date="", delist_date="", industry="", area=""),
+            StockBasicInfo(code="834683", name="爹地宝贝", exchange="BJSE", market="", list_status="listed", list_date="", delist_date="", industry="", area=""),
+        ]
+    )
+
+    assert captured["params"] == [
+        ("SHSE", "900901", "云赛Ｂ股", "", "B股", "", "", "", "B股"),
+        ("SZSE", "200017", "深中华B", "", "B股", "", "", "", "B股"),
+        ("BJSE", "834683", "爹地宝贝", "", "北交所", "", "", "", "北交所"),
+    ]
 
 
 def test_local_index_quotes_preserve_daily_pre_close(monkeypatch) -> None:
@@ -3211,7 +3285,7 @@ def test_daily_snapshot_coverage_rejects_even_one_upstream_gap(monkeypatch) -> N
         for index in range(99)
     ]
 
-    with pytest.raises(RuntimeError, match="trade_date=2026-07-02"):
+    with pytest.raises(RuntimeError, match="expected=100 actual=99"):
         _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 

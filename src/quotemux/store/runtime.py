@@ -10,7 +10,7 @@ from quotemux.config_runtime.runtime import get_config_runtime
 from quotemux.reports import ContractReport
 from quotemux.runtime_core.audit import record_provider_event
 from quotemux.store.postgres import CACHE_HIT, CACHE_MISS, CACHE_PARTIAL_HIT, CACHE_SKIP, CACHE_STALE, CacheReadResult, CacheWriteResult, get_postgres_cache_store
-from quotemux.strict_read import reject_in_strict_public_read
+from quotemux.strict_read import is_strict_public_read, reject_in_strict_public_read
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -39,6 +39,8 @@ class CapabilityStoreReadResult:
 
 
 def _record_store_event(capability_id: str, status: str, detail: dict[str, object]) -> None:
+    if is_strict_public_read():
+        return
     snapshot = get_config_runtime().get_active_snapshot()
     record_provider_event(
         capability_id,
