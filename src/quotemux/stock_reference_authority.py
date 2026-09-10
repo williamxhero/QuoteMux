@@ -475,11 +475,38 @@ def prepare_stock_authority_input(
     source_refreshed_at_utc: datetime,
     fresh_through: date,
 ) -> StockAuthorityInput:
-    shard_counts = {shard: len(shards.get(shard, ())) for shard in REQUIRED_AUTHORITY_SHARDS}
-    missing_shards = [shard for shard, count in shard_counts.items() if count == 0]
+    missing_shards = [shard for shard in REQUIRED_AUTHORITY_SHARDS if shard not in shards]
+    malformed_shards = [
+        shard
+        for shard in REQUIRED_AUTHORITY_SHARDS
+        if shard in shards
+        and (
+            not isinstance(shards[shard], Sequence)
+            or isinstance(shards[shard], (str, bytes, bytearray))
+        )
+    ]
+    shard_counts = {
+        shard: (
+            len(shards[shard])
+            if shard in shards and shard not in malformed_shards
+            else 0
+        )
+        for shard in REQUIRED_AUTHORITY_SHARDS
+    }
     if missing_shards:
         raise StockAuthorityInputError(
-            "stock authority input has empty required shards: " + ", ".join(missing_shards),
+            "stock authority input has missing required shards: " + ", ".join(missing_shards),
+            shard_counts=shard_counts,
+        )
+    if malformed_shards:
+        raise StockAuthorityInputError(
+            "stock authority input has malformed required shards: "
+            + ", ".join(malformed_shards),
+            shard_counts=shard_counts,
+        )
+    if shard_counts["listed"] == 0:
+        raise StockAuthorityInputError(
+            "stock authority listed shard is empty",
             shard_counts=shard_counts,
         )
     if source_refreshed_at_utc.tzinfo is None or source_refreshed_at_utc.utcoffset() is None:
