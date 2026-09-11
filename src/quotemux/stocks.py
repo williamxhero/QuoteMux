@@ -730,6 +730,36 @@ def _is_snapshot_placeholder(item: StockQuoteItem, trade_date: str) -> bool:
     return format_date_value(item.trade_time) == trade_date and _is_suspended_zero_amount_daily_item(item)
 
 
+def _snapshot_complete_codes(active_frame, items: list[StockQuoteItem], trade_date: str) -> tuple[list[str], set[str]]:
+    active_codes: list[str] = []
+    suspended_codes: set[str] = set()
+    for row in active_frame.to_dict("records"):
+        code = normalize_stock_code(str(row["code"])).zfill(6)
+        if code == "":
+            continue
+        active_codes.append(code)
+        if bool(row.get("is_suspended", False)):
+            suspended_codes.add(code)
+    complete_codes = {
+        normalize_stock_code(item.code).zfill(6)
+        for item in items
+        if item.freq == "1d"
+        and format_date_value(item.trade_time) == trade_date
+        and _has_complete_stock_snapshot_item(item)
+    }
+    suspended_fact_codes = {
+        normalize_stock_code(item.code).zfill(6)
+        for item in items
+        if item.freq == "1d"
+        and format_date_value(item.trade_time) == trade_date
+        and _is_suspended_zero_amount_daily_item(item)
+        and item.close is not None
+        and item.pre_close is not None
+        and item.pct_chg is not None
+    }
+    return active_codes, complete_codes | (suspended_codes & suspended_fact_codes)
+
+
 def _has_market_wide_snapshot_placeholders(trade_date: str, items: list[StockQuoteItem], active_count: int) -> bool:
     if active_count < SNAPSHOT_FULL_REFRESH_MISSING_THRESHOLD:
         return False
@@ -742,9 +772,9 @@ def _missing_snapshot_codes(trade_date: str, items: list[StockQuoteItem], limit:
         active_frame = load_stock_active_codes_frame(trade_date)
     if active_frame.empty:
         return [item.code for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and not _has_complete_stock_snapshot_item(item)]
-    active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
+    active_codes, complete_codes = _snapshot_complete_codes(active_frame, items, trade_date)
     page_codes = active_codes[: offset + limit]
-    existing_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
+    existing_codes = complete_codes
     return [code for code in dict.fromkeys(page_codes) if code != "" and code not in existing_codes]
 
 
@@ -753,14 +783,10 @@ def _build_snapshot_requests(trade_date: str, items: list[StockQuoteItem], limit
     if not active_frame.empty and _has_market_wide_snapshot_placeholders(trade_date, items, len(active_frame)):
         return [([], trade_date)]
     if not active_frame.empty:
-        active_codes = [normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")]
+        active_codes, complete_codes = _snapshot_complete_codes(active_frame, items, trade_date)
         expected_codes = set(active_codes[: offset + limit])
         expected_count = len(expected_codes)
-        actual_codes = {
-            normalize_stock_code(item.code).zfill(6)
-            for item in items
-            if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)
-        }
+        actual_codes = complete_codes
         if len(actual_codes & expected_codes) == expected_count:
             return []
     missing_codes = _missing_snapshot_codes(trade_date, items, limit, offset, active_frame)
@@ -779,10 +805,10 @@ def _assert_daily_snapshot_coverage(trade_date: str, items: list[StockQuoteItem]
         return
     if _has_market_wide_snapshot_placeholders(trade_date, items, len(active_frame)):
         raise RuntimeError(f"股票日线快照为全市场占位数据：trade_date={trade_date}")
-    active_codes = {normalize_stock_code(str(row["code"])).zfill(6) for row in active_frame.to_dict("records")}
-    actual_codes = {normalize_stock_code(item.code).zfill(6) for item in items if item.freq == "1d" and format_date_value(item.trade_time) == trade_date and _has_complete_stock_snapshot_item(item)}
+    active_codes, actual_codes = _snapshot_complete_codes(active_frame, items, trade_date)
+    active_code_set = set(active_codes)
     expected_count = min(len(active_codes), offset + limit)
-    actual_count = len(actual_codes & set(sorted(active_codes)[: offset + limit]))
+    actual_count = len(actual_codes & set(sorted(active_code_set)[: offset + limit]))
     if actual_count != expected_count:
         raise RuntimeError(f"股票日线快照不完整：trade_date={trade_date} expected={expected_count} actual={actual_count}")
 

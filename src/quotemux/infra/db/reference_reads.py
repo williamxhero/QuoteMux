@@ -92,18 +92,23 @@ def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
         return pd.DataFrame()
     query = """
         select
-            code
-        from ref.stock
-        where code <> '000000'
-          and listed_date <= %s
-          and (delisted_date is null or delisted_date >= %s)
+            s.code,
+            coalesce(d.is_suspended, false) as is_suspended
+        from ref.stock s
+        left join fact.stock_daily_1d d
+          on d.market = s.market
+         and d.code = s.code
+         and d.trade_date = %s
+        where s.code <> '000000'
+          and s.listed_date <= %s
+          and (s.delisted_date is null or s.delisted_date >= %s)
           -- B-share history is not covered by the configured stock-daily
           -- providers with the required amount/pre-close contract.
-          and not (market = 'SHSE' and left(code, 3) = '900')
-          and not (market = 'SZSE' and left(code, 3) = '200')
-        order by code
+          and not (s.market = 'SHSE' and left(s.code, 3) = '900')
+          and not (s.market = 'SZSE' and left(s.code, 3) = '200')
+        order by s.code
     """
-    return query_dataframe(query, (trade_date, trade_date))
+    return query_dataframe(query, (trade_date, trade_date, trade_date))
 
 
 def load_stock_name_history_frame(code: str, start_date: str, end_date: str) -> pd.DataFrame:
