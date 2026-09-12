@@ -1358,6 +1358,20 @@ def _industry_count() -> int:
     return int(frame.iloc[0].to_dict().get("industry_count", 0) or 0)
 
 
+def _industry_codes() -> tuple[str, ...]:
+    frame = query_dataframe(
+        "select distinct industry from ref.stock where industry <> '' order by industry",
+        (),
+    )
+    if _is_empty_dataframe(frame):
+        return ()
+    return tuple(
+        f"INDUSTRY:{str(row.get('industry', '')).strip()}"
+        for row in frame.to_dict("records")
+        if str(row.get("industry", "")).strip() != ""
+    )
+
+
 def _active_stock_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
     if trading_days == ():
@@ -1486,11 +1500,12 @@ def _concept_quote_requests(policy: CapturePolicy, capability_id: str, now: date
 
 def _board_quote_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
     trading_days = _recent_trading_days(policy.window_count, now)
+    board_codes = list(_industry_codes())
     return tuple(
         CaptureRequest(
             capability_id,
             {
-                "board_codes": [],
+                "board_codes": board_codes,
                 "freq": "1d",
                 "trade_date": trade_date,
                 "start_date": "",

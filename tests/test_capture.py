@@ -716,6 +716,16 @@ def test_board_daily_refreshes_when_price_fields_are_missing(monkeypatch) -> Non
     assert "change is not null" in board_query
 
 
+def test_board_daily_requests_explicit_industry_codes(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_recent_trading_days", lambda _window_count, _now: ("2026-09-11",))
+    monkeypatch.setattr(capture, "_board_daily_fact_missing", lambda _trade_date: True)
+    monkeypatch.setattr(capture, "_industry_codes", lambda: ("INDUSTRY:银行", "INDUSTRY:电子"))
+
+    requests = capture._board_quote_requests(_policy(capability_id="boards.quotes.daily"), "boards.quotes.daily", datetime(2026, 9, 12, 18, 30))
+
+    assert requests[0].request_identity["board_codes"] == ["INDUSTRY:银行", "INDUSTRY:电子"]
+
+
 def test_daily_snapshot_only_builds_missing_trade_dates(monkeypatch) -> None:
     class _Frame:
         empty = False
