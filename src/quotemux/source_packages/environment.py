@@ -206,7 +206,12 @@ def _install_requirements(python_executable: Path, requirements_path: Path) -> N
 
 
 def _install_runtime_requirements(python_executable: Path) -> None:
-    _install_local_project_copy(str(python_executable), _runtime_project_root(), resolve_dependencies=True)
+    resolve_dependencies = os.getenv("QUOTEMUX_RUNTIME_INSTALL_NO_DEPS", "").lower() != "true"
+    _install_local_project_copy(
+        str(python_executable),
+        _runtime_project_root(),
+        resolve_dependencies=resolve_dependencies,
+    )
     _install_distribution_for_python(str(python_executable))
 
 
