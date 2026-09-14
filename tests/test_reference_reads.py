@@ -41,8 +41,31 @@ def test_stock_catalog_query_returns_one_current_identity_per_code(monkeypatch) 
     reference_reads.load_stock_catalog_frame([], "", "", "")
 
     assert "select distinct on (code)" in captured["query"]
+    assert "identity_status = 'authoritative'" in captured["query"]
     assert (
         "order by code, (delisted_date is null) desc, listed_date desc, market"
         in captured["query"]
     )
     assert captured["params"] == ()
+
+
+def test_active_stock_universe_uses_only_authoritative_identities(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_query_dataframe(query: str, params: object = None):
+        captured["query"] = " ".join(query.split())
+        captured["params"] = params
+        return pd.DataFrame()
+
+    monkeypatch.setattr(reference_reads, "query_dataframe", fake_query_dataframe)
+
+    reference_reads.load_stock_active_codes_frame("2026-08-17")
+
+    assert "identity_status = 'authoritative'" in str(captured["query"])
+    assert captured["params"] == (
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+    )

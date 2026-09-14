@@ -17,7 +17,7 @@ def _normalize_exchange(value: str) -> str:
 
 
 def load_stock_catalog_frame(codes: list[str], name: str, market: str, listed_filter: str) -> pd.DataFrame:
-    where_clauses = ["code <> '000000'"]
+    where_clauses = ["code <> '000000'", "identity_status = 'authoritative'"]
     params: list[object] = []
     if codes:
         where_clauses.append("code = any(%s)")
@@ -111,6 +111,7 @@ def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
         where s.code <> '000000'
           and s.listed_date <= %s
           and (s.delisted_date is null or s.delisted_date >= %s)
+          and s.identity_status = 'authoritative'
           -- B-share history is not covered by the configured stock-daily
           -- providers with the required amount/pre-close contract.
           and not (s.market = 'SHSE' and left(s.code, 3) = '900')
