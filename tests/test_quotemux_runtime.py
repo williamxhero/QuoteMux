@@ -3380,6 +3380,50 @@ def test_daily_snapshot_coverage_does_not_accept_synthetic_suspension_rows(monke
         _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
 
 
+def test_daily_snapshot_coverage_accepts_source_marked_full_day_suspension(monkeypatch) -> None:
+    active_frame = pd.DataFrame.from_records(
+        [
+            {"code": "000001", "is_suspended": False},
+            {"code": "000002", "is_suspended": True},
+        ]
+    )
+    monkeypatch.setattr("quotemux.stocks.load_stock_active_codes_frame", lambda trade_date: active_frame)
+    items = [
+        StockQuoteItem(code="000001", trade_time="2026-07-02", freq="1d", close=1.0, pre_close=0.9, pct_chg=11.11, amount=100.0),
+        StockQuoteItem(code="000002", trade_time="2026-07-02", freq="1d", close=8.5, pre_close=8.5, pct_chg=0.0, amount=0.0, is_suspended=True),
+    ]
+
+    _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
+    assert _build_snapshot_requests("2026-07-02", items) == []
+
+
+def test_daily_snapshot_coverage_excludes_authoritative_suspension(monkeypatch) -> None:
+    active_frame = pd.DataFrame.from_records(
+        [
+            {"code": "000001", "is_suspended": False, "has_authoritative_suspension": False},
+            {"code": "000002", "is_suspended": False, "has_authoritative_suspension": True},
+        ]
+    )
+    monkeypatch.setattr(
+        "quotemux.stocks.load_stock_active_codes_frame",
+        lambda trade_date: active_frame,
+    )
+    items = [
+        StockQuoteItem(
+            code="000001",
+            trade_time="2026-07-02",
+            freq="1d",
+            close=1.0,
+            pre_close=0.9,
+            pct_chg=11.11,
+            amount=100.0,
+        ),
+    ]
+
+    _assert_daily_snapshot_coverage("2026-07-02", items, 10000, 0)
+    assert _build_snapshot_requests("2026-07-02", items) == []
+
+
 def test_daily_snapshot_rejects_market_wide_placeholders_before_fact_write(monkeypatch) -> None:
     active_frame = pd.DataFrame.from_records([{"code": f"{index:06d}"} for index in range(1, 11)])
     fetched_items = [StockQuoteItem(code="000001", trade_time="2026-07-02", freq="1d", close=1.0, amount=1.0)]

@@ -17,9 +17,15 @@ def test_active_stock_query_excludes_b_shares_without_full_daily_provider_contra
 
     reference_reads.load_stock_active_codes_frame("2026-08-17")
 
-    assert "market = 'SHSE' and left(code, 3) = '900'" in str(captured["query"])
-    assert "market = 'SZSE' and left(code, 3) = '200'" in str(captured["query"])
-    assert captured["params"] == ("2026-08-17", "2026-08-17")
+    assert "s.market = 'SHSE' and left(s.code, 3) = '900'" in str(captured["query"])
+    assert "s.market = 'SZSE' and left(s.code, 3) = '200'" in str(captured["query"])
+    assert captured["params"] == (
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+    )
 
 
 def test_stock_catalog_query_returns_one_current_identity_per_code(monkeypatch) -> None:
@@ -56,4 +62,10 @@ def test_active_stock_universe_uses_only_authoritative_identities(monkeypatch) -
     reference_reads.load_stock_active_codes_frame("2026-08-17")
 
     assert "identity_status = 'authoritative'" in str(captured["query"])
-    assert captured["params"] == ("2026-08-17", "2026-08-17")
+    assert captured["params"] == (
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+        "2026-08-17",
+    )
