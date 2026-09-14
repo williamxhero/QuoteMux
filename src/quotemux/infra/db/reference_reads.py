@@ -93,7 +93,16 @@ def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
     query = """
         select
             s.code,
-            coalesce(d.is_suspended, false) as is_suspended
+            coalesce(d.is_suspended, false) as is_suspended,
+            exists (
+                select 1
+                from fact.stock_suspension_history suspension
+                where suspension.market = s.market
+                  and suspension.code = s.code
+                  and suspension.status = 'suspended'
+                  and suspension.suspend_start_date <= %s
+                  and suspension.suspend_end_date >= %s
+            ) as has_authoritative_suspension
         from ref.stock s
         left join fact.stock_daily_1d d
           on d.market = s.market
@@ -108,7 +117,7 @@ def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
           and not (s.market = 'SZSE' and left(s.code, 3) = '200')
         order by s.code
     """
-    return query_dataframe(query, (trade_date, trade_date, trade_date))
+    return query_dataframe(query, (trade_date, trade_date, trade_date, trade_date, trade_date))
 
 
 def load_stock_name_history_frame(code: str, start_date: str, end_date: str) -> pd.DataFrame:

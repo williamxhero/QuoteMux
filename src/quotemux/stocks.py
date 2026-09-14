@@ -737,6 +737,8 @@ def _snapshot_complete_codes(active_frame, items: list[StockQuoteItem], trade_da
         code = normalize_stock_code(str(row["code"])).zfill(6)
         if code == "":
             continue
+        if bool(row.get("has_authoritative_suspension", False)):
+            continue
         active_codes.append(code)
         if bool(row.get("is_suspended", False)):
             suspended_codes.add(code)
