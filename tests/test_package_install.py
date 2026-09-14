@@ -240,4 +240,5 @@ def test_runtime_install_can_reuse_existing_dependencies(monkeypatch, tmp_path: 
     _install_runtime_requirements(Path("python"))
 
     assert commands
+    assert "--no-build-isolation" in commands[0]
     assert "--no-deps" in commands[0]

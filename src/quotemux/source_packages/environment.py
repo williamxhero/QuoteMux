@@ -243,6 +243,8 @@ def _install_local_project_copy(python_executable: str, source_root: Path, *, re
         )
         command = [python_executable, "-m", "pip", "install"]
         command.extend(["--upgrade", "--force-reinstall"])
+        if os.getenv("QUOTEMUX_RUNTIME_INSTALL_NO_DEPS", "").lower() == "true":
+            command.append("--no-build-isolation")
         if not resolve_dependencies:
             command.append("--no-deps")
         command.append(str(build_root))
