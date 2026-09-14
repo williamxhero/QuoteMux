@@ -217,3 +217,27 @@ def test_runtime_install_resolves_quotemux_declared_dependencies(monkeypatch, tm
 
     assert commands
     assert "--no-deps" not in commands[0]
+
+
+def test_runtime_install_can_reuse_existing_dependencies(monkeypatch, tmp_path: Path) -> None:
+    runtime_root = tmp_path / "quotemux"
+    runtime_root.mkdir()
+    (runtime_root / "pyproject.toml").write_text(
+        "[project]\nname='quotemux'\ndependencies=['pydantic>=2']\n",
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def capture(command: list[str], *, check: bool) -> None:
+        assert check
+        commands.append(command)
+
+    monkeypatch.setenv("QUOTEMUX_RUNTIME_INSTALL_NO_DEPS", "true")
+    monkeypatch.setattr("quotemux.source_packages.environment._runtime_project_root", lambda: runtime_root)
+    monkeypatch.setattr("quotemux.source_packages.environment._install_distribution_for_python", lambda python: None)
+    monkeypatch.setattr("quotemux.source_packages.environment.subprocess.run", capture)
+
+    _install_runtime_requirements(Path("python"))
+
+    assert commands
+    assert "--no-deps" in commands[0]
