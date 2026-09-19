@@ -424,14 +424,40 @@ def test_latest_completed_day_is_calendar_and_shanghai_session_aware() -> None:
     assert latest_completed_trading_day(after_close, open_dates) == date(2026, 9, 9)
 
 
-def test_authority_input_requires_all_shards_and_fresh_source() -> None:
+def test_authority_input_requires_all_shard_keys_and_fresh_source() -> None:
     refreshed_at = datetime(2026, 9, 9, 9, tzinfo=UTC)
     shards = _complete_shards()
     shards["pending"] = []
 
-    with pytest.raises(StockAuthorityInputError, match="empty required shards"):
+    result = prepare_stock_authority_input(
+        shards,
+        source_refreshed_at_utc=refreshed_at,
+        fresh_through=date(2026, 9, 9),
+    )
+    assert result.shard_counts == {"listed": 1, "pending": 0, "delisted": 1}
+
+    del shards["pending"]
+    with pytest.raises(StockAuthorityInputError, match="missing required shards: pending"):
         prepare_stock_authority_input(
             shards,
+            source_refreshed_at_utc=refreshed_at,
+            fresh_through=date(2026, 9, 9),
+        )
+
+    empty_listed = _complete_shards()
+    empty_listed["listed"] = []
+    with pytest.raises(StockAuthorityInputError, match="listed shard is empty"):
+        prepare_stock_authority_input(
+            empty_listed,
+            source_refreshed_at_utc=refreshed_at,
+            fresh_through=date(2026, 9, 9),
+        )
+
+    malformed = _complete_shards()
+    malformed["pending"] = None
+    with pytest.raises(StockAuthorityInputError, match="malformed required shards: pending"):
+        prepare_stock_authority_input(
+            malformed,
             source_refreshed_at_utc=refreshed_at,
             fresh_through=date(2026, 9, 9),
         )
@@ -576,9 +602,9 @@ def test_invalid_authority_input_is_audited_without_items(monkeypatch) -> None:
     connection = AuthorityConnection()
     monkeypatch.setattr(authority, "ensure_stock_reference_authority_schema", lambda: None)
     shards = _complete_shards()
-    shards["delisted"] = []
+    del shards["delisted"]
 
-    with pytest.raises(StockAuthorityInputError, match="empty required shards"):
+    with pytest.raises(StockAuthorityInputError, match="missing required shards"):
         freeze_stock_authority_input(
             shards,
             source_refreshed_at_utc=datetime(2026, 9, 9, 9, tzinfo=UTC),
