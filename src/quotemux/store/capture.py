@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 import hashlib
 import json
+import os
+import time as time_module
 from typing import Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
@@ -39,6 +41,10 @@ CAPTURE_PARTIAL = "partial"
 CAPTURE_FAILED = "failed"
 CAPTURE_SKIPPED = "skipped"
 CAPTURE_MARKET_DATA_READY_TIME = time(15, 5)
+DAILY_SNAPSHOT_RETRY_ATTEMPTS_ENV = "QUOTEMUX_DAILY_SNAPSHOT_RETRY_ATTEMPTS"
+DAILY_SNAPSHOT_RETRY_DELAY_SECONDS_ENV = "QUOTEMUX_DAILY_SNAPSHOT_RETRY_DELAY_SECONDS"
+DEFAULT_DAILY_SNAPSHOT_RETRY_ATTEMPTS = 2
+DEFAULT_DAILY_SNAPSHOT_RETRY_DELAY_SECONDS = 5.0
 
 CADENCE_DAILY = "daily"
 CADENCE_WEEKLY = "weekly"
@@ -1057,7 +1063,7 @@ def _intraday_gap_requests(policy: CapturePolicy, gaps: Sequence[CaptureGap]) ->
     for gap in gaps:
         codes_by_date.setdefault(gap.trade_date, []).append(gap.code)
     requests: list[CaptureRequest] = []
-    for trade_date in sorted(codes_by_date):
+    for trade_date in sorted(codes_by_date, reverse=True):
         for batch in _chunk(tuple(dict.fromkeys(codes_by_date[trade_date])), policy.batch_size):
             requests.append(CaptureRequest(policy.capability_id, _intraday_request_identity(batch, trade_date)))
     return tuple(requests)
@@ -1461,6 +1467,23 @@ def _daily_snapshot_requests(policy: CapturePolicy, capability_id: str, now: dat
     if not _stock_daily_fact_missing(trade_date):
         return ()
     return (CaptureRequest(capability_id, {"trade_date": trade_date, "limit": 10000, "offset": 0}),)
+
+
+def _daily_snapshot_retry_config() -> tuple[int, float]:
+    try:
+        attempts = max(1, int(os.getenv(DAILY_SNAPSHOT_RETRY_ATTEMPTS_ENV, "")))
+    except ValueError:
+        attempts = DEFAULT_DAILY_SNAPSHOT_RETRY_ATTEMPTS
+    try:
+        delay_seconds = max(0.0, float(os.getenv(DAILY_SNAPSHOT_RETRY_DELAY_SECONDS_ENV, "")))
+    except ValueError:
+        delay_seconds = DEFAULT_DAILY_SNAPSHOT_RETRY_DELAY_SECONDS
+    return attempts, delay_seconds
+
+
+def _is_retryable_daily_snapshot_error(error: Exception) -> bool:
+    message = str(error)
+    return "股票日线快照" in message or "全市场占位数据" in message
 
 
 def _trading_calendar_requests(policy: CapturePolicy, capability_id: str, now: datetime) -> tuple[CaptureRequest, ...]:
@@ -2279,6 +2302,7 @@ class QuoteMuxCaptureJob:
     def repair_fingerprint(dataset: str, scope: dict[str, object], dataset_version: str = "") -> str:
         root_capability_id = get_capability_config_root(dataset)
         canonical_scope, actual_dataset_version = _repair_scope_and_version(scope, dataset_version)
+        canonical_scope = _normalize_repair_scope_for_capability(root_capability_id, canonical_scope)
         if root_capability_id == "futures.quotes.back_adjusted_continuous.1m":
             canonical_scope = QuoteMuxCaptureJob._validate_back_adjusted_repair_scope(canonical_scope)
         payload = json.dumps(
@@ -2300,6 +2324,7 @@ class QuoteMuxCaptureJob:
         root_capability_id = get_capability_config_root(dataset)
         policy = self._get_policy(root_capability_id)
         canonical_scope, actual_dataset_version = _repair_scope_and_version(scope, dataset_version)
+        canonical_scope = _normalize_repair_scope_for_capability(root_capability_id, canonical_scope)
         if root_capability_id == "futures.quotes.back_adjusted_continuous.1m":
             canonical_scope = self._validate_back_adjusted_repair_scope(canonical_scope)
         fingerprint = self.repair_fingerprint(root_capability_id, canonical_scope, actual_dataset_version)
@@ -2575,9 +2600,24 @@ class QuoteMuxCaptureJob:
             return self._run_intraday_capture_batch(request)
         if request.capability_id == "stocks.quotes.daily":
             return self._run_daily_capture_batch(request)
-        items, report = self._run_runtime_request(request)
+        if request.capability_id == "stocks.quotes.daily_snapshot":
+            items, report = self._run_daily_snapshot_with_retry(request)
+        else:
+            items, report = self._run_runtime_request(request)
         normalized_items = tuple(self._normalize_runtime_items(items))
         return _CaptureBatchResult(normalized_items, int(getattr(report, "store_write_count", 0)))
+
+    def _run_daily_snapshot_with_retry(self, request: CaptureRequest):
+        attempts, delay_seconds = _daily_snapshot_retry_config()
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._run_runtime_request(request)
+            except Exception as exc:
+                if attempt >= attempts or not _is_retryable_daily_snapshot_error(exc):
+                    raise
+                if delay_seconds > 0:
+                    time_module.sleep(delay_seconds)
+        raise RuntimeError("股票日线快照重试未返回结果")
 
     def _run_daily_capture_batch(self, request: CaptureRequest) -> _CaptureBatchResult:
         result, _report = self._runtime.stocks.get_quotes_query_result_with_report(
@@ -2626,13 +2666,20 @@ class QuoteMuxCaptureJob:
             incomplete_code_set = set(incomplete_codes)
             complete_items = tuple(item for item in result.items if item.code not in incomplete_code_set)
         write_count = self._write_fact_ref_items(request.capability_id, complete_items)
-        trade_date = format_date_value(request.request_identity.get("start_date", request.request_identity.get("trade_date", "")))
+        trade_date = format_date_value(
+            request.request_identity.get(
+                "start_date",
+                request.request_identity.get("trade_date", request.request_identity.get("start_time", "")),
+            )
+        )
+        if len(trade_date) > 10:
+            trade_date = trade_date[:10]
         provider_results = report.to_dict()
         provider_success_count = sum(int(item.get("success_count", 0) or 0) for item in report.package_reports())
         system_failed = report.source_error_count > 0 and provider_success_count == 0 and sum(report.source_hit_counts.values()) == 0
         for summary in result.meta.codes:
             if summary.complete:
-                if write_count > 0 and trade_date != "":
+                if summary.actual_bar_count == summary.expected_bar_count == 240 and write_count > 0 and trade_date != "":
                     self._gaps.resolve(request.capability_id, summary.code, trade_date, summary.actual_bar_count)
                 continue
             if trade_date == "":
@@ -2895,6 +2942,22 @@ def _repair_scope_and_version(scope: dict[str, object], dataset_version: str) ->
     if explicit_version != "" and scope_version != "" and explicit_version != scope_version:
         raise ValueError("conflicting repair dataset_version values")
     return _canonical_repair_scope(raw_scope), explicit_version or scope_version
+
+
+def _normalize_repair_scope_for_capability(capability_id: str, scope: dict[str, object]) -> dict[str, object]:
+    """Keep explicit repairs aligned with the fact table they are meant to write."""
+    if capability_id != "stocks.quotes.intraday":
+        return scope
+    normalized = dict(scope)
+    freq = str(normalized.get("freq", "1m")).strip().lower()
+    if freq != "1m":
+        raise ValueError("stocks.quotes.intraday repair scope.freq must be 1m")
+    adjust = str(normalized.get("adjust", "none")).strip().lower()
+    if adjust != "none":
+        raise ValueError("stocks.quotes.intraday repair scope.adjust must be none")
+    normalized["freq"] = "1m"
+    normalized["adjust"] = "none"
+    return normalized
 
 
 def run_due_captures() -> tuple[dict[str, object], ...]:

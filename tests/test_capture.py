@@ -710,6 +710,37 @@ def test_daily_snapshot_runs_when_generic_cache_write_is_disabled(monkeypatch) -
     assert len(runtime.calls) == 1
 
 
+def test_daily_snapshot_retries_a_transient_coverage_failure(monkeypatch) -> None:
+    calls = 0
+
+    def run_runtime_request(_request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("股票日线快照不完整：trade_date=2026-04-27 expected=5569 actual=0")
+        return [object()], ContractReport(contract_name="stocks.quotes.daily_snapshot").with_store_stats(write=True)
+
+    job = _job(
+        _policy(
+            capability_id="stocks.quotes.daily_snapshot",
+            scope_profile=PROFILE_DAILY_SNAPSHOT_RECENT_TRADING_DAYS,
+        )
+    )
+    monkeypatch.setattr(job, "_run_runtime_request", run_runtime_request)
+    monkeypatch.setenv("QUOTEMUX_DAILY_SNAPSHOT_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("QUOTEMUX_DAILY_SNAPSHOT_RETRY_DELAY_SECONDS", "0")
+
+    result = job._run_capture_batch(
+        capture.CaptureRequest(
+            "stocks.quotes.daily_snapshot",
+            {"trade_date": "2026-04-27", "limit": 10000, "offset": 0},
+        )
+    )
+
+    assert result.store_write_count == 1
+    assert calls == 2
+
+
 def test_capture_runs_when_cache_read_is_disabled_but_write_enabled(monkeypatch) -> None:
     runtime = FakeRuntime()
     monkeypatch.setattr(capture, "build_capture_requests", lambda policy, now: (capture.CaptureRequest("stocks.quotes.daily", {"codes": ["600000"], "freq": "1d"}),))
@@ -1366,6 +1397,75 @@ def test_intraday_capture_saves_complete_codes_when_batch_is_incomplete(monkeypa
     assert [(str(item["code"]), str(item["trade_date"])) for item in gaps.incomplete] == [("600001", "2026-07-02")]
 
 
+def test_intraday_capture_does_not_resolve_non_240_complete_summary(monkeypatch) -> None:
+    class Runtime:
+        class stocks:
+            @staticmethod
+            def get_quotes_query_result_with_report(_request, write_fact_ref=False):
+                return StockQuotesQueryResult(
+                    items=[StockQuoteItem(code="600000", trade_time="2026-07-02 09:31:00", freq="1m")],
+                    meta=StockQuotesMeta(
+                        total_rows=1,
+                        returned_rows=1,
+                        complete=True,
+                        truncated=False,
+                        codes=[StockQuoteCodeSummary(code="600000", row_count=1, expected_bar_count=240, actual_bar_count=1, complete=True, truncated=False)],
+                    ),
+                ), ContractReport(contract_name="stocks.quotes.intraday").with_store_stats(write=True)
+
+    gaps = FakeCaptureGaps()
+    job = QuoteMuxCaptureJob(
+        runtime=Runtime(),
+        policies=MemoryCapturePolicies((_policy(capability_id="stocks.quotes.intraday"),)),
+        runs=MemoryCaptureRuns(),
+        locks=FakeLocks(),
+        now_provider=lambda: datetime(2026, 7, 2, 18, 30),
+        cache_store=FakeCacheStore(),
+        gaps=gaps,
+    )
+    monkeypatch.setattr(capture, "build_capture_requests", lambda policy, now: (capture.CaptureRequest("stocks.quotes.intraday", {"codes": ["600000"], "freq": "1m", "start_date": "2026-07-02"}),))
+    monkeypatch.setattr(QuoteMuxCaptureJob, "_write_fact_ref_items", lambda self, capability_id, items: len(items))
+
+    result = job.run_capture("stocks.quotes.intraday")
+
+    assert result["status"] == CAPTURE_SUCCESS
+    assert gaps.resolved == []
+
+
+def test_intraday_repair_uses_start_time_as_gap_trade_date(monkeypatch) -> None:
+    class Runtime:
+        class stocks:
+            @staticmethod
+            def get_quotes_query_result_with_report(_request, write_fact_ref=False):
+                return StockQuotesQueryResult(
+                    items=[],
+                    meta=StockQuotesMeta(
+                        total_rows=0,
+                        returned_rows=0,
+                        complete=False,
+                        truncated=False,
+                        codes=[StockQuoteCodeSummary(code="600000", row_count=0, expected_bar_count=240, actual_bar_count=0, complete=False, truncated=False)],
+                    ),
+                ), ContractReport(contract_name="stocks.quotes.intraday")
+
+    gaps = FakeCaptureGaps()
+    job = QuoteMuxCaptureJob(
+        runtime=Runtime(),
+        policies=MemoryCapturePolicies((_policy(capability_id="stocks.quotes.intraday"),)),
+        runs=MemoryCaptureRuns(),
+        locks=FakeLocks(),
+        now_provider=lambda: datetime(2026, 7, 2, 18, 30),
+        cache_store=FakeCacheStore(),
+        gaps=gaps,
+    )
+    monkeypatch.setattr(capture, "build_capture_requests", lambda policy, now: (capture.CaptureRequest("stocks.quotes.intraday", {"codes": ["600000"], "freq": "1m", "start_time": "2026-07-02 09:31:00", "end_time": "2026-07-02 15:00:00"}),))
+
+    result = job.run_capture("stocks.quotes.intraday")
+
+    assert result["status"] == CAPTURE_PARTIAL
+    assert gaps.incomplete[0]["trade_date"] == "2026-07-02"
+
+
 def test_intraday_gap_retry_requests_only_persisted_gaps() -> None:
     policy = _policy(capability_id="stocks.quotes.intraday", batch_size=2)
     gaps = (
@@ -1376,8 +1476,8 @@ def test_intraday_gap_retry_requests_only_persisted_gaps() -> None:
 
     requests = capture._intraday_gap_requests(policy, gaps)
 
-    assert [request.request_identity["codes"] for request in requests] == [["600000", "000001"], ["000002"]]
-    assert [request.request_identity["start_date"] for request in requests] == ["2026-07-20", "2026-07-21"]
+    assert [request.request_identity["codes"] for request in requests] == [["000002"], ["600000", "000001"]]
+    assert [request.request_identity["start_date"] for request in requests] == ["2026-07-21", "2026-07-20"]
 
 
 def test_intraday_capture_requests_only_missing_traded_codes(monkeypatch) -> None:

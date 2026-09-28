@@ -124,7 +124,19 @@ def test_admin_repair_uses_canonical_scope_fingerprint_and_existing_capture_exec
     request = captured["requests"][0]
     assert request.capability_id == "stocks.quotes.intraday"
     assert request.request_identity["codes"] == ["000001", "600000"]
+    assert request.request_identity["freq"] == "1m"
+    assert request.request_identity["adjust"] == "none"
     assert "dataset_version" not in request.request_identity
+
+
+def test_intraday_repair_rejects_non_minute_frequency() -> None:
+    job = QuoteMuxCaptureJob(runtime=object(), policies=_Policies(_policy()), runs=_Runs(), locks=_Locks(), cache_store=_Cache())
+
+    with pytest.raises(ValueError, match="freq must be 1m"):
+        job.run_repair(
+            "stocks.quotes.intraday",
+            {"codes": ["600000"], "freq": "1d", "start_date": "2026-08-21", "end_date": "2026-08-21"},
+        )
 
 
 def test_repair_runs_locked_precondition_before_reuse_or_capture_and_releases_on_failure(monkeypatch) -> None:

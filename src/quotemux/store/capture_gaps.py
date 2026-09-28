@@ -295,11 +295,14 @@ class CaptureGapRepository:
                 actual_count = excluded.actual_count,
                 missing_count = excluded.missing_count,
                 status = case
-                    when market_data_capture_gaps.status = %s then %s
-                    else market_data_capture_gaps.status
+                    when excluded.actual_count = excluded.expected_count then %s
+                    else %s
                 end,
                 last_seen_at = now(),
-                resolved_at = null
+                resolved_at = case
+                    when excluded.actual_count = excluded.expected_count then market_data_capture_gaps.resolved_at
+                    else null
+                end
             """,
             (GAP_PENDING, INTRADAY_CAPABILITY_ID, list(selected_dates), GAP_RESOLVED, GAP_PENDING),
         ):

@@ -845,6 +845,11 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         market = _exchange_to_ref(item.exchange or item.market or _stock_market(code))
         listing_board = item.listing_board or item.market or _stock_catalog_listing_board(code, market)
         params.append((market, code, item.name, item.industry, listing_board, format_date_value(item.list_date), _stock_status_to_delisted_date(item), item.area))
+    board_type_repair_params = [
+        (str(item[0]), str(item[1]), str(item[4]))
+        for item in params
+        if str(item[4]).strip() != ""
+    ]
     board_type_column_sql = ", board_type" if has_board_type else ""
     board_type_value_sql = ", %s" if has_board_type else ""
     update_board_type_sql = ",\n            board_type = excluded.board_type" if has_board_type else ""
@@ -864,7 +869,7 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
     )
     if has_board_type:
         params = [(*item, item[4]) for item in params]
-    return execute_many(
+    if not execute_many(
         f"""
         insert into ref.stock (market, code, name, industry, listing_board, listed_date, delisted_date, area{board_type_column_sql}{authority_column_sql})
         values (%s, %s, %s, %s, %s, nullif(%s, '')::date, nullif(%s, '')::date, %s{board_type_value_sql}{authority_value_sql})
@@ -879,7 +884,26 @@ def _upsert_stock_catalog(items: Sequence[StockBasicInfo]) -> bool:
         {provisional_only_sql}
         """,
         params,
-    )
+    ):
+        return False
+    if has_board_type and has_authority_lifecycle and board_type_repair_params:
+        # The catalog contract exposes listing_board as the canonical board
+        # value. Keep the denormalized board_type aligned even for rows that
+        # are already authoritative; this changes only the duplicate field.
+        return execute_many(
+            """
+            update ref.stock as stock_ref
+            set board_type = incoming.board_type,
+                updated_at = now()
+            from (values (%s, %s, %s)) as incoming(market, code, board_type)
+            where stock_ref.market = incoming.market
+              and stock_ref.code = incoming.code
+              and coalesce(stock_ref.board_type, '') <> incoming.board_type
+              and incoming.board_type <> ''
+            """,
+            board_type_repair_params,
+        )
+    return True
 
 
 def _stock_catalog_listing_board(code: str, market: str) -> str:

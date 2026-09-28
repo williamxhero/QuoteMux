@@ -1272,6 +1272,45 @@ def test_stock_catalog_writer_classifies_blank_b_share_and_bjse_boards(monkeypat
     ]
 
 
+def test_stock_catalog_writer_repairs_empty_authoritative_board_type(monkeypatch) -> None:
+    from quotemux import fact_ref_writes
+
+    calls: list[tuple[str, list[tuple[object, ...]]]] = []
+
+    def fake_execute_many(query: str, params: list[tuple[object, ...]]) -> bool:
+        calls.append((query, params))
+        return True
+
+    monkeypatch.setattr(
+        fact_ref_writes,
+        "_existing_columns",
+        lambda table_schema, table_name: {"board_type", "identity_status", "identity_source"}
+        if table_schema == "ref" and table_name == "stock"
+        else set(),
+    )
+    monkeypatch.setattr(fact_ref_writes, "execute_many", fake_execute_many)
+
+    assert fact_ref_writes._upsert_stock_catalog(
+        [
+            StockBasicInfo(
+                code="920025",
+                name="凯达重工",
+                exchange="BJSE",
+                market="beijing",
+                list_status="listed",
+                list_date="2026-09-23",
+                delist_date="",
+                industry="",
+                area="",
+            )
+        ]
+    )
+
+    assert len(calls) == 2
+    assert "coalesce(stock_ref.board_type, '') <> incoming.board_type" in calls[1][0]
+    assert calls[1][1] == [("BJSE", "920025", "beijing")]
+
+
 def test_local_index_quotes_preserve_daily_pre_close(monkeypatch) -> None:
     monkeypatch.setattr(
         "quotemux.local_store.load_index_daily_frame",
