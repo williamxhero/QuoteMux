@@ -8,3 +8,7 @@ __pycache__
 /docs
 CHANGELOG.md
 /verification_tests
+/tests
+/tools
+/runtime
+/artifacts
