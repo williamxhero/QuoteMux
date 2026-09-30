@@ -2068,8 +2068,6 @@ def is_capture_due(policy: CapturePolicy, runs: CaptureRunRepository, now: datet
 
 
 CAPTURE_DUE_PRIORITY: dict[str, int] = {
-    "futures.quotes.main_continuous.1m": 0,
-    "stocks.quotes.intraday": 0,
     "stocks.quotes.daily_snapshot": 1,
     "stocks.quotes.daily": 2,
     "boards.quotes.daily": 3,
@@ -2078,6 +2076,8 @@ CAPTURE_DUE_PRIORITY: dict[str, int] = {
     "concepts.quotes.daily": 5,
     "indexes.quotes.daily": 6,
     "markets.calendar.trading": 7,
+    "futures.quotes.main_continuous.1m": 1000,
+    "stocks.quotes.intraday": 1001,
 }
 
 
