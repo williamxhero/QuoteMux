@@ -928,15 +928,17 @@ def reconcile_stock_authority_input(
                 insert into ref.stock (
                     market, code, name, industry, listing_board, listed_date,
                     delisted_date, area, identity_status, identity_source,
-                    authority_provider, authority_input_id, authority_verified_at
+                    authority_provider, authority_input_id, authority_verified_at,
+                    board_type
                 )
                 values (%s, %s, %s, %s, %s, nullif(%s, '')::date,
                         nullif(%s, '')::date, %s, 'authoritative', 'tushare_catalog',
-                        'tushare', %s, %s)
+                        'tushare', %s, %s, %s)
                 on conflict (market, code) do update set
                     name = excluded.name,
                     industry = excluded.industry,
                     listing_board = excluded.listing_board,
+                    board_type = excluded.board_type,
                     listed_date = excluded.listed_date,
                     delisted_date = excluded.delisted_date,
                     area = excluded.area,
@@ -959,6 +961,7 @@ def reconcile_stock_authority_input(
                         item.area,
                         authority_input.input_id,
                         authority_input.source_refreshed_at_utc,
+                        item.listing_board,
                     )
                     for item in authority_input.items
                 ],
