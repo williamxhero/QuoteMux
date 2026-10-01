@@ -997,10 +997,18 @@ def _intraday_missing_stock_codes(trade_date: str) -> tuple[str, ...]:
     frame = query_dataframe(
         """
         with expected_codes as (
-            select distinct code
-            from fact.stock_daily_1d
-            where trade_date = %s
-              and not coalesce(is_suspended, false)
+            select distinct daily.code
+            from fact.stock_daily_1d daily
+            where daily.trade_date = %s
+              and not coalesce(daily.is_suspended, false)
+              and not exists (
+                  select 1 from fact.stock_suspension_history suspension
+                  where suspension.market = daily.market
+                    and suspension.code = daily.code
+                    and suspension.status = 'suspended'
+                    and daily.volume = 0 and daily.amount = 0
+                    and daily.trade_date between suspension.suspend_start_date and suspension.suspend_end_date
+              )
         ), standard_coverage as (
             select code, count(*) as bar_count
             from fact.stock_bar_1m
@@ -1035,6 +1043,13 @@ def _intraday_missing_universe_dates(trading_days: Sequence[str]) -> tuple[str, 
         left join fact.stock_daily_1d daily
           on daily.trade_date = requested.trade_date
          and not coalesce(daily.is_suspended, false)
+         and not exists (
+             select 1 from fact.stock_suspension_history suspension
+             where suspension.market = daily.market and suspension.code = daily.code
+               and suspension.status = 'suspended'
+               and daily.volume = 0 and daily.amount = 0
+               and daily.trade_date between suspension.suspend_start_date and suspension.suspend_end_date
+         )
         group by requested.trade_date
         having count(daily.code) = 0
         order by requested.trade_date

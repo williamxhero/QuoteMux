@@ -14,6 +14,7 @@ GAP_RETRYING = "retrying"
 GAP_PROVIDER_EMPTY = "provider_empty"
 GAP_SYSTEM_FAILED = "system_failed"
 GAP_RESOLVED = "resolved"
+GAP_INELIGIBLE_SUSPENDED = "ineligible_suspended"
 
 INTRADAY_CAPABILITY_ID = "stocks.quotes.intraday"
 
@@ -203,10 +204,10 @@ class CaptureGapRepository:
             from market_data_capture_gaps gaps
             join selected_dates dates on dates.trade_date = gaps.trade_date
             where gaps.capability_id = %s
-              and gaps.status <> %s
+              and gaps.status not in (%s, %s)
             order by gaps.trade_date desc, gaps.missing_count desc, gaps.code
             """,
-            (max(1, window_count), capability_id, GAP_RESOLVED),
+            (max(1, window_count), capability_id, GAP_RESOLVED, GAP_INELIGIBLE_SUSPENDED),
         )
         if frame.empty:
             return ()
@@ -234,7 +235,7 @@ class CaptureGapRepository:
             from market_data_capture_gaps gaps
             join selected_dates dates on dates.trade_date = gaps.trade_date
             where gaps.capability_id = %s
-              and gaps.status <> %s
+              and gaps.status not in (%s, %s)
               and (
                     gaps.status = %s
                  or gaps.last_attempt_at is null
@@ -260,6 +261,7 @@ class CaptureGapRepository:
                 max(1, window_count),
                 capability_id,
                 GAP_RESOLVED,
+                GAP_INELIGIBLE_SUSPENDED,
                 GAP_PENDING,
                 GAP_SYSTEM_FAILED,
                 GAP_PROVIDER_EMPTY,
@@ -289,6 +291,19 @@ class CaptureGapRepository:
             where coverage.capability_id = %s
               and coverage.trade_date = any(%s::date[])
               and coverage.actual_count <> coverage.expected_count
+              and exists (
+                  select 1 from fact.stock_daily_1d daily
+                  where daily.market = coverage.market and daily.code = coverage.code
+                    and daily.trade_date = coverage.trade_date
+                    and not coalesce(daily.is_suspended, false)
+                    and not exists (
+                        select 1 from fact.stock_suspension_history suspension
+                        where suspension.market = daily.market and suspension.code = daily.code
+                          and suspension.status = 'suspended'
+                          and daily.volume = 0 and daily.amount = 0
+                          and daily.trade_date between suspension.suspend_start_date and suspension.suspend_end_date
+                    )
+              )
             on conflict (capability_id, code, trade_date) do update
             set market = excluded.market,
                 expected_count = excluded.expected_count,
@@ -310,6 +325,28 @@ class CaptureGapRepository:
         if not execute_sql(
             """
             update market_data_capture_gaps gaps
+            set status = %s, last_seen_at = now(), resolved_at = null,
+                last_error = 'source-confirmed full-day suspension; 1m bars not expected'
+            from fact.stock_daily_1d daily
+            where gaps.capability_id = %s
+              and gaps.trade_date = any(%s::date[])
+              and daily.code = gaps.code and daily.trade_date = gaps.trade_date
+              and exists (
+                  select 1 from fact.stock_suspension_history suspension
+                  where suspension.market = daily.market and suspension.code = daily.code
+                    and suspension.status = 'suspended'
+                    and daily.volume = 0 and daily.amount = 0
+                    and daily.trade_date between suspension.suspend_start_date and suspension.suspend_end_date
+              )
+              and gaps.status not in (%s, %s)
+            """,
+            (GAP_INELIGIBLE_SUSPENDED, INTRADAY_CAPABILITY_ID, list(selected_dates),
+             GAP_RESOLVED, GAP_INELIGIBLE_SUSPENDED),
+        ):
+            raise RuntimeError("股票 1m 停牌缺口资格更新失败")
+        if not execute_sql(
+            """
+            update market_data_capture_gaps gaps
             set status = %s,
                 actual_count = coverage.actual_count,
                 missing_count = 0,
@@ -323,9 +360,10 @@ class CaptureGapRepository:
               and coverage.trade_date = gaps.trade_date
               and coverage.trade_date = any(%s::date[])
               and coverage.actual_count = coverage.expected_count
-              and gaps.status <> %s
+              and gaps.status not in (%s, %s)
             """,
-            (GAP_RESOLVED, INTRADAY_CAPABILITY_ID, list(selected_dates), GAP_RESOLVED),
+            (GAP_RESOLVED, INTRADAY_CAPABILITY_ID, list(selected_dates),
+             GAP_RESOLVED, GAP_INELIGIBLE_SUSPENDED),
         ):
             raise RuntimeError("股票 1m 历史缺口解决状态更新失败")
         unresolved = self.list_unresolved(INTRADAY_CAPABILITY_ID, actual_window_count)
@@ -398,6 +436,13 @@ class CaptureGapRepository:
                 from fact.stock_daily_1d daily
                 where daily.trade_date = %s::date
                   and not coalesce(daily.is_suspended, false)
+                  and not exists (
+                      select 1 from fact.stock_suspension_history suspension
+                      where suspension.market = daily.market and suspension.code = daily.code
+                        and suspension.status = 'suspended'
+                        and daily.volume = 0 and daily.amount = 0
+                        and daily.trade_date between suspension.suspend_start_date and suspension.suspend_end_date
+                  )
             ), actual as (
                 select bars.code, count(*)::integer as bar_count
                 from fact.stock_bar_1m bars
@@ -437,8 +482,19 @@ class CaptureGapRepository:
             select %s, %s::date, count(*),
                    count(*) filter (where actual_count = expected_count),
                    count(*) filter (where actual_count <> expected_count), now()
-            from market_data_intraday_coverage_daily
-            where capability_id = %s and trade_date = %s::date
+            from market_data_intraday_coverage_daily coverage
+            join fact.stock_daily_1d daily
+              on daily.market = coverage.market and daily.code = coverage.code
+             and daily.trade_date = coverage.trade_date
+            where coverage.capability_id = %s and coverage.trade_date = %s::date
+              and not coalesce(daily.is_suspended, false)
+              and not exists (
+                  select 1 from fact.stock_suspension_history suspension
+                  where suspension.market = daily.market and suspension.code = daily.code
+                    and suspension.status = 'suspended'
+                    and daily.volume = 0 and daily.amount = 0
+                    and daily.trade_date between suspension.suspend_start_date and suspension.suspend_end_date
+              )
             on conflict (capability_id, trade_date) do update
             set expected_count = excluded.expected_count,
                 complete_count = excluded.complete_count,
