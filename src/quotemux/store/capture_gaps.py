@@ -418,10 +418,12 @@ class CaptureGapRepository:
             (list(selected_dates), INTRADAY_CAPABILITY_ID),
         )
         rows = [] if frame.empty else frame.to_dict("records")
-        unaudited = [format_date_value(row["trade_date"]) for row in rows if _is_missing_value(row.get("audited_at"))]
-        if unaudited != []:
-            return tuple(unaudited[:5])
         latest_date = selected_dates[0]
+        unaudited = [format_date_value(row["trade_date"]) for row in rows
+                     if _is_missing_value(row.get("audited_at"))
+                     and format_date_value(row["trade_date"]) != latest_date]
+        if unaudited != []:
+            return (latest_date, *unaudited[:4])
         historical = [row for row in rows if format_date_value(row["trade_date"]) != latest_date]
         oldest = min(historical, key=lambda row: str(row.get("audited_at", "")), default=None)
         if oldest is None:
