@@ -18,7 +18,8 @@ LIMIT_ORDER_AMOUNT_CAPABILITY_MAX_SECONDS = 180.0
 LIMIT_ORDER_AMOUNT_PROVIDER = "crawler_provider"
 LIMIT_ORDER_AMOUNT_PROVIDER_TIMEOUT_SECONDS = 20.0
 STOCK_INTRADAY_CAPABILITY = "stocks.quotes.intraday"
-STOCK_INTRADAY_MIN_TIMEOUT_SECONDS = 30.0
+STOCK_INTRADAY_MIN_TIMEOUT_SECONDS = 120.0
+STOCK_INTRADAY_MAX_TIMEOUT_SECONDS = 180.0
 
 TIMEOUT_STATUS_SUCCESS = "success"
 TIMEOUT_STATUS_EMPTY = "empty"
@@ -94,7 +95,7 @@ def default_capability_timeout_policy(capability_id: str) -> CapabilityTimeoutPo
         capability_id=capability_id,
         default_timeout_seconds=CAPABILITY_TIMEOUT_DEFAULT_SECONDS,
         min_timeout_seconds=(STOCK_INTRADAY_MIN_TIMEOUT_SECONDS if capability_id == STOCK_INTRADAY_CAPABILITY else TIMEOUT_MIN_SECONDS),
-        max_timeout_seconds=TIMEOUT_MAX_SECONDS,
+        max_timeout_seconds=(STOCK_INTRADAY_MAX_TIMEOUT_SECONDS if capability_id == STOCK_INTRADAY_CAPABILITY else TIMEOUT_MAX_SECONDS),
         sample_window_size=TIMEOUT_SAMPLE_WINDOW_SIZE,
         min_sample_count=TIMEOUT_MIN_SAMPLE_COUNT,
     )
