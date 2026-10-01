@@ -173,6 +173,36 @@ class QuoteMuxConfigRuntime:
         self._store.write_state(RuntimeState(active_profile_id=profile.profile_id, previous_profile_ids=tuple(previous_ids[-20:])))
         return profile
 
+    def publish_active_policy_override(self, policy: ContractPolicyOverride, display_name: str, note: str) -> RuntimeProfile:
+        """Publish one validated policy change without promoting unrelated draft edits."""
+        self.ensure_initialized()
+        active = self.get_active_profile()
+        policies = {item.contract_name: item for item in active.contract_policy_overrides}
+        if policy.contract_name not in policies:
+            raise KeyError(f"未知 active contract policy: {policy.contract_name}")
+        if policies[policy.contract_name] == policy:
+            return active
+        policies[policy.contract_name] = policy
+        profiles = list(self._store.read_profiles())
+        state = self._store.read_state()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        profile = replace(
+            active,
+            profile_id=f"profile-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+            display_name=display_name,
+            version=f"v{len(profiles) + 1}",
+            created_at=timestamp,
+            published_at=timestamp,
+            note=note,
+            contract_policy_overrides=tuple(sorted(policies.values(), key=lambda item: item.contract_name)),
+        )
+        validate_profile(profile, build_source_package_registry(self._store.read_import_roots()))
+        self._store.write_profiles(tuple((*profiles, profile)))
+        previous_ids = (*state.previous_profile_ids, active.profile_id)
+        self._store.write_state(RuntimeState(active_profile_id=profile.profile_id, previous_profile_ids=previous_ids[-20:]))
+        self._store.append_profile_transition("publish_active_policy_override", active.profile_id, profile.profile_id)
+        return profile
+
     def rollback_profile(self, profile_id: str) -> RuntimeProfile:
         self.ensure_initialized()
         profiles = {item.profile_id: item for item in self._store.read_profiles()}
