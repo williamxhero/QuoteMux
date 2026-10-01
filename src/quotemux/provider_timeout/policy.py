@@ -20,6 +20,7 @@ LIMIT_ORDER_AMOUNT_PROVIDER_TIMEOUT_SECONDS = 20.0
 STOCK_INTRADAY_CAPABILITY = "stocks.quotes.intraday"
 STOCK_INTRADAY_MIN_TIMEOUT_SECONDS = 120.0
 STOCK_INTRADAY_MAX_TIMEOUT_SECONDS = 180.0
+STOCK_INTRADAY_OPENTDX_MIN_TIMEOUT_SECONDS = 30.0
 
 TIMEOUT_STATUS_SUCCESS = "success"
 TIMEOUT_STATUS_EMPTY = "empty"
@@ -116,7 +117,7 @@ def default_provider_timeout_policy(capability_id: str, provider: str) -> Provid
         capability_id=capability_id,
         provider=provider,
         default_timeout_seconds=PROVIDER_TIMEOUT_DEFAULT_SECONDS,
-        min_timeout_seconds=TIMEOUT_MIN_SECONDS,
+        min_timeout_seconds=(STOCK_INTRADAY_OPENTDX_MIN_TIMEOUT_SECONDS if capability_id == STOCK_INTRADAY_CAPABILITY and provider == "opentdx" else TIMEOUT_MIN_SECONDS),
         max_timeout_seconds=TIMEOUT_MAX_SECONDS,
         sample_window_size=TIMEOUT_SAMPLE_WINDOW_SIZE,
         min_sample_count=TIMEOUT_MIN_SAMPLE_COUNT,
