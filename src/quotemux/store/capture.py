@@ -45,6 +45,9 @@ DAILY_SNAPSHOT_RETRY_ATTEMPTS_ENV = "QUOTEMUX_DAILY_SNAPSHOT_RETRY_ATTEMPTS"
 DAILY_SNAPSHOT_RETRY_DELAY_SECONDS_ENV = "QUOTEMUX_DAILY_SNAPSHOT_RETRY_DELAY_SECONDS"
 DEFAULT_DAILY_SNAPSHOT_RETRY_ATTEMPTS = 2
 DEFAULT_DAILY_SNAPSHOT_RETRY_DELAY_SECONDS = 5.0
+# A minute batch is bounded by the 180-second capability deadline.  Fifty
+# batches finish within the six-hour Task Center limit even at that ceiling.
+MAX_INTRADAY_CAPTURE_REQUESTS_PER_RUN = 50
 
 CADENCE_DAILY = "daily"
 CADENCE_WEEKLY = "weekly"
@@ -2480,8 +2483,16 @@ class QuoteMuxCaptureJob:
         planned_time: datetime,
         requests: Sequence[CaptureRequest],
     ) -> tuple[tuple[CaptureRequest, ...], dict[str, int]]:
-        """Bound expensive concept-member refreshes and resume from their durable run checkpoint."""
+        """Bound long captures; minute gaps are rebuilt from facts on each retry."""
         all_requests = tuple(requests)
+        if policy.capability_id == "stocks.quotes.intraday":
+            selected = all_requests[:MAX_INTRADAY_CAPTURE_REQUESTS_PER_RUN]
+            return selected, {
+                "request_total": len(all_requests),
+                "request_start_index": 0,
+                "request_next_index": len(selected),
+                "request_limit": MAX_INTRADAY_CAPTURE_REQUESTS_PER_RUN,
+            }
         if policy.capability_id != "concepts.members":
             return all_requests, {"request_total": len(all_requests), "request_start_index": 0, "request_next_index": len(all_requests)}
         previous = self._runs.latest_for_planned_time(policy.capability_id, planned_time)
