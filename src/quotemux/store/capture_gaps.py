@@ -430,12 +430,16 @@ class CaptureGapRepository:
                      if _is_missing_value(row.get("audited_at"))
                      and format_date_value(row["trade_date"]) != latest_date]
         historical = [row for row in rows if format_date_value(row["trade_date"]) != latest_date]
-        newest_unresolved = next((row for row in historical if row.get("has_unresolved")), None)
+        due_unresolved = min(
+            (row for row in historical if row.get("has_unresolved")),
+            key=lambda row: str(row.get("audited_at", "")),
+            default=None,
+        )
         oldest = min(historical, key=lambda row: str(row.get("audited_at", "")), default=None)
         dates = [latest_date]
-        if newest_unresolved is not None:
-            dates.append(format_date_value(newest_unresolved["trade_date"]))
-        dates.extend(unaudited[:3 if newest_unresolved is not None else 4])
+        if due_unresolved is not None:
+            dates.append(format_date_value(due_unresolved["trade_date"]))
+        dates.extend(unaudited[:3 if due_unresolved is not None else 4])
         if oldest is not None and not unaudited:
             dates.append(format_date_value(oldest["trade_date"]))
         return tuple(dict.fromkeys(dates))
