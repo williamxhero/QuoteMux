@@ -408,27 +408,37 @@ class CaptureGapRepository:
             return ()
         frame = query_dataframe(
             """
-            select requested.trade_date, audits.audited_at
+            select requested.trade_date, audits.audited_at,
+                   exists (
+                       select 1 from market_data_capture_gaps gaps
+                       where gaps.capability_id = %s
+                         and gaps.trade_date = requested.trade_date
+                         and gaps.status not in (%s, %s)
+                   ) as has_unresolved
             from unnest(%s::date[]) with ordinality requested(trade_date, position)
             left join market_data_capture_gap_audits audits
               on audits.capability_id = %s
              and audits.trade_date = requested.trade_date
             order by requested.position
             """,
-            (list(selected_dates), INTRADAY_CAPABILITY_ID),
+            (INTRADAY_CAPABILITY_ID, GAP_RESOLVED, GAP_INELIGIBLE_SUSPENDED,
+             list(selected_dates), INTRADAY_CAPABILITY_ID),
         )
         rows = [] if frame.empty else frame.to_dict("records")
         latest_date = selected_dates[0]
         unaudited = [format_date_value(row["trade_date"]) for row in rows
                      if _is_missing_value(row.get("audited_at"))
                      and format_date_value(row["trade_date"]) != latest_date]
-        if unaudited != []:
-            return (latest_date, *unaudited[:4])
         historical = [row for row in rows if format_date_value(row["trade_date"]) != latest_date]
+        newest_unresolved = next((row for row in historical if row.get("has_unresolved")), None)
         oldest = min(historical, key=lambda row: str(row.get("audited_at", "")), default=None)
-        if oldest is None:
-            return (latest_date,)
-        return (latest_date, format_date_value(oldest["trade_date"]))
+        dates = [latest_date]
+        if newest_unresolved is not None:
+            dates.append(format_date_value(newest_unresolved["trade_date"]))
+        dates.extend(unaudited[:3 if newest_unresolved is not None else 4])
+        if oldest is not None and not unaudited:
+            dates.append(format_date_value(oldest["trade_date"]))
+        return tuple(dict.fromkeys(dates))
 
     def _audit_intraday_date(self, trade_date: str) -> None:
         if not execute_sql(
