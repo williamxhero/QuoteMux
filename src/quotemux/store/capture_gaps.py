@@ -319,7 +319,7 @@ class CaptureGapRepository:
                     else null
                 end
             """,
-            (GAP_PENDING, INTRADAY_CAPABILITY_ID, list(selected_dates), GAP_RESOLVED, GAP_PENDING),
+            (GAP_PENDING, INTRADAY_CAPABILITY_ID, list(dates_to_scan), GAP_RESOLVED, GAP_PENDING),
         ):
             raise RuntimeError("股票 1m 历史缺口审计写入失败")
         if not execute_sql(
@@ -362,7 +362,7 @@ class CaptureGapRepository:
               and coverage.actual_count = coverage.expected_count
               and gaps.status not in (%s, %s)
             """,
-            (GAP_RESOLVED, INTRADAY_CAPABILITY_ID, list(selected_dates),
+            (GAP_RESOLVED, INTRADAY_CAPABILITY_ID, list(dates_to_scan),
              GAP_RESOLVED, GAP_INELIGIBLE_SUSPENDED),
         ):
             raise RuntimeError("股票 1m 历史缺口解决状态更新失败")
