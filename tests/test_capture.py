@@ -8,6 +8,7 @@ import pytest
 
 from quotemux.reports import ContractReport
 from quotemux.models import ConceptAliasGroupItem
+from quotemux.infra.db import reference_reads
 from platform_models import ConceptQuoteItem, FutureContractCatalogItem, StockQuoteCodeSummary, StockQuoteItem, StockQuotesMeta, StockQuotesQueryResult
 from quotemux.store import capture
 from quotemux.capabilities import is_independently_configurable_capability_id, list_capability_ids
@@ -1597,6 +1598,30 @@ def test_catalog_capture_requests_authoritative_full_refresh() -> None:
         "offset": 0,
         "refresh": True,
     }
+
+
+def test_daily_snapshot_eligibility_excludes_delisting_effective_date(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_query_dataframe(query: str, params: object = None):
+        captured["query"] = " ".join(query.split())
+        captured["params"] = params
+        return type("Frame", (), {"empty": True})()
+
+    monkeypatch.setattr(reference_reads, "query_dataframe", fake_query_dataframe)
+
+    capture._active_stock_codes("2026-10-19")
+
+    query = str(captured["query"])
+    assert "s.delisted_date is null or s.delisted_date > %s" in query
+    assert "s.delisted_date is null or s.delisted_date >= %s" not in query
+    assert captured["params"] == (
+        "2026-10-19",
+        "2026-10-19",
+        "2026-10-19",
+        "2026-10-19",
+        "2026-10-19",
+    )
 
 
 def test_auction_capture_uses_one_market_wide_request_per_missing_range(monkeypatch) -> None:

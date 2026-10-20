@@ -110,7 +110,7 @@ def load_stock_active_codes_frame(trade_date: str) -> pd.DataFrame:
          and d.trade_date = %s
         where s.code <> '000000'
           and s.listed_date <= %s
-          and (s.delisted_date is null or s.delisted_date >= %s)
+          and (s.delisted_date is null or s.delisted_date > %s)
           and s.identity_status = 'authoritative'
           -- B-share history is not covered by the configured stock-daily
           -- providers with the required amount/pre-close contract.
