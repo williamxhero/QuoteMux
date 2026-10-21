@@ -8,10 +8,10 @@ from pathlib import Path
 from quotemux.config_runtime.models import ContractPolicyOverride, RuntimeProfile, RuntimeSnapshot, SourceInstanceConfig, build_runtime_snapshot
 from quotemux.package_install import PackageInstallResult, install_all_packages
 from quotemux.config_runtime.store import RuntimeConfigStore, RuntimeState, _runtime_root
-from quotemux.config_runtime.validation import ConfigValidationError, validate_instance, validate_profile
+from quotemux.config_runtime.validation import ConfigValidationError, ValidationIssue, validate_active_policy_source_instance, validate_instance, validate_profile
 from quotemux.contracts.policies import list_default_contract_policies
 from quotemux.source_packages.installer import install_source_package_directory
-from quotemux.source_packages.registry import build_source_package_registry, clear_loaded_source_package_modules, refresh_default_source_package_registry
+from quotemux.source_packages.registry import SourcePackageRegistry, build_source_package_registry, clear_loaded_source_package_modules, refresh_default_source_package_registry
 
 
 class QuoteMuxConfigRuntime:
@@ -174,13 +174,21 @@ class QuoteMuxConfigRuntime:
         return profile
 
     def publish_active_policy_override(self, policy: ContractPolicyOverride, display_name: str, note: str) -> RuntimeProfile:
-        """Publish one validated policy change without promoting unrelated draft edits."""
+        """Publish one validated policy change plus only the new source instances it requests.
+
+        Draft source instances that the policy's ``source_order`` references but the active
+        profile does not contain are validated (declared capability/handler, enabled, known
+        package) and copied into the new profile version. Other draft instances and policies
+        are left untouched, and existing active instances (including secrets) are preserved.
+        """
         self.ensure_initialized()
         active = self.get_active_profile()
         policies = {item.contract_name: item for item in active.contract_policy_overrides}
         if policy.contract_name not in policies:
             raise KeyError(f"未知 active contract policy: {policy.contract_name}")
-        if policies[policy.contract_name] == policy:
+        registry = build_source_package_registry(self._store.read_import_roots())
+        added_instances = self._requested_draft_instances(policy, active, registry)
+        if policies[policy.contract_name] == policy and added_instances == ():
             return active
         policies[policy.contract_name] = policy
         profiles = list(self._store.read_profiles())
@@ -194,14 +202,37 @@ class QuoteMuxConfigRuntime:
             created_at=timestamp,
             published_at=timestamp,
             note=note,
+            source_instances=(*active.source_instances, *added_instances),
             contract_policy_overrides=tuple(sorted(policies.values(), key=lambda item: item.contract_name)),
         )
-        validate_profile(profile, build_source_package_registry(self._store.read_import_roots()))
+        validate_profile(profile, registry)
         self._store.write_profiles(tuple((*profiles, profile)))
         previous_ids = (*state.previous_profile_ids, active.profile_id)
         self._store.write_state(RuntimeState(active_profile_id=profile.profile_id, previous_profile_ids=previous_ids[-20:]))
         self._store.append_profile_transition("publish_active_policy_override", active.profile_id, profile.profile_id)
         return profile
+
+    def _requested_draft_instances(
+        self,
+        policy: ContractPolicyOverride,
+        active: RuntimeProfile,
+        registry: SourcePackageRegistry,
+    ) -> tuple[SourceInstanceConfig, ...]:
+        active_ids = {item.instance_id for item in active.source_instances}
+        draft_by_id = {item.instance_id: item for item in self._store.read_instances()}
+        requested_ids = tuple(dict.fromkeys(policy.source_order))
+        unknown_ids = tuple(source_id for source_id in requested_ids if source_id not in active_ids and source_id not in draft_by_id)
+        if unknown_ids != ():
+            raise ConfigValidationError(tuple(ValidationIssue("source_order", f"未知 source instance: {source_id}") for source_id in unknown_ids))
+        added: list[SourceInstanceConfig] = []
+        for source_id in requested_ids:
+            if source_id in active_ids:
+                continue
+            instance = draft_by_id[source_id]
+            validate_instance(instance, registry, (*active.source_instances, *added))
+            validate_active_policy_source_instance(instance, policy.contract_name, registry)
+            added.append(instance)
+        return tuple(added)
 
     def rollback_profile(self, profile_id: str) -> RuntimeProfile:
         self.ensure_initialized()

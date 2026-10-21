@@ -80,6 +80,26 @@ def validate_instance(instance: SourceInstanceConfig, registry: SourcePackageReg
     _raise_if_needed(issues)
 
 
+def validate_active_policy_source_instance(instance: SourceInstanceConfig, contract_name: str, registry: SourcePackageRegistry) -> None:
+    issues: list[ValidationIssue] = []
+    if not instance.enabled:
+        issues.append(ValidationIssue("source_order", f"source instance 已禁用: {instance.instance_id}"))
+    try:
+        manifest = registry.get_manifest(instance.package_id)
+    except KeyError:
+        issues.append(ValidationIssue("source_order", f"{instance.instance_id} 绑定未知 package: {instance.package_id}"))
+        _raise_if_needed(issues)
+        return
+    if not manifest.supports_capability(contract_name):
+        issues.append(ValidationIssue("source_order", f"{instance.instance_id} 未声明 capability: {contract_name}"))
+        _raise_if_needed(issues)
+        return
+    handler_name = manifest.get_handler_name_for_capability(contract_name)
+    if handler_name == "" or handler_name not in manifest.list_handler_names():
+        issues.append(ValidationIssue("source_order", f"{instance.instance_id} capability {contract_name} 未声明 handler: {handler_name}"))
+    _raise_if_needed(issues)
+
+
 def validate_profile(profile: RuntimeProfile, registry: SourcePackageRegistry) -> None:
     issues: list[ValidationIssue] = []
     instance_ids = {item.instance_id for item in profile.source_instances}
