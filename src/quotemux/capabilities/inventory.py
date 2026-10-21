@@ -352,7 +352,7 @@ def _infer_allowed_packages(capability_id: str) -> tuple[str, ...]:
     if capability_id == "stocks.quotes.intraday":
         return ("opentdx", "mootdx", "efinance", "akshare", "tushare")
     if capability_id == "stocks.quotes.daily":
-        return ("tushare", "efinance", "mootdx", "akshare", "opentdx")
+        return ("tushare", "efinance", "mootdx", "akshare", "opentdx", "a_stock_data", "free_stockdb")
     if capability_id == "indexes.quotes.daily":
         return ("tushare", "akshare", "mootdx", "opentdx")
     if capability_id == "stocks.quotes.daily_snapshot":
@@ -451,6 +451,8 @@ def _infer_source_order(capability_id: str) -> tuple[str, ...]:
         return ("derived_core",)
     if capability_id == "boards.quotes.daily":
         return ("derived_core",)
+    if capability_id == "stocks.quotes.daily":
+        return ("tushare", "efinance", "mootdx", "akshare", "opentdx")
     return _infer_allowed_packages(capability_id)
 
 
