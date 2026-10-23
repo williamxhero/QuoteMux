@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from quotemux.infra.common import format_date_value, stock_market_name
 from quotemux.infra.db.client import _acquire_connection, _release_connection
+from quotemux.infra.db.locks import acquire_stock_fact_publication_lock
 from quotemux.strict_read import reject_in_strict_public_read
 
 IDENTITY_PROVISIONAL = "provisional"
@@ -840,6 +841,7 @@ def reconcile_stock_authority_input(
     owns_connection = connection_factory is None
     try:
         with connection.cursor(row_factory=tuple_row) as cursor:
+            acquire_stock_fact_publication_lock(cursor)
             cursor.execute(
                 """
                 select input_id, input_sha256, candidate_count, existing_count,
