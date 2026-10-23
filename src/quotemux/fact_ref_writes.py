@@ -8,6 +8,7 @@ from platform_models import BoardCatalogItem, BoardMemberHistoryItem, BoardQuote
 from quotemux.common import EXPECTED_INTRADAY_BAR_TIMES
 from quotemux.infra.common import format_date_value, format_datetime_value, normalize_index_code, normalize_stock_code, stock_market_name
 from quotemux.infra.db.client import _acquire_connection, _release_connection, execute_many, execute_many_with_migration_journal, execute_sql, query_dataframe
+from quotemux.infra.db.locks import acquire_stock_fact_publication_lock
 from quotemux.stock_reference_authority import ensure_stock_reference_authority_schema
 from quotemux.strict_read import reject_in_strict_public_read
 
@@ -263,6 +264,7 @@ def _write_stock_daily_transaction(
     owns_connection = connection_factory is None
     try:
         with connection.cursor() as cursor:
+            acquire_stock_fact_publication_lock(cursor)
             cursor.executemany(
                 """
                 insert into ref.stock (
