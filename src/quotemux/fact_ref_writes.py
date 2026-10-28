@@ -984,16 +984,7 @@ def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
         params.append((item.concept_id, market, code, valid_from, item.weight))
         if item.name != "":
             stock_params.append((market, code, item.name))
-    names_ok = execute_many(
-        """
-        insert into ref.stock (market, code, name)
-        values (%s, %s, %s)
-        on conflict (market, code) do update set
-            name = case when ref.stock.name = '' then excluded.name else ref.stock.name end,
-            updated_at = now()
-        """,
-        stock_params,
-    )
+    names_ok = _fill_concept_stock_names(stock_params)
     if not names_ok:
         return False
     valid_params = _filter_concept_member_params(params)
@@ -1015,6 +1006,63 @@ def _upsert_concept_members(items: Sequence[ConceptMemberItem]) -> bool:
     return _invalidate_concept_daily_for_membership_changes(
         tuple(sorted({(str(item[0]), str(item[3])) for item in valid_params}))
     )
+
+
+def _fill_concept_stock_names(
+    stock_params: list[tuple[object, ...]],
+    *,
+    connection_factory: Callable[[], object] | None = None,
+) -> bool:
+    if not stock_params:
+        return True
+    reject_in_strict_public_read("sql_write:concept_stock_names")
+    # The first nonempty name wins when an input repeats a stock key.
+    first_names: dict[tuple[str, str], str] = {}
+    for market, code, name in stock_params:
+        first_names.setdefault((str(market), str(code)), str(name))
+    try:
+        connection = (connection_factory or _acquire_connection)()
+    except Exception as exc:
+        print(f"concept stock name connection failed: {exc}")
+        return False
+    try:
+        with connection.cursor() as cursor:
+            acquire_stock_fact_publication_lock(cursor)
+            cursor.execute(
+                """
+                select market, code, name from ref.stock
+                where (market, code) in (
+                    select * from unnest(%s::text[], %s::text[])
+                )
+                """,
+                (list(key[0] for key in first_names), list(key[1] for key in first_names)),
+            )
+            existing = {(row["market"], row["code"]): row["name"] for row in cursor.fetchall()}
+            changes = [
+                (market, code, name)
+                for (market, code), name in first_names.items()
+                if (market, code) not in existing or existing[(market, code)] == ""
+            ]
+            if changes:
+                cursor.executemany(
+                    """
+                    insert into ref.stock (market, code, name)
+                    values (%s, %s, %s)
+                    on conflict (market, code) do update set
+                        name = case when ref.stock.name = '' then excluded.name else ref.stock.name end,
+                        updated_at = now()
+                    """,
+                    changes,
+                )
+        connection.commit()
+        return True
+    except Exception as exc:
+        connection.rollback()
+        print(f"concept stock name transaction failed: {exc}")
+        return False
+    finally:
+        if connection_factory is None:
+            _release_connection(connection)
 
 
 def _filter_concept_member_params(params: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
