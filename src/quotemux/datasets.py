@@ -321,8 +321,15 @@ class QuoteMuxDatasets:
             base_items,
             ("code", "trade_time", "freq"),
             lambda items: [(_remaining_missing_codes(items), _trade_date_text(request.trade_date), _trade_date_text(request.trade_date))] if _remaining_missing_codes(items) else [],
-            SourceInstanceExecutor(self._settings).build_steps(CONTRACT_STOCK_DAILY, handlers, ("tushare", "efinance", "mootdx", "akshare")),
-            self._settings.get_contract_source_order(CONTRACT_STOCK_DAILY, ("tushare", "efinance", "mootdx", "akshare")),
+            SourceInstanceExecutor(self._settings).build_steps(
+                CONTRACT_STOCK_DAILY,
+                handlers,
+                ("tushare", "efinance", "mootdx", "akshare", "opentdx", "a_stock_data"),
+            ),
+            self._settings.get_contract_source_order(
+                CONTRACT_STOCK_DAILY,
+                ("tushare", "efinance", "mootdx", "akshare", "opentdx", "a_stock_data"),
+            ),
         )
         filled_frame = _stock_items_to_frame(merged_items)
         if not filled_frame.empty:

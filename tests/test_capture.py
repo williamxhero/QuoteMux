@@ -964,8 +964,15 @@ def test_daily_snapshot_requires_every_active_stock(monkeypatch) -> None:
     assert capture._stock_daily_fact_missing("2026-04-27") is False
 
 
-def test_daily_snapshot_default_source_order_includes_opentdx() -> None:
-    assert _infer_source_order("stocks.quotes.daily_snapshot")[-1] == "opentdx"
+def test_daily_snapshot_default_source_order_includes_alternate_full_market_provider() -> None:
+    assert _infer_source_order("stocks.quotes.daily_snapshot") == (
+        "tushare",
+        "efinance",
+        "mootdx",
+        "akshare",
+        "opentdx",
+        "a_stock_data",
+    )
 
 
 def test_report_period_requests_only_build_missing_periods(monkeypatch) -> None:

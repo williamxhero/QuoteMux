@@ -937,7 +937,11 @@ def _build_daily_snapshot_steps(settings: QuoteMuxSettings) -> tuple[ProviderSte
         "get_stock_daily_snapshot_full": lambda instance: lambda missing_codes, request_trade_date: fetch_snapshot(instance.package_id, missing_codes, request_trade_date),
         "get_stock_quotes": lambda instance: lambda missing_codes, request_trade_date: _source_package_call(instance.package_id, "get_stock_quotes", missing_codes, "1d", request_trade_date, "", "", "", "", None, "none"),
     }
-    return SourceInstanceExecutor(settings).build_steps("stocks.quotes.daily_snapshot", handlers, ("tushare", "efinance", "akshare", "mootdx", "opentdx"))
+    return SourceInstanceExecutor(settings).build_steps(
+        "stocks.quotes.daily_snapshot",
+        handlers,
+        ("tushare", "efinance", "akshare", "mootdx", "opentdx", "a_stock_data"),
+    )
 
 
 def _indicator_codes_from_params(code: str, codes: str) -> list[str]:
@@ -1165,7 +1169,10 @@ class QuoteMuxStocks:
                 sort_fields=("code", "trade_time"),
                 request_builder=lambda current_items: _build_snapshot_requests(actual_trade_date, current_items, request.limit, request.offset),
                 provider_steps=lambda: _build_daily_snapshot_steps(self._settings),
-                source_order=self._settings.get_contract_source_order("stocks.quotes.daily_snapshot", ("tushare", "efinance", "akshare", "mootdx")),
+                source_order=self._settings.get_contract_source_order(
+                    "stocks.quotes.daily_snapshot",
+                    ("tushare", "efinance", "akshare", "mootdx", "opentdx", "a_stock_data"),
+                ),
                 base_items=base_items,
                 base_source_name="fact.stock_daily_1d",
                 fact_ref_writer=None,
